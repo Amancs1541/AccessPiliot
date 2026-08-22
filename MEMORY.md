@@ -73,3 +73,14 @@ Root cause: The backend derived the v2 issuer `https://login.microsoftonline.com
 Fix: Added explicit `ENTRA_TOKEN_ISSUER` configuration and set it to the tenant-scoped v1 issuer. JWT validation retains exact issuer, audience, tenant, signature, expiry, and required-claim checks. JWKS discovery now uses the configured Microsoft login authority, independently of the token issuer format.
 
 Validation: Backend security suite passed (15 tests) with the configured v1 issuer and wrong-issuer/tenant rejection coverage; frontend production build passed. A live post-restart `/api/v1/me` verification is still required to confirm HTTP 200 and `AccessPilot.Admin` role propagation.
+
+## Phase 3 Live Provider Configuration
+Status: Implementation and automated validation passed; live database and Entra discovery validation is pending an authenticated admin form submission.
+
+Implementation: The existing Provider UI uses the existing authenticated provider APIs for load, create, update, and connection-test operations. It now selects only `ENTRA` records, maps edit data to documented writable fields, refreshes database-backed data after mutations, and presents safe save/test feedback without altering the application shell or authentication.
+
+Validation: Backend provider/authentication suite passed (15 tests); frontend production build passed. The existing backend service persists to `identity_providers` and its Entra connector performs tenant OIDC discovery from the saved record.
+
+Database: Pending live UI submission and browser refresh verification.
+
+Connection test: Pending live admin-triggered test; do not claim CONNECTED until Entra OIDC discovery succeeds.
