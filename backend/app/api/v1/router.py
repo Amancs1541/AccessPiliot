@@ -1,0 +1,35 @@
+import logging
+
+from fastapi import APIRouter, Depends, Request
+from app.api.v1.routers_placeholder import router as placeholder_router
+from app.core.config import get_settings
+from app.security.auth import AuthenticatedUser, require_permission
+from app.api.v1.providers import router as providers_router
+
+logger = logging.getLogger("accesspilot.api.v1")
+router = APIRouter(prefix="/api/v1")
+router.include_router(placeholder_router)
+router.include_router(providers_router)
+
+@router.get("/health", tags=["health"])
+async def health() -> dict[str, str]:
+    return {"status": "ok", "service": "AccessPilot"}
+
+@router.get("/me", tags=["current-user"])
+async def current_user(request: Request, user: AuthenticatedUser = Depends(require_permission("ME_READ"))) -> dict:
+    if get_settings().environment == "development":
+        logger.info(
+            "ME RESPONSE\nuser_id: %s\nroles: %s",
+            user.claims.get("oid"),
+            list(user.roles),
+            extra={"request_id": getattr(request.state, "request_id", "-")},
+        )
+    return {"id": user.subject, "displayName": user.display_name, "email": user.email, "tenantId": user.tenant_id, "roles": list(user.roles)}
+
+@router.get("/users", tags=["users"])
+async def users_placeholder(user: AuthenticatedUser = Depends(require_permission("USER_READ"))) -> dict:
+    return {"data": [], "meta": {"authorizedAs": list(user.roles)}}
+
+@router.get("/dashboard/{scope}", tags=["dashboard"])
+async def dashboard_placeholder(scope: str) -> dict:
+    return {"data": {}, "meta": {"scope": scope, "status": "foundation_only"}}

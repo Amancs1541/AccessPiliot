@@ -1,0 +1,83 @@
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class NormalizedUser:
+    external_id: str
+    email: str
+    display_name: str
+    given_name: str | None = None
+    surname: str | None = None
+    department: str | None = None
+    job_title: str | None = None
+    status: str = "ACTIVE"
+
+
+@dataclass(frozen=True)
+class NormalizedGroup:
+    external_id: str
+    name: str
+    description: str | None = None
+    is_privileged: bool = False
+    status: str = "ACTIVE"
+
+
+@dataclass(frozen=True)
+class NormalizedRole:
+    external_id: str
+    name: str
+    description: str | None = None
+    role_type: str = "DIRECTORY_ROLE"
+    is_privileged: bool = False
+    status: str = "ACTIVE"
+
+
+class IdentityProvider(ABC):
+    @abstractmethod
+    async def test_connection(self) -> bool: ...
+
+    @abstractmethod
+    async def get_users(self, query: str | None = None) -> list[NormalizedUser]: ...
+
+    @abstractmethod
+    async def get_user(self, external_id: str) -> NormalizedUser | None: ...
+
+    @abstractmethod
+    async def get_groups(self, query: str | None = None) -> list[NormalizedGroup]: ...
+
+    @abstractmethod
+    async def get_group(self, external_id: str) -> NormalizedGroup | None: ...
+
+    @abstractmethod
+    async def get_group_members(self, external_id: str) -> list[NormalizedUser]: ...
+
+    @abstractmethod
+    async def add_group_member(self, group_external_id: str, user_external_id: str) -> bool: ...
+
+    @abstractmethod
+    async def remove_group_member(self, group_external_id: str, user_external_id: str) -> bool: ...
+
+    @abstractmethod
+    async def get_roles(self, query: str | None = None) -> list[NormalizedRole]: ...
+
+    @abstractmethod
+    async def get_role(self, external_id: str) -> NormalizedRole | None: ...
+
+    @abstractmethod
+    async def get_role_assignments(self, external_role_id: str) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
+    async def activate_assignment(self, request: dict[str, Any]) -> bool: ...
+
+    @abstractmethod
+    async def revoke_assignment(self, assignment: dict[str, Any]) -> bool: ...
+
+    @abstractmethod
+    async def extend_assignment(self, assignment: dict[str, Any], duration_minutes: int) -> bool: ...
+
+    @abstractmethod
+    async def sync(self) -> dict[str, int]: ...

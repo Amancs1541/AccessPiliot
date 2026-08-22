@@ -1,0 +1,36 @@
+from __future__ import annotations
+
+from typing import Any
+
+from app.providers.base import IdentityProvider, NormalizedGroup, NormalizedRole, NormalizedUser
+
+
+class MockProvider(IdentityProvider):
+    def __init__(self) -> None:
+        self.users = [NormalizedUser("user-001", "jordan.lee@northstar.io", "Jordan Lee", "Jordan", "Lee", "Platform Engineering", "Senior Cloud Engineer"), NormalizedUser("user-002", "priya.nair@northstar.io", "Priya Nair", "Priya", "Nair", "Security", "Security Architect")]
+        self.groups = [NormalizedGroup("group-001", "Platform Engineering", "Engineering delivery team"), NormalizedGroup("group-002", "Security Operations", "Security incident response", True)]
+        self.roles = [NormalizedRole("role-001", "Production Administrator", "Elevated production operations", is_privileged=True), NormalizedRole("role-002", "Reports Reader", "Read usage and sign-in reports")]
+        self.memberships: dict[str, set[str]] = {"group-001": {"user-001"}, "group-002": {"user-002"}}
+        self.assignments: dict[str, str] = {}
+
+    async def test_connection(self) -> bool: return True
+    async def get_users(self, query: str | None = None) -> list[NormalizedUser]: return self._filter(self.users, query, lambda item: f"{item.display_name} {item.email}")
+    async def get_user(self, external_id: str) -> NormalizedUser | None: return next((item for item in self.users if item.external_id == external_id), None)
+    async def get_groups(self, query: str | None = None) -> list[NormalizedGroup]: return self._filter(self.groups, query, lambda item: f"{item.name} {item.description or ''}")
+    async def get_group(self, external_id: str) -> NormalizedGroup | None: return next((item for item in self.groups if item.external_id == external_id), None)
+    async def get_group_members(self, external_id: str) -> list[NormalizedUser]: return [user for user in self.users if user.external_id in self.memberships.get(external_id, set())]
+    async def add_group_member(self, group_external_id: str, user_external_id: str) -> bool: self.memberships.setdefault(group_external_id, set()).add(user_external_id); return True
+    async def remove_group_member(self, group_external_id: str, user_external_id: str) -> bool: self.memberships.setdefault(group_external_id, set()).discard(user_external_id); return True
+    async def get_roles(self, query: str | None = None) -> list[NormalizedRole]: return self._filter(self.roles, query, lambda item: f"{item.name} {item.description or ''}")
+    async def get_role(self, external_id: str) -> NormalizedRole | None: return next((item for item in self.roles if item.external_id == external_id), None)
+    async def get_role_assignments(self, external_role_id: str) -> list[dict[str, Any]]: return [{"user_external_id": user, "status": status} for user, status in self.assignments.items() if external_role_id]
+    async def activate_assignment(self, request: dict[str, Any]) -> bool: self.assignments[str(request["assignment_id"])] = "ACTIVE"; return True
+    async def revoke_assignment(self, assignment: dict[str, Any]) -> bool: self.assignments[str(assignment["assignment_id"])] = "REVOKED"; return True
+    async def extend_assignment(self, assignment: dict[str, Any], duration_minutes: int) -> bool: return assignment.get("status") == "ACTIVE" and duration_minutes > 0
+    async def sync(self) -> dict[str, int]: return {"users": len(self.users), "groups": len(self.groups), "roles": len(self.roles), "errors": 0}
+
+    @staticmethod
+    def _filter(items: list[Any], query: str | None, text: Any) -> list[Any]:
+        if not query: return items.copy()
+        query = query.lower()
+        return [item for item in items if query in text(item).lower()]
