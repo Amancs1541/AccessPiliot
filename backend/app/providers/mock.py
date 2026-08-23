@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.providers.base import CreatedUser, IdentityProvider, NewGroupRequest, NewUserRequest, NormalizedGroup, NormalizedRole, NormalizedUser, ProviderConflictError
+from app.providers.base import CreatedUser, IdentityProvider, NewGroupRequest, NewUserRequest, NormalizedApplication, NormalizedApplicationRole, NormalizedGroup, NormalizedRole, NormalizedUser, ProviderConflictError
 
 
 class MockProvider(IdentityProvider):
@@ -10,7 +10,9 @@ class MockProvider(IdentityProvider):
         self.users = [NormalizedUser("user-001", "jordan.lee@northstar.io", "Jordan Lee", "Jordan", "Lee", "Platform Engineering", "Senior Cloud Engineer"), NormalizedUser("user-002", "priya.nair@northstar.io", "Priya Nair", "Priya", "Nair", "Security", "Security Architect")]
         self.groups = [NormalizedGroup("group-001", "Platform Engineering", "Engineering delivery team"), NormalizedGroup("group-002", "Security Operations", "Security incident response", True)]
         self.roles = [NormalizedRole("role-001", "Production Administrator", "Elevated production operations", is_privileged=True), NormalizedRole("role-002", "Reports Reader", "Read usage and sign-in reports")]
+        self.applications = [NormalizedApplication("app-001", "Reporting Portal", app_roles=(NormalizedApplicationRole("approle-001", "Viewer", "Read-only access"), NormalizedApplicationRole("approle-002", "Editor", "Read-write access")))]
         self.memberships: dict[str, set[str]] = {"group-001": {"user-001"}, "group-002": {"user-002"}}
+        self.app_role_assignments: set[tuple[str, str, str]] = set()
         self.assignments: dict[str, str] = {}
 
     async def test_connection(self) -> bool: return True
@@ -24,8 +26,24 @@ class MockProvider(IdentityProvider):
     async def get_roles(self, query: str | None = None) -> list[NormalizedRole]: return self._filter(self.roles, query, lambda item: f"{item.name} {item.description or ''}")
     async def get_role(self, external_id: str) -> NormalizedRole | None: return next((item for item in self.roles if item.external_id == external_id), None)
     async def get_role_assignments(self, external_role_id: str) -> list[dict[str, Any]]: return [{"user_external_id": user, "status": status} for user, status in self.assignments.items() if external_role_id]
-    async def activate_assignment(self, request: dict[str, Any]) -> bool: self.assignments[str(request["assignment_id"])] = "ACTIVE"; return True
-    async def revoke_assignment(self, assignment: dict[str, Any]) -> bool: self.assignments[str(assignment["assignment_id"])] = "REVOKED"; return True
+    async def get_applications(self, query: str | None = None) -> list[NormalizedApplication]: return self._filter(self.applications, query, lambda item: item.name)
+    async def activate_assignment(self, request: dict[str, Any]) -> bool:
+        if request.get("resource_type") == "GROUP" and request.get("target_external_id") and request.get("user_external_id"):
+            await self.add_group_member(request["target_external_id"], request["user_external_id"])
+        if request.get("resource_type") == "APPLICATION" and request.get("target_external_id") and request.get("app_role_external_id") and request.get("user_external_id"):
+            self.app_role_assignments.add((request["target_external_id"], request["app_role_external_id"], request["user_external_id"]))
+        if "assignment_id" in request:
+            self.assignments[str(request["assignment_id"])] = "ACTIVE"
+        return True
+
+    async def revoke_assignment(self, assignment: dict[str, Any]) -> bool:
+        if assignment.get("resource_type") == "GROUP" and assignment.get("target_external_id") and assignment.get("user_external_id"):
+            await self.remove_group_member(assignment["target_external_id"], assignment["user_external_id"])
+        if assignment.get("resource_type") == "APPLICATION" and assignment.get("target_external_id") and assignment.get("app_role_external_id") and assignment.get("user_external_id"):
+            self.app_role_assignments.discard((assignment["target_external_id"], assignment["app_role_external_id"], assignment["user_external_id"]))
+        if "assignment_id" in assignment:
+            self.assignments[str(assignment["assignment_id"])] = "REVOKED"
+        return True
     async def extend_assignment(self, assignment: dict[str, Any], duration_minutes: int) -> bool: return assignment.get("status") == "ACTIVE" and duration_minutes > 0
     async def sync(self) -> dict[str, int]: return {"users": len(self.users), "groups": len(self.groups), "roles": len(self.roles), "errors": 0}
 

@@ -36,6 +36,21 @@ class NormalizedRole:
     status: str = "ACTIVE"
 
 
+@dataclass(frozen=True)
+class NormalizedApplicationRole:
+    external_id: str
+    name: str
+    description: str | None = None
+
+
+@dataclass(frozen=True)
+class NormalizedApplication:
+    external_id: str
+    name: str
+    status: str = "ACTIVE"
+    app_roles: tuple[NormalizedApplicationRole, ...] = ()
+
+
 class ProviderConflictError(Exception):
     """Raised by a connector when a create operation targets a resource that already exists."""
 
@@ -95,6 +110,9 @@ class IdentityProvider(ABC):
 
     @abstractmethod
     async def get_role_assignments(self, external_role_id: str) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
+    async def get_applications(self, query: str | None = None) -> list[NormalizedApplication]: ...
 
     @abstractmethod
     async def activate_assignment(self, request: dict[str, Any]) -> bool: ...

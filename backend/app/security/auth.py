@@ -29,6 +29,15 @@ class AuthenticatedUser:
     roles: tuple[str, ...]
     claims: dict
 
+    @property
+    def directory_object_id(self) -> str:
+        """The actual Entra/Graph object ID (the `oid` claim) — matches `users.external_id` from directory sync.
+
+        `subject` (the `sub` claim) is a per-application pairwise identifier and does NOT match the Graph object ID;
+        never use it to correlate the signed-in actor against synced directory rows.
+        """
+        return str(self.claims.get("oid") or self.subject)
+
 bearer = HTTPBearer(auto_error=False)
 
 

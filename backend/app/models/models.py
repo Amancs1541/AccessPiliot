@@ -64,6 +64,14 @@ class Role(Base):
     __table_args__ = (UniqueConstraint("provider_id", "external_id", name="uq_roles_provider_external"), Index("ix_roles_provider_external", "provider_id", "external_id"))
 
 
+class Application(Base):
+    __tablename__ = "applications"
+    id: Mapped[UUID] = uuid_pk(); provider_id: Mapped[UUID] = mapped_column(ForeignKey("identity_providers.id"), nullable=False); external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False); status: Mapped[str] = mapped_column(String(50), nullable=False); app_roles: Mapped[Optional[list]] = mapped_column("app_roles", JSON)
+    created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at(); last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (UniqueConstraint("provider_id", "external_id", name="uq_applications_provider_external"), Index("ix_applications_provider_external", "provider_id", "external_id"))
+
+
 class UserGroup(Base):
     __tablename__ = "user_groups"
     id: Mapped[UUID] = uuid_pk(); user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False); group_id: Mapped[UUID] = mapped_column(ForeignKey("groups.id"), nullable=False); source: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -77,7 +85,7 @@ class RoleAssignment(Base):
 
 class AccessAssignment(Base):
     __tablename__ = "access_assignments"
-    id: Mapped[UUID] = uuid_pk(); provider_id: Mapped[UUID] = mapped_column(ForeignKey("identity_providers.id"), nullable=False); user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False); resource_type: Mapped[str] = mapped_column(String(50), nullable=False); resource_id: Mapped[UUID] = mapped_column(Uuid, nullable=False); assignment_type: Mapped[str] = mapped_column(String(50), nullable=False); status: Mapped[str] = mapped_column(String(50), nullable=False); start_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); expiration_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); justification: Mapped[Optional[str]] = mapped_column(Text); ticket_number: Mapped[Optional[str]] = mapped_column(String(100)); requested_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); approved_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); activated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at(); __table_args__ = (Index("ix_access_assignments_user", "user_id"), Index("ix_access_assignments_status", "status"), Index("ix_access_assignments_expiration", "expiration_time"))
+    id: Mapped[UUID] = uuid_pk(); provider_id: Mapped[UUID] = mapped_column(ForeignKey("identity_providers.id"), nullable=False); user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False); resource_type: Mapped[str] = mapped_column(String(50), nullable=False); resource_id: Mapped[UUID] = mapped_column(Uuid, nullable=False); app_role_external_id: Mapped[Optional[str]] = mapped_column(String(100)); assignment_type: Mapped[str] = mapped_column(String(50), nullable=False); status: Mapped[str] = mapped_column(String(50), nullable=False); start_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); expiration_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); justification: Mapped[Optional[str]] = mapped_column(Text); ticket_number: Mapped[Optional[str]] = mapped_column(String(100)); requested_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); approved_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); activated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at(); __table_args__ = (Index("ix_access_assignments_user", "user_id"), Index("ix_access_assignments_status", "status"), Index("ix_access_assignments_expiration", "expiration_time"))
 
 
 class AccessRequest(Base):

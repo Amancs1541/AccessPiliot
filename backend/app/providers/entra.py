@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 
 from app.core.config import get_settings
-from app.providers.base import CreatedUser, IdentityProvider, NewGroupRequest, NewUserRequest, NormalizedGroup, NormalizedRole, NormalizedUser, ProviderConflictError
+from app.providers.base import CreatedUser, IdentityProvider, NewGroupRequest, NewUserRequest, NormalizedApplication, NormalizedApplicationRole, NormalizedGroup, NormalizedRole, NormalizedUser, ProviderConflictError
 from app.providers.graph_client import GraphClient, GraphCredentials, GraphError
 from app.security.credential_encryption import CredentialEncryptionError, decrypt_credential
 from app.security.secrets import SecretReferenceStore
@@ -14,6 +14,8 @@ from app.security.secrets import SecretReferenceStore
 USER_SELECT = "id,userPrincipalName,mail,displayName,givenName,surname,department,jobTitle,accountEnabled"
 GROUP_SELECT = "id,displayName,description,securityEnabled,isAssignableToRole"
 ROLE_SELECT = "id,displayName,description"
+APPLICATION_SELECT = "id,displayName,accountEnabled,appRoles"
+DEFAULT_APP_ROLE_ID = "00000000-0000-0000-0000-000000000000"
 
 
 def _odata_escape(value: str) -> str:
@@ -105,6 +107,13 @@ class EntraProvider(IdentityProvider):
         name = item.get("displayName") or ""
         return NormalizedRole(external_id=item["id"], name=name, description=item.get("description"), role_type="DIRECTORY_ROLE", is_privileged="administrator" in name.lower())
 
+    @staticmethod
+    def _application_from_graph(item: dict[str, Any]) -> NormalizedApplication:
+        app_roles = [NormalizedApplicationRole(external_id=role["id"], name=role.get("displayName") or "Unnamed role", description=role.get("description")) for role in item.get("appRoles", []) if role.get("isEnabled", True)]
+        if not app_roles:
+            app_roles = [NormalizedApplicationRole(external_id=DEFAULT_APP_ROLE_ID, name="Default Access", description="Basic access with no application-defined role.")]
+        return NormalizedApplication(external_id=item["id"], name=item.get("displayName") or "", status="ACTIVE" if item.get("accountEnabled", True) else "DISABLED", app_roles=tuple(app_roles))
+
     async def get_users(self, query: str | None = None) -> list[NormalizedUser]:
         params: dict[str, Any] = {"$select": USER_SELECT, "$top": "999"}
         headers: dict[str, str] | None = None
@@ -145,8 +154,45 @@ class EntraProvider(IdentityProvider):
             items = await client.get_all(f"/groups/{external_id}/members", params=params)
         return [self._user_from_graph(item) for item in items if item.get("@odata.type", "#microsoft.graph.user") == "#microsoft.graph.user"]
 
-    async def add_group_member(self, group_external_id: str, user_external_id: str) -> bool: return await self._not_implemented()
-    async def remove_group_member(self, group_external_id: str, user_external_id: str) -> bool: return await self._not_implemented()
+    async def add_group_member(self, group_external_id: str, user_external_id: str) -> bool:
+        async with self._client() as client:
+            try:
+                await client.request("POST", f"/groups/{group_external_id}/members/$ref", json={"@odata.id": f"https://graph.microsoft.com/v1.0/directoryObjects/{user_external_id}"})
+            except GraphError as exc:
+                if exc.code == "PROVIDER_CONFLICT":
+                    return True
+                raise
+        return True
+
+    async def remove_group_member(self, group_external_id: str, user_external_id: str) -> bool:
+        async with self._client() as client:
+            try:
+                await client.request("DELETE", f"/groups/{group_external_id}/members/{user_external_id}/$ref")
+            except GraphError as exc:
+                if exc.code == "PROVIDER_RESOURCE_NOT_FOUND":
+                    return True
+                raise
+        return True
+
+    async def _add_role_member(self, role_external_id: str, user_external_id: str) -> bool:
+        async with self._client() as client:
+            try:
+                await client.request("POST", f"/directoryRoles/{role_external_id}/members/$ref", json={"@odata.id": f"https://graph.microsoft.com/v1.0/directoryObjects/{user_external_id}"})
+            except GraphError as exc:
+                if exc.code == "PROVIDER_CONFLICT":
+                    return True
+                raise
+        return True
+
+    async def _remove_role_member(self, role_external_id: str, user_external_id: str) -> bool:
+        async with self._client() as client:
+            try:
+                await client.request("DELETE", f"/directoryRoles/{role_external_id}/members/{user_external_id}/$ref")
+            except GraphError as exc:
+                if exc.code == "PROVIDER_RESOURCE_NOT_FOUND":
+                    return True
+                raise
+        return True
 
     async def get_roles(self, query: str | None = None) -> list[NormalizedRole]:
         async with self._client() as client:
@@ -163,8 +209,77 @@ class EntraProvider(IdentityProvider):
         return self._role_from_graph(item) if item else None
 
     async def get_role_assignments(self, external_role_id: str) -> list[dict[str, Any]]: return await self._not_implemented()
-    async def activate_assignment(self, request: dict[str, Any]) -> bool: return await self._not_implemented()
-    async def revoke_assignment(self, assignment: dict[str, Any]) -> bool: return await self._not_implemented()
+
+    async def get_applications(self, query: str | None = None) -> list[NormalizedApplication]:
+        params: dict[str, Any] = {"$select": APPLICATION_SELECT, "$top": "999"}
+        headers: dict[str, str] | None = None
+        if query:
+            escaped = _odata_escape(query)
+            params["$filter"] = f"startswith(displayName,'{escaped}')"
+            headers = {"ConsistencyLevel": "eventual"}
+            params["$count"] = "true"
+        async with self._client() as client:
+            items = await client.get_all("/servicePrincipals", params=params, headers=headers)
+        return [self._application_from_graph(item) for item in items]
+
+    async def _add_app_role_assignment(self, resource_external_id: str, app_role_external_id: str, user_external_id: str) -> bool:
+        async with self._client() as client:
+            try:
+                await client.request("POST", f"/users/{user_external_id}/appRoleAssignments", json={"principalId": user_external_id, "resourceId": resource_external_id, "appRoleId": app_role_external_id})
+            except GraphError as exc:
+                if exc.code == "PROVIDER_CONFLICT":
+                    return True
+                raise
+        return True
+
+    async def _remove_app_role_assignment(self, resource_external_id: str, app_role_external_id: str, user_external_id: str) -> bool:
+        async with self._client() as client:
+            assignments = await client.get_all(f"/users/{user_external_id}/appRoleAssignments")
+            match = next((item for item in assignments if item.get("resourceId") == resource_external_id and item.get("appRoleId") == app_role_external_id), None)
+            if match is None:
+                return True
+            try:
+                await client.request("DELETE", f"/users/{user_external_id}/appRoleAssignments/{match['id']}")
+            except GraphError as exc:
+                if exc.code == "PROVIDER_RESOURCE_NOT_FOUND":
+                    return True
+                raise
+        return True
+
+    async def activate_assignment(self, request: dict[str, Any]) -> bool:
+        resource_type = request.get("resource_type")
+        target_external_id = request.get("target_external_id")
+        user_external_id = request.get("user_external_id")
+        if not resource_type or not target_external_id or not user_external_id:
+            raise GraphError("VALIDATION_ERROR", "Assignment activation requires resource_type, target_external_id, and user_external_id.", 400)
+        if resource_type == "GROUP":
+            return await self.add_group_member(target_external_id, user_external_id)
+        if resource_type == "ROLE":
+            return await self._add_role_member(target_external_id, user_external_id)
+        if resource_type == "APPLICATION":
+            app_role_external_id = request.get("app_role_external_id")
+            if not app_role_external_id:
+                raise GraphError("VALIDATION_ERROR", "Application assignment activation requires app_role_external_id.", 400)
+            return await self._add_app_role_assignment(target_external_id, app_role_external_id, user_external_id)
+        raise GraphError("VALIDATION_ERROR", f"Unsupported assignment resource type: {resource_type}", 400)
+
+    async def revoke_assignment(self, assignment: dict[str, Any]) -> bool:
+        resource_type = assignment.get("resource_type")
+        target_external_id = assignment.get("target_external_id")
+        user_external_id = assignment.get("user_external_id")
+        if not resource_type or not target_external_id or not user_external_id:
+            raise GraphError("VALIDATION_ERROR", "Assignment revocation requires resource_type, target_external_id, and user_external_id.", 400)
+        if resource_type == "GROUP":
+            return await self.remove_group_member(target_external_id, user_external_id)
+        if resource_type == "ROLE":
+            return await self._remove_role_member(target_external_id, user_external_id)
+        if resource_type == "APPLICATION":
+            app_role_external_id = assignment.get("app_role_external_id")
+            if not app_role_external_id:
+                raise GraphError("VALIDATION_ERROR", "Application assignment revocation requires app_role_external_id.", 400)
+            return await self._remove_app_role_assignment(target_external_id, app_role_external_id, user_external_id)
+        raise GraphError("VALIDATION_ERROR", f"Unsupported assignment resource type: {resource_type}", 400)
+
     async def extend_assignment(self, assignment: dict[str, Any], duration_minutes: int) -> bool: return await self._not_implemented()
 
     async def sync(self) -> dict[str, int]:

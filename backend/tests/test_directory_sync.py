@@ -32,6 +32,7 @@ class FakeConnector(IdentityProviderProtocol):
     async def get_roles(self, query=None): return self._roles
     async def get_role(self, external_id): return next((r for r in self._roles if r.external_id == external_id), None)
     async def get_role_assignments(self, external_role_id): return []
+    async def get_applications(self, query=None): return []
     async def activate_assignment(self, request): return True
     async def revoke_assignment(self, assignment): return True
     async def extend_assignment(self, assignment, duration_minutes): return True

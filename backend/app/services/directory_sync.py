@@ -7,8 +7,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AccessPilotError
-from app.models import Group, IdentityProvider, Role, SyncError, SyncRun, User, UserGroup
-from app.providers.base import NormalizedGroup, NormalizedRole, NormalizedUser
+from app.models import Application, Group, IdentityProvider, Role, SyncError, SyncRun, User, UserGroup
+from app.providers.base import NormalizedApplication, NormalizedGroup, NormalizedRole, NormalizedUser
 from app.providers.graph_client import GraphError
 from app.services.audit import record_audit
 from app.services.provider_configuration import _connector
@@ -47,6 +47,19 @@ async def upsert_role(session: AsyncSession, provider_id: UUID, normalized: Norm
         session.add(row)
     else:
         row.name, row.description, row.role_type, row.is_privileged, row.status, row.last_synced_at = normalized.name, normalized.description, normalized.role_type, normalized.is_privileged, normalized.status, now
+    await session.flush()
+    return row
+
+
+async def upsert_application(session: AsyncSession, provider_id: UUID, normalized: NormalizedApplication) -> Application:
+    row = (await session.execute(select(Application).where(Application.provider_id == provider_id, Application.external_id == normalized.external_id))).scalar_one_or_none()
+    now = datetime.now(timezone.utc)
+    app_roles_json = [{"id": role.external_id, "name": role.name, "description": role.description} for role in normalized.app_roles]
+    if row is None:
+        row = Application(provider_id=provider_id, external_id=normalized.external_id, name=normalized.name, status=normalized.status, app_roles=app_roles_json, last_synced_at=now)
+        session.add(row)
+    else:
+        row.name, row.status, row.app_roles, row.last_synced_at = normalized.name, normalized.status, app_roles_json, now
     await session.flush()
     return row
 
@@ -101,6 +114,10 @@ async def run_sync(session: AsyncSession, provider: IdentityProvider, request_id
         for normalized_role in roles:
             await upsert_role(session, provider.id, normalized_role)
 
+        applications = await connector.get_applications()
+        for normalized_application in applications:
+            await upsert_application(session, provider.id, normalized_application)
+
         sync_run.status = "COMPLETED"
         sync_run.completed_at = datetime.now(timezone.utc)
         sync_run.users_processed = len(users)
@@ -113,7 +130,8 @@ async def run_sync(session: AsyncSession, provider: IdentityProvider, request_id
         await record_audit(session, action="GROUP_SYNCED", target_type="PROVIDER", target_id=provider.id, provider_id=provider.id, request_id=request_id, metadata={"count": len(groups)})
         await record_audit(session, action="GROUP_MEMBERSHIP_SYNCED", target_type="PROVIDER", target_id=provider.id, provider_id=provider.id, request_id=request_id)
         await record_audit(session, action="ROLE_SYNCED", target_type="PROVIDER", target_id=provider.id, provider_id=provider.id, request_id=request_id, metadata={"count": len(roles)})
-        await record_audit(session, action="SYNC_COMPLETED", target_type="PROVIDER", target_id=provider.id, provider_id=provider.id, request_id=request_id, metadata={"users": len(users), "groups": len(groups), "roles": len(roles), "errors": errors_count})
+        await record_audit(session, action="APPLICATION_SYNCED", target_type="PROVIDER", target_id=provider.id, provider_id=provider.id, request_id=request_id, metadata={"count": len(applications)})
+        await record_audit(session, action="SYNC_COMPLETED", target_type="PROVIDER", target_id=provider.id, provider_id=provider.id, request_id=request_id, metadata={"users": len(users), "groups": len(groups), "roles": len(roles), "applications": len(applications), "errors": errors_count})
         await session.commit()
         await session.refresh(sync_run)
         return sync_run
