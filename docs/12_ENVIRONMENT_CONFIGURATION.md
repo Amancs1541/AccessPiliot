@@ -29,7 +29,11 @@ GRAPH_BASE_URL=https://graph.microsoft.com/v1.0
 FRONTEND_URL=http://localhost:5173
 
 PROVIDER_MODE=mock
+
+PROVIDER_CREDENTIAL_KEY=
 ```
+
+`PROVIDER_CREDENTIAL_KEY` (added Phase 4) is a symmetric encryption key (Fernet) used only to encrypt/decrypt provider connector credentials (e.g. the Microsoft Graph client secret) stored in `identity_providers.graph_client_secret_encrypted`. It protects database-at-rest credential data; it is not itself a provider credential. Losing or rotating it invalidates previously stored provider secrets, which must then be re-entered via the Providers UI.
 
 ## Rules
 

@@ -36,6 +36,32 @@ class NormalizedRole:
     status: str = "ACTIVE"
 
 
+class ProviderConflictError(Exception):
+    """Raised by a connector when a create operation targets a resource that already exists."""
+
+
+@dataclass(frozen=True)
+class NewUserRequest:
+    display_name: str
+    user_principal_name: str
+    mail_nickname: str
+    department: str | None = None
+    job_title: str | None = None
+
+
+@dataclass(frozen=True)
+class NewGroupRequest:
+    display_name: str
+    description: str | None = None
+    mail_nickname: str | None = None
+
+
+@dataclass(frozen=True)
+class CreatedUser:
+    user: NormalizedUser
+    temporary_password: str | None = None
+
+
 class IdentityProvider(ABC):
     @abstractmethod
     async def test_connection(self) -> bool: ...
@@ -81,3 +107,9 @@ class IdentityProvider(ABC):
 
     @abstractmethod
     async def sync(self) -> dict[str, int]: ...
+
+    @abstractmethod
+    async def create_user(self, request: NewUserRequest) -> CreatedUser: ...
+
+    @abstractmethod
+    async def create_group(self, request: NewGroupRequest) -> NormalizedGroup: ...

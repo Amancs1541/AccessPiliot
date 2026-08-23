@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.providers.base import IdentityProvider, NormalizedGroup, NormalizedRole, NormalizedUser
+from app.providers.base import CreatedUser, IdentityProvider, NewGroupRequest, NewUserRequest, NormalizedGroup, NormalizedRole, NormalizedUser, ProviderConflictError
 
 
 class MockProvider(IdentityProvider):
@@ -28,6 +28,21 @@ class MockProvider(IdentityProvider):
     async def revoke_assignment(self, assignment: dict[str, Any]) -> bool: self.assignments[str(assignment["assignment_id"])] = "REVOKED"; return True
     async def extend_assignment(self, assignment: dict[str, Any], duration_minutes: int) -> bool: return assignment.get("status") == "ACTIVE" and duration_minutes > 0
     async def sync(self) -> dict[str, int]: return {"users": len(self.users), "groups": len(self.groups), "roles": len(self.roles), "errors": 0}
+
+    async def create_user(self, request: NewUserRequest) -> CreatedUser:
+        if any(user.email.lower() == request.user_principal_name.lower() for user in self.users):
+            raise ProviderConflictError("A user with this email already exists.")
+        user = NormalizedUser(f"user-{len(self.users) + 1:03d}", request.user_principal_name, request.display_name, department=request.department, job_title=request.job_title)
+        self.users.append(user)
+        return CreatedUser(user=user, temporary_password="Mock-Only-Password-1!")
+
+    async def create_group(self, request: NewGroupRequest) -> NormalizedGroup:
+        if any(group.name.lower() == request.display_name.lower() for group in self.groups):
+            raise ProviderConflictError("A group with this name already exists.")
+        group = NormalizedGroup(f"group-{len(self.groups) + 1:03d}", request.display_name, request.description)
+        self.groups.append(group)
+        self.memberships.setdefault(group.external_id, set())
+        return group
 
     @staticmethod
     def _filter(items: list[Any], query: str | None, text: Any) -> list[Any]:

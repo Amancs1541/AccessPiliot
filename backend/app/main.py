@@ -1,4 +1,8 @@
+from __future__ import annotations
+
+import asyncio
 import logging
+from contextlib import asynccontextmanager
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
@@ -9,6 +13,8 @@ from app.api.v1.router import router as v1_router
 from app.core.config import get_settings
 from app.core.errors import AccessPilotError, access_pilot_error_handler, http_error_handler, unhandled_error_handler, validation_error_handler
 from app.core.logging import configure_logging
+from app.db.session import AsyncSessionLocal
+from app.workers.scheduler import sync_scheduler_loop
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -25,7 +31,17 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         return response
 
 
-app = FastAPI(title=settings.app_name, version="0.1.0", docs_url="/docs" if settings.environment != "production" else None)
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    scheduler_task: asyncio.Task | None = None
+    if settings.environment != "test":
+        scheduler_task = asyncio.create_task(sync_scheduler_loop(AsyncSessionLocal))
+    yield
+    if scheduler_task is not None:
+        scheduler_task.cancel()
+
+
+app = FastAPI(title=settings.app_name, version="0.1.0", docs_url="/docs" if settings.environment != "production" else None, lifespan=lifespan)
 app.add_middleware(RequestIdMiddleware)
 app.add_middleware(CORSMiddleware, allow_origins=[settings.frontend_url], allow_credentials=False, allow_methods=["GET", "POST", "PATCH", "DELETE"], allow_headers=["Content-Type", "X-Request-ID", "Authorization"])
 app.add_exception_handler(AccessPilotError, access_pilot_error_handler)

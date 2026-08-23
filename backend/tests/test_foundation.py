@@ -19,10 +19,11 @@ async def test_health_and_request_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_validation_error_uses_contract() -> None:
+async def test_unknown_dashboard_scope_returns_not_found() -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/dashboard/not-a-problem", headers={"X-Request-ID": "validation-1"})
-    assert response.status_code == 200
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "RESOURCE_NOT_FOUND"
 
 
 @pytest.mark.asyncio

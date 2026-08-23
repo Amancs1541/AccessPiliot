@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     graph_base_url: str = "https://graph.microsoft.com/v1.0"
     frontend_url: str = "http://localhost:5173"
     provider_mode: Literal["mock", "entra"] = "mock"
+    provider_credential_key: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 

@@ -29,7 +29,13 @@ class IdentityProvider(Base):
     type: Mapped[str] = mapped_column(String(50), nullable=False); status: Mapped[str] = mapped_column(String(50), nullable=False)
     tenant_id: Mapped[str] = mapped_column(String(200), nullable=False); organization_url: Mapped[Optional[str]] = mapped_column(String(500))
     configuration_ref: Mapped[Optional[str]] = mapped_column(String(500)); client_id: Mapped[Optional[str]] = mapped_column(String(255)); authority: Mapped[Optional[str]] = mapped_column(String(500)); api_audience: Mapped[Optional[str]] = mapped_column(String(500)); api_scope: Mapped[Optional[str]] = mapped_column(String(500)); redirect_uri_metadata: Mapped[Optional[dict]] = mapped_column("redirect_uri_metadata", JSON); last_sync_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    graph_client_id: Mapped[Optional[str]] = mapped_column(String(255)); graph_client_secret_encrypted: Mapped[Optional[str]] = mapped_column(Text)
+    sync_interval_minutes: Mapped[Optional[int]] = mapped_column(Integer)
     created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at()
+
+    @property
+    def credential_configured(self) -> bool:
+        return bool(self.graph_client_secret_encrypted)
 
 
 class User(Base):

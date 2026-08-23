@@ -84,3 +84,48 @@ Validation: Backend provider/authentication suite passed (15 tests); frontend pr
 Database: Pending live UI submission and browser refresh verification.
 
 Connection test: Pending live admin-triggered test; do not claim CONNECTED until Entra OIDC discovery succeeds.
+
+## Phase 4 — Real Entra Directory Integration
+
+Status: PARTIAL. Code, tests, and DB-backed reads/writes are implemented and passing; live Microsoft Graph calls are blocked because no Graph client secret is configured (see Known limitations).
+
+Implemented:
+- `EntraProvider` now performs real Microsoft Graph application-permission calls (client-credentials flow via a new `app/providers/graph_client.py`) for `get_users`, `get_user`, `get_groups`, `get_group`, `get_group_members`, `get_roles`, `get_role`, `create_user`, `create_group`, with `@odata.nextLink` pagination and Graph error mapping to the documented stable error codes (401/403/404/409/429/5xx/timeout).
+- New `app/services/directory_sync.py`: idempotent sync orchestration keyed on `(provider_id, external_id)` for users/groups/roles, stale group-membership removal on successful re-sync, per-run `sync_runs`/`sync_errors` persistence, and audit events (`SYNC_STARTED/COMPLETED/FAILED`, `USER_SYNCED`, `GROUP_SYNCED`, `GROUP_MEMBERSHIP_SYNCED`, `ROLE_SYNCED`).
+- Real endpoints replacing prior stubs: `GET/POST /api/v1/users`, `GET /api/v1/users/{id}`, `GET/POST /api/v1/groups`, `GET /api/v1/groups/{id}`, `GET /api/v1/groups/{id}/members`, `GET /api/v1/roles`, `GET /api/v1/dashboard/admin` (real PostgreSQL counts + provider/last-sync status), `POST /api/v1/providers/{id}/sync`, `GET /api/v1/providers/{id}/sync-runs`.
+- Duplicate detection: user create checks Graph for an existing `userPrincipalName` before creating (409 `USER_ALREADY_EXISTS`); group create checks Graph for an existing `displayName` (409 `GROUP_ALREADY_EXISTS`). New users get a server-generated one-time temporary password returned only in the create response, never stored or logged.
+- Frontend: Users, Groups, Roles pages and the admin Dashboard now read from the real APIs via `auth.apiRequest` (same pattern as the existing Providers page) with Loading/Empty/Error states and no fake fallback data; Users/Groups pages gained working "Add user"/"Add group" forms; Sync page now shows real `sync_runs` and has a working "Sync now" button. Visual layout/shell/styling unchanged.
+- Roles remain strictly read-only; no group-membership write, JIT, PIM, approval, or entitlement code was added, per the Phase 4 boundary.
+
+Graph permissions: User confirmed `User.Read.All`, `Group.Read.All`, `RoleManagement.Read.Directory`, `User.ReadWrite.All`, `Group.ReadWrite.All` are already granted and admin-consented on the Entra API app registration. This was not independently re-verified from this repository/session.
+
+Database: No schema changes were required — all 15 existing tables already supported Phase 4 (confirmed live against the connected PostgreSQL instance). No new Alembic migration was added.
+
+Live validation: NOT performed. `backend/.env`'s `ENTRA_API_CLIENT_SECRET` is empty and `identity_providers.configuration_ref` is `NULL` for the one live ENTRA provider row (verified directly against the database) — the backend cannot obtain a Microsoft Graph application token until a real secret is supplied. All new code paths are covered by tests using mocked Graph HTTP responses (`httpx.MockTransport`) instead. Full backend suite: 49 passed. Frontend `npm run build` passed.
+
+Known limitations:
+- Per-user group membership count and last-sign-in are not shown (would require extra Graph permissions/endpoints out of scope for Phase 4); the Users/User-detail pages omit these columns rather than fabricate them.
+- `/api/v1/dashboard/user` and JIT-related admin dashboard stat cards (active sessions, pending requests, expiring access, policy coverage) remain explicitly out of scope and show "—" rather than fake numbers.
+
+## Phase 4 — Graph Credential Architecture (supersedes the env-var approach above)
+
+The Graph client secret is no longer read from `ENTRA_API_CLIENT_SECRET`/`.env` for the database-backed flow. `identity_providers` gained `graph_client_id` (plain) and `graph_client_secret_encrypted` (Fernet-encrypted, migration `0003_provider_graph_credentials`) — PostgreSQL is the source of truth, matching the pre-existing architecture decision. A separate, non-secret-specific `PROVIDER_CREDENTIAL_KEY` env var (generated once, stored in `backend/.env`) is the encryption master key protecting that column; it is not itself a Graph credential. `PATCH /api/v1/providers/{id}/credentials` (admin-only) accepts `{graph_client_id?, graph_client_secret}`, encrypts before storing, and never returns the secret in any response — `GET`/`LIST` providers only ever expose `graph_client_id` and a `credential_configured: bool`. `EntraProvider._resolve_secret()` decrypts the DB column first, falling back to the legacy `configuration_ref`/env-var path only for backward compatibility. The Providers UI (`ProviderConfiguration.tsx`) has "Graph Client ID" / "Graph Client Secret" fields wired to this endpoint, showing only Configured/Not configured.
+
+Earlier iterations of this feature (a `POST /{id}/secret` route, then writing to `.env` via `SecretReferenceStore`) were built and then removed during this same phase — the codebase now only contains the credentials-endpoint/DB-encrypted version described above.
+
+## Phase 4 — Provider Reset & delete_provider Bug Fix
+
+Two real, pre-existing bugs were found and fixed while resetting the stale Entra provider record used during Phase 4 testing:
+1. `test_provider()`/`EntraProvider.test_connection()`: `_resolve_secret()` returned `""` instead of `None` when no secret was configured anywhere, so the "no secret yet, but OIDC succeeded" short-circuit never fired and a spurious Graph-auth check ran and failed, forcing status to `ERROR` even when Entra connectivity was actually fine. Fixed by returning `None` for the empty case. Verified directly against the real tenant: `test_provider()` now correctly returns `CONNECTED` for OIDC-only verification when no Graph secret is set yet.
+2. `delete_provider()` inserted its `PROVIDER_DELETED` audit row (referencing the provider being deleted) in the same transaction as the delete itself, which self-violates the `audit_logs.provider_id` FK on real PostgreSQL (masked by the test suite, which runs on SQLite without FK enforcement by default). Fixed: it now nulls `provider_id` on any pre-existing `audit_logs` rows referencing the provider (rows are preserved, never deleted — only the FK is cleared), deletes dependent `sync_runs`/`sync_errors` (not audit-protected), and only then deletes the provider row and inserts the `PROVIDER_DELETED` audit entry with `provider_id=NULL`/`target_id=<deleted id>`. If the provider still has synced `users`/`groups`/`roles` (a real, NOT-NULL FK with no safe way to null it), deletion now fails cleanly with `PROVIDER_CONFLICT` (409) instead of a raw 500 — this intentionally blocks silently cascading away real synced directory data. Added a regression test (`test_delete_provider_succeeds_with_foreign_keys_enforced_and_dependent_audit_rows`) that enables SQLite FK enforcement specifically to catch this class of bug going forward.
+
+Status:
+- Old stale Entra provider (`08814973-0c6b-4652-a05d-0703a52a9314`, mangled through repeated manual test edits) removed from PostgreSQL. Its dependent `sync_runs`/`sync_errors` (4 each, pure test artifacts) were deleted; its 12 `audit_logs` rows were preserved with `provider_id` nulled. `users`/`groups`/`roles` were empty for this provider, so nothing else was affected.
+- `identity_providers` table verified empty (0 rows) after cleanup — ready for a fresh Admin-driven creation via the UI.
+- Full CRUD + test-connection cycle (create → list → get → patch → test-connection → delete) verified directly against the real PostgreSQL database at the service layer (same functions the API routes call), using the real tenant's public identifiers. `test_provider()` correctly returned `CONNECTED`.
+- Multiple-provider architecture unchanged/preserved — `provider_id` continues to select which DB row's configuration `EntraProvider`/`MockProvider` use; nothing was hardcoded to a single global provider.
+- Existing authentication (MSAL, JWT validation, Admin authorization) untouched.
+- Existing UI design/layout untouched — only the Providers page's credential fields (added earlier this phase) remain.
+- Tests: 57/57 backend passing. Frontend `npm run build` passing.
+
+Remaining live-environment blocker: the actual browser walkthrough (login → Providers page → Add Provider → Save → reload → Test Connection → Sync) has NOT been performed — that requires a real interactive login and is the user's next step. Separately, this session repeatedly found that the user's `--reload` backend process gets silently respawned under the wrong Python interpreter on this machine (a Windows venv/uvicorn interaction, not a code bug), freezing it on stale code after any edit; running without `--reload` was recommended as the workaround but not yet confirmed adopted.

@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Optional
 from uuid import UUID
 
@@ -26,6 +27,12 @@ class ProviderUpdate(BaseModel):
     api_scope: Optional[str] = None
     redirect_uri_metadata: Optional[dict[str, Any]] = None
     configuration_ref: Optional[str] = None
+    sync_interval_minutes: Optional[int] = Field(default=None, ge=1, le=10080)
+
+
+class ProviderCredentialUpdate(BaseModel):
+    graph_client_id: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    graph_client_secret: str = Field(min_length=1, max_length=4000)
 
 
 class ProviderResponse(BaseModel):
@@ -42,3 +49,7 @@ class ProviderResponse(BaseModel):
     api_scope: Optional[str]
     redirect_uri_metadata: Optional[dict[str, Any]]
     configuration_ref: Optional[str]
+    graph_client_id: Optional[str]
+    credential_configured: bool
+    sync_interval_minutes: Optional[int]
+    last_sync_at: Optional[datetime]
