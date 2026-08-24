@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -60,6 +60,16 @@ class RoleResponse(BaseModel):
     role_type: str
     is_privileged: bool
     status: str
+
+
+class ApplicationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    external_id: str
+    name: str
+    status: str
+    app_roles: Optional[list[dict[str, Any]]]
+    last_synced_at: Optional[datetime]
 
 
 class SyncRunResponse(BaseModel):

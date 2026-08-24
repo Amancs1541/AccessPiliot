@@ -343,6 +343,53 @@ async def test_reassigning_same_group_removes_stale_scheduled_one_without_graph_
 
 
 @pytest.mark.asyncio
+async def test_pending_approval_request_does_not_touch_existing_access_until_approved(db_override):
+    """Regression: creating a request that requires approval must NOT revoke the user's current access —
+    only an actual approval decision may replace it. A later rejection must leave the original untouched."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        first = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
+        first_id = first.json()["id"]
+        pending = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT", "approver_id": str(ids["approver_id"])})
+        pending_id = pending.json()["id"]
+    assert pending.json()["status"] == "PENDING_APPROVAL"
+
+    async with db_override.factory() as session:
+        still_active = await session.get(AccessAssignment, UUID(first_id))
+        assert still_active.status == "ACTIVE"  # untouched while the new request is only pending
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        rejected = await client.post(f"/api/v1/assignments/{pending_id}/reject")
+    assert rejected.json()["status"] == "REJECTED"
+
+    async with db_override.factory() as session:
+        still_active = await session.get(AccessAssignment, UUID(first_id))
+        assert still_active.status == "ACTIVE"  # a rejection must never have touched the original
+
+
+@pytest.mark.asyncio
+async def test_approving_a_request_supersedes_the_existing_active_assignment(db_override):
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        first = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
+        first_id = first.json()["id"]
+        pending = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT", "approver_id": str(ids["approver_id"])})
+        pending_id = pending.json()["id"]
+        approved = await client.post(f"/api/v1/assignments/{pending_id}/approve")
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "ACTIVE"
+
+    async with db_override.factory() as session:
+        old = await session.get(AccessAssignment, UUID(first_id))
+        assert old.status == "REVOKED"
+        assert old.revoked_at is not None
+        audit_actions = [row.action for row in (await session.execute(select(AuditLog))).scalars().all()]
+        assert "ASSIGNMENT_REVOKED" in audit_actions
+
+
+@pytest.mark.asyncio
 async def test_assigning_a_different_resource_does_not_touch_unrelated_assignment(db_override):
     ids = await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.Admin")

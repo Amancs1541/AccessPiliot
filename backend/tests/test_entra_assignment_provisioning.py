@@ -66,6 +66,35 @@ async def test_add_group_member_already_member_is_idempotent_success(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_add_group_member_already_member_via_real_graph_400_is_idempotent_success(monkeypatch):
+    """Regression: Microsoft Graph reports a duplicate group member add as HTTP 400 (not 409) with
+    "...already exist..." in the error message — confirmed against a live tenant. Must still be treated
+    as an idempotent success, or approving an assignment for an already-member user fails forever."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/oauth2/v2.0/token"):
+            return token_response()
+        return httpx.Response(400, json={"error": {"code": "Request_BadRequest", "message": "One or more added object references already exist for the following modified properties: 'members'."}})
+
+    install_transport(monkeypatch, handler)
+    result = await EntraProvider(provider_row()).add_group_member("group-1", "user-1")
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_add_group_member_genuine_400_still_raises(monkeypatch):
+    """A 400 that is NOT the duplicate-member quirk must still surface as a real failure."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/oauth2/v2.0/token"):
+            return token_response()
+        return httpx.Response(400, json={"error": {"code": "Request_BadRequest", "message": "Invalid object identifier"}})
+
+    install_transport(monkeypatch, handler)
+    with pytest.raises(GraphError) as error:
+        await EntraProvider(provider_row()).add_group_member("group-1", "user-1")
+    assert error.value.code == "PROVIDER_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
 async def test_add_group_member_permission_denied_raises(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/oauth2/v2.0/token"):

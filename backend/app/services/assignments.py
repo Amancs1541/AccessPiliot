@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AccessPilotError
-from app.models import AccessAssignment, Group, IdentityProvider, Role, User
+from app.models import AccessAssignment, Application, Group, IdentityProvider, Role, User
 from app.providers.graph_client import GraphError
 from app.schemas.assignments import AssignmentResponse
 from app.services.audit import record_audit
@@ -19,19 +19,31 @@ def to_response(assignment: AccessAssignment, hydrated: dict) -> AssignmentRespo
     return AssignmentResponse(
         id=assignment.id, user_id=assignment.user_id, user_display_name=hydrated.get("user_display_name"),
         resource_type=assignment.resource_type, resource_id=assignment.resource_id, resource_display_name=hydrated.get("resource_display_name"),
+        app_role_external_id=assignment.app_role_external_id,
         assignment_type=assignment.assignment_type, status=assignment.status, start_time=assignment.start_time, expiration_time=assignment.expiration_time,
         justification=assignment.justification, requested_by=assignment.requested_by, approved_by=assignment.approved_by,
         activated_at=assignment.activated_at, revoked_at=assignment.revoked_at, created_at=assignment.created_at,
     )
 
 
+def _app_role_name(application: Optional[Application], app_role_external_id: Optional[str]) -> Optional[str]:
+    if not application or not application.app_roles or not app_role_external_id:
+        return None
+    return next((role.get("name") for role in application.app_roles if role.get("id") == app_role_external_id), None)
+
+
 async def _resolve_target(session: AsyncSession, resource_type: str, resource_id: UUID) -> tuple[UUID, str, str]:
-    """Returns (provider_id, display_name, external_id) for the target group/role, raising 404 if it doesn't exist."""
+    """Returns (provider_id, display_name, external_id) for the target group/role/application, raising 404 if it doesn't exist."""
     if resource_type == "GROUP":
         group = await session.get(Group, resource_id)
         if not group:
             raise AccessPilotError("GROUP_NOT_FOUND", "The group was not found.", 404)
         return group.provider_id, group.name, group.external_id
+    if resource_type == "APPLICATION":
+        application = await session.get(Application, resource_id)
+        if not application:
+            raise AccessPilotError("APPLICATION_NOT_FOUND", "The application was not found.", 404)
+        return application.provider_id, application.name, application.external_id
     role = await session.get(Role, resource_id)
     if not role:
         raise AccessPilotError("ROLE_NOT_FOUND", "The role was not found.", 404)
@@ -46,17 +58,25 @@ async def _resolve_internal_user_id(session: AsyncSession, external_subject: str
 async def hydrate_display_fields(session: AsyncSession, assignment: AccessAssignment) -> dict:
     user = await session.get(User, assignment.user_id)
     _, resource_name, _ = await _resolve_target(session, assignment.resource_type, assignment.resource_id)
+    if assignment.resource_type == "APPLICATION" and assignment.app_role_external_id:
+        application = await session.get(Application, assignment.resource_id)
+        role_name = _app_role_name(application, assignment.app_role_external_id)
+        if role_name:
+            resource_name = f"{resource_name} — {role_name}"
     return {"user_display_name": user.display_name if user else None, "resource_display_name": resource_name}
 
 
-async def _grant_provider_access(session: AsyncSession, provider_id: UUID, resource_type: str, target_external_id: str, user_external_id: str) -> None:
+async def _grant_provider_access(session: AsyncSession, provider_id: UUID, resource_type: str, target_external_id: str, user_external_id: str, app_role_external_id: Optional[str] = None) -> None:
     """Performs the real Entra/Graph mutation. Raises AccessPilotError if it fails — callers must not mark ACTIVE on failure."""
     provider = await session.get(IdentityProvider, provider_id)
     if not provider:
         raise AccessPilotError("PROVIDER_NOT_FOUND", "The identity provider for this assignment was not found.", 404)
     connector = _connector(provider)
+    request = {"resource_type": resource_type, "target_external_id": target_external_id, "user_external_id": user_external_id}
+    if app_role_external_id:
+        request["app_role_external_id"] = app_role_external_id
     try:
-        granted = await connector.activate_assignment({"resource_type": resource_type, "target_external_id": target_external_id, "user_external_id": user_external_id})
+        granted = await connector.activate_assignment(request)
     except (GraphError, NotImplementedError, ValueError) as exc:
         code = getattr(exc, "code", "PROVIDER_UNAVAILABLE")
         message = getattr(exc, "message", str(exc)) or "The provider operation failed."
@@ -76,8 +96,11 @@ async def revoke_provider_access(session: AsyncSession, assignment: AccessAssign
     if not user:
         return False
     connector = _connector(provider)
+    request = {"resource_type": assignment.resource_type, "target_external_id": target_external_id, "user_external_id": user.external_id}
+    if assignment.app_role_external_id:
+        request["app_role_external_id"] = assignment.app_role_external_id
     try:
-        return bool(await connector.revoke_assignment({"resource_type": assignment.resource_type, "target_external_id": target_external_id, "user_external_id": user.external_id}))
+        return bool(await connector.revoke_assignment(request))
     except (GraphError, NotImplementedError, ValueError):
         return False
 
@@ -89,7 +112,7 @@ async def grant_provider_access_for_assignment(session: AsyncSession, assignment
     if not user:
         return False
     try:
-        await _grant_provider_access(session, assignment.provider_id, assignment.resource_type, target_external_id, user.external_id)
+        await _grant_provider_access(session, assignment.provider_id, assignment.resource_type, target_external_id, user.external_id, assignment.app_role_external_id)
         return True
     except AccessPilotError:
         return False
@@ -103,15 +126,19 @@ def _is_in_the_future(moment: Optional[datetime], now: datetime) -> bool:
     return moment > now
 
 
-async def _supersede_existing_assignment(session: AsyncSession, *, user_id: UUID, resource_type: str, resource_id: UUID, provider_id: UUID, actor_id: Optional[UUID], request_id: str) -> None:
-    """If the user already has an active/scheduled assignment to this exact group/role, remove it first (real Entra
-    removal if it was actually granted) and log the removal — a new assignment to the same target replaces it."""
-    existing = (await session.execute(select(AccessAssignment).where(
+async def _supersede_existing_assignment(session: AsyncSession, *, user_id: UUID, resource_type: str, resource_id: UUID, app_role_external_id: Optional[str], provider_id: UUID, actor_id: Optional[UUID], request_id: str) -> None:
+    """If the user already has an active/scheduled assignment to this exact group/role/application+role, remove it
+    first (real Entra removal if it was actually granted) and log the removal — a new assignment to the same target
+    replaces it. For applications, a different role on the same app is treated as a distinct target, not a replace."""
+    conditions = [
         AccessAssignment.user_id == user_id,
         AccessAssignment.resource_type == resource_type,
         AccessAssignment.resource_id == resource_id,
         AccessAssignment.status.in_(("ACTIVE", "SCHEDULED")),
-    ))).scalars().first()
+    ]
+    if resource_type == "APPLICATION":
+        conditions.append(AccessAssignment.app_role_external_id == app_role_external_id)
+    existing = (await session.execute(select(AccessAssignment).where(*conditions))).scalars().first()
     if existing is None:
         return
     if existing.status == "ACTIVE":
@@ -130,13 +157,19 @@ async def create_assignment(session: AsyncSession, data, actor_subject: str, req
         raise AccessPilotError("USER_NOT_FOUND", "The user was not found.", 404)
     provider_id, resource_name, target_external_id = await _resolve_target(session, data.resource_type, data.resource_id)
 
+    if data.resource_type == "APPLICATION":
+        application = await session.get(Application, data.resource_id)
+        role_name = _app_role_name(application, data.app_role_external_id)
+        if not role_name:
+            raise AccessPilotError("APPLICATION_ROLE_NOT_FOUND", "The selected application role was not found.", 404)
+        resource_name = f"{resource_name} — {role_name}"
+
     if data.approver_id is not None:
         approver = await session.get(User, data.approver_id)
         if not approver:
             raise AccessPilotError("USER_NOT_FOUND", "The selected approver was not found.", 404)
 
     requested_by = await _resolve_internal_user_id(session, actor_subject)
-    await _supersede_existing_assignment(session, user_id=data.user_id, resource_type=data.resource_type, resource_id=data.resource_id, provider_id=provider_id, actor_id=requested_by, request_id=request_id)
     now = datetime.now(timezone.utc)
     approval_required = data.approver_id is not None
     effective_start = data.start_time or now
@@ -149,10 +182,15 @@ async def create_assignment(session: AsyncSession, data, actor_subject: str, req
     else:
         status = "ACTIVE"
 
+    if not approval_required:
+        # An approval-required request keeps the user's existing access in place until an approver actually
+        # decides — superseding it here would strip access from a request that might later be rejected.
+        await _supersede_existing_assignment(session, user_id=data.user_id, resource_type=data.resource_type, resource_id=data.resource_id, app_role_external_id=data.app_role_external_id, provider_id=provider_id, actor_id=requested_by, request_id=request_id)
+
     if status == "ACTIVE":
         # Grant real Entra/Graph access before persisting ACTIVE state — never claim success the provider didn't confirm.
         try:
-            await _grant_provider_access(session, provider_id, data.resource_type, target_external_id, target_user.external_id)
+            await _grant_provider_access(session, provider_id, data.resource_type, target_external_id, target_user.external_id, data.app_role_external_id)
         except AccessPilotError as exc:
             await record_audit(session, action="ASSIGNMENT_CREATED", target_type="ASSIGNMENT", target_id=None, provider_id=provider_id, actor_user_id=requested_by, request_id=request_id, result="FAILURE", metadata={"error_code": exc.code, "resource_type": data.resource_type})
             await session.commit()
@@ -163,6 +201,7 @@ async def create_assignment(session: AsyncSession, data, actor_subject: str, req
         user_id=data.user_id,
         resource_type=data.resource_type,
         resource_id=data.resource_id,
+        app_role_external_id=data.app_role_external_id,
         assignment_type=data.assignment_type,
         status=status,
         start_time=effective_start,
@@ -220,6 +259,10 @@ async def approve_assignment(session: AsyncSession, assignment_id: UUID, actor_s
     actor_id = await _authorize_decision(session, assignment, actor_subject, actor_roles)
     now = datetime.now(timezone.utc)
 
+    # Only now that the request is actually approved do we remove any pre-existing access to the exact same
+    # target (group/role/application+role) — a rejected request must never have touched the user's existing access.
+    await _supersede_existing_assignment(session, user_id=assignment.user_id, resource_type=assignment.resource_type, resource_id=assignment.resource_id, app_role_external_id=assignment.app_role_external_id, provider_id=assignment.provider_id, actor_id=actor_id, request_id=request_id)
+
     if _is_in_the_future(assignment.start_time, now):
         # Approved, but its start time hasn't arrived yet — the activation worker grants real access when it does.
         assignment.status = "SCHEDULED"
@@ -235,7 +278,7 @@ async def approve_assignment(session: AsyncSession, assignment_id: UUID, actor_s
         raise AccessPilotError("USER_NOT_FOUND", "The user was not found.", 404)
 
     try:
-        await _grant_provider_access(session, assignment.provider_id, assignment.resource_type, target_external_id, target_user.external_id)
+        await _grant_provider_access(session, assignment.provider_id, assignment.resource_type, target_external_id, target_user.external_id, assignment.app_role_external_id)
     except AccessPilotError as exc:
         await record_audit(session, action="ASSIGNMENT_ACTIVATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, actor_user_id=actor_id, request_id=request_id, result="FAILURE", metadata={"decision": "APPROVED", "error_code": exc.code})
         await session.commit()

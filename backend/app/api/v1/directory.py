@@ -9,7 +9,7 @@ from app.core.errors import AccessPilotError
 from app.db.session import get_db
 from app.providers.base import NewGroupRequest, NewUserRequest, ProviderConflictError
 from app.providers.graph_client import GraphError
-from app.schemas.directory import GroupCreate, GroupResponse, RoleResponse, UserCreate, UserCreateResponse, UserResponse
+from app.schemas.directory import ApplicationResponse, GroupCreate, GroupResponse, RoleResponse, UserCreate, UserCreateResponse, UserResponse
 from app.security.auth import AuthenticatedUser, require_permission
 from app.services import directory_read
 from app.services.audit import record_audit
@@ -98,6 +98,11 @@ async def create_group(data: GroupCreate, request: Request, _: AuthenticatedUser
 @router.get("/roles", response_model=list[RoleResponse])
 async def roles(q: str | None = Query(default=None), _: AuthenticatedUser = Depends(role_read), db: AsyncSession = Depends(get_db)):
     return await directory_read.list_roles(db, q)
+
+
+@router.get("/applications", response_model=list[ApplicationResponse])
+async def applications(q: str | None = Query(default=None), _: AuthenticatedUser = Depends(role_read), db: AsyncSession = Depends(get_db)):
+    return await directory_read.list_applications(db, q)
 
 
 @router.get("/dashboard/admin")

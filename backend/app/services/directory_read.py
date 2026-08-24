@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AccessPilotError
-from app.models import Group, Role, User, UserGroup
+from app.models import Application, Group, Role, User, UserGroup
 
 
 async def list_users(session: AsyncSession, query: Optional[str] = None) -> list[User]:
@@ -49,4 +49,11 @@ async def list_roles(session: AsyncSession, query: Optional[str] = None) -> list
     statement = select(Role).order_by(Role.name)
     if query:
         statement = statement.where(Role.name.ilike(f"%{query}%"))
+    return list((await session.scalars(statement)).all())
+
+
+async def list_applications(session: AsyncSession, query: Optional[str] = None) -> list[Application]:
+    statement = select(Application).order_by(Application.name)
+    if query:
+        statement = statement.where(Application.name.ilike(f"%{query}%"))
     return list((await session.scalars(statement)).all())

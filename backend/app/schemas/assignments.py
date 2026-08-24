@@ -9,8 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 class AssignmentCreate(BaseModel):
     user_id: UUID
-    resource_type: str = Field(pattern="^(GROUP|ROLE)$")
+    resource_type: str = Field(pattern="^(GROUP|ROLE|APPLICATION)$")
     resource_id: UUID
+    app_role_external_id: Optional[str] = Field(default=None, max_length=100)
     assignment_type: str = Field(pattern="^(PERMANENT|TEMPORARY)$")
     start_time: Optional[datetime] = None
     expiration_time: Optional[datetime] = None
@@ -28,6 +29,15 @@ class AssignmentCreate(BaseModel):
             self.expiration_time = None
         return self
 
+    @model_validator(mode="after")
+    def _validate_app_role(self) -> "AssignmentCreate":
+        if self.resource_type == "APPLICATION":
+            if not self.app_role_external_id:
+                raise ValueError("app_role_external_id is required when resource_type is APPLICATION")
+        else:
+            self.app_role_external_id = None
+        return self
+
 
 class AssignmentResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -37,6 +47,7 @@ class AssignmentResponse(BaseModel):
     resource_type: str
     resource_id: UUID
     resource_display_name: Optional[str] = None
+    app_role_external_id: Optional[str] = None
     assignment_type: str
     status: str
     start_time: Optional[datetime]

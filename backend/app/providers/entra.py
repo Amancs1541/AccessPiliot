@@ -22,6 +22,12 @@ def _odata_escape(value: str) -> str:
     return value.replace("'", "''")
 
 
+def _is_already_assigned_error(exc: GraphError) -> bool:
+    """Microsoft Graph reports a duplicate group/role member or app role assignment as HTTP 400
+    (not 409) with a message like "...already exist...". Treat that as an idempotent success."""
+    return exc.http_status == 400 and bool(exc.graph_message) and "already exist" in exc.graph_message.lower()
+
+
 class EntraProvider(IdentityProvider):
     """Entra connector backed by Microsoft Graph application permissions."""
 
@@ -159,7 +165,7 @@ class EntraProvider(IdentityProvider):
             try:
                 await client.request("POST", f"/groups/{group_external_id}/members/$ref", json={"@odata.id": f"https://graph.microsoft.com/v1.0/directoryObjects/{user_external_id}"})
             except GraphError as exc:
-                if exc.code == "PROVIDER_CONFLICT":
+                if exc.code == "PROVIDER_CONFLICT" or _is_already_assigned_error(exc):
                     return True
                 raise
         return True
@@ -179,7 +185,7 @@ class EntraProvider(IdentityProvider):
             try:
                 await client.request("POST", f"/directoryRoles/{role_external_id}/members/$ref", json={"@odata.id": f"https://graph.microsoft.com/v1.0/directoryObjects/{user_external_id}"})
             except GraphError as exc:
-                if exc.code == "PROVIDER_CONFLICT":
+                if exc.code == "PROVIDER_CONFLICT" or _is_already_assigned_error(exc):
                     return True
                 raise
         return True
@@ -227,7 +233,7 @@ class EntraProvider(IdentityProvider):
             try:
                 await client.request("POST", f"/users/{user_external_id}/appRoleAssignments", json={"principalId": user_external_id, "resourceId": resource_external_id, "appRoleId": app_role_external_id})
             except GraphError as exc:
-                if exc.code == "PROVIDER_CONFLICT":
+                if exc.code == "PROVIDER_CONFLICT" or _is_already_assigned_error(exc):
                     return True
                 raise
         return True

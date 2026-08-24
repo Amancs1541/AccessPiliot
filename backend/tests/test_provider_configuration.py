@@ -83,10 +83,12 @@ async def test_provider_sync_persists_run_and_is_listed(db_override, monkeypatch
     async def fake_get_groups(self, query=None): return [NormalizedGroup("g1", "Group One")]
     async def fake_get_group_members(self, external_id): return []
     async def fake_get_roles(self, query=None): return [NormalizedRole("r1", "Reports Reader")]
+    async def fake_get_applications(self, query=None): return []
     monkeypatch.setattr("app.providers.entra.EntraProvider.get_users", fake_get_users)
     monkeypatch.setattr("app.providers.entra.EntraProvider.get_groups", fake_get_groups)
     monkeypatch.setattr("app.providers.entra.EntraProvider.get_group_members", fake_get_group_members)
     monkeypatch.setattr("app.providers.entra.EntraProvider.get_roles", fake_get_roles)
+    monkeypatch.setattr("app.providers.entra.EntraProvider.get_applications", fake_get_applications)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         created = await client.post("/api/v1/providers", json={"name": "Entra", "provider_type": "ENTRA", "tenant_id": "tenant-1", "client_id": "client-1", "authority": "https://login.microsoftonline.com/tenant-1", "api_audience": "api://client-1", "api_scope": "api://client-1/access_as_user"})

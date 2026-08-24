@@ -10,11 +10,12 @@ import httpx
 class GraphError(Exception):
     """A Microsoft Graph failure already mapped to a stable AccessPilot error code (see 13_ERROR_CONTRACT.md)."""
 
-    def __init__(self, code: str, message: str, status_code: int, *, http_status: int | None = None):
+    def __init__(self, code: str, message: str, status_code: int, *, http_status: int | None = None, graph_message: str | None = None):
         self.code = code
         self.message = message
         self.status_code = status_code
         self.http_status = http_status
+        self.graph_message = graph_message
         super().__init__(message)
 
 
@@ -104,7 +105,12 @@ class GraphClient:
             raise GraphError("PROVIDER_UNAVAILABLE", "Microsoft Graph could not be reached.", 503) from exc
         if response.status_code >= 400:
             code, status_code = _map_error(response.status_code)
-            raise GraphError(code, f"Microsoft Graph request failed ({response.status_code}).", status_code, http_status=response.status_code)
+            graph_message = None
+            try:
+                graph_message = (response.json().get("error") or {}).get("message")
+            except ValueError:
+                pass
+            raise GraphError(code, f"Microsoft Graph request failed ({response.status_code}).", status_code, http_status=response.status_code, graph_message=graph_message)
         return response
 
     async def get_all(self, path: str, *, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> list[dict[str, Any]]:
