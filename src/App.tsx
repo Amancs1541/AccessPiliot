@@ -14,7 +14,7 @@ interface ApiApplicationRole { id: string; name: string; description: string | n
 interface ApiApplication { id: string; external_id: string; name: string; status: string; app_roles: ApiApplicationRole[] | null; last_synced_at: string | null; }
 interface ApiPackageItem { id: string; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; }
 interface ApiPackageEligiblePrincipal { principal_type: string; principal_id: string; display_name: string | null; }
-interface ApiPackage { id: string; name: string; description: string | null; status: string; items: ApiPackageItem[]; default_approver_id: string | null; eligible_principals: ApiPackageEligiblePrincipal[]; created_at: string; }
+interface ApiPackage { id: string; name: string; description: string | null; status: string; items: ApiPackageItem[]; default_approver_id: string | null; default_fallback_approver_id: string | null; eligible_principals: ApiPackageEligiblePrincipal[]; created_at: string; }
 interface ApiUserAccessItem { id: string | null; resource_type: string; resource_display_name: string | null; status: string; assignment_type: string; expiration_time: string | null; package_name: string | null; source: string; }
 interface ApiUserLicense { sku_id: string; name: string; }
 interface ApiUserAccessSummary { assignments: ApiUserAccessItem[]; licenses: ApiUserLicense[]; }
@@ -197,39 +197,46 @@ function MyAccess() {
   const maxHours = policy?.max_self_activation_hours ?? 8;
   const [activateTarget, setActivateTarget] = useState<{ ids: string[]; label: string } | null>(null);
   const [durationHours, setDurationHours] = useState('');
+  const [activateJustification, setActivateJustification] = useState('');
   const [activateMessage, setActivateMessage] = useState('');
   const [activateSaving, setActivateSaving] = useState(false);
   const [busyIds, setBusyIds] = useState<string | null>(null);
   const now = Date.now();
 
   const batchByAssignmentId = useMemo(() => { const map = new Map<string, ApiPackageBatch>(); (batches || []).forEach(b => b.assignment_ids.forEach(id => map.set(id, b))); return map; }, [batches]);
+  // Grouped by package_id (not package_assignment_id/batch): package names are globally unique, so if the same
+  // package was assigned to this user more than once (e.g. re-requested), every batch's items are merged into one
+  // row — the user should only ever see one entry per package, never duplicates of the same name.
   const groupRows = (list: ApiAssignment[]): MyAccessRow[] => {
     const rows: MyAccessRow[] = [];
-    const seenBatches = new Set<string>();
+    const seenPackages = new Set<string>();
     list.forEach(a => {
       const batch = batchByAssignmentId.get(a.id);
       if (!batch) { rows.push({ kind: 'single', assignment: a }); return; }
-      if (seenBatches.has(batch.package_assignment_id)) return;
-      seenBatches.add(batch.package_assignment_id);
-      rows.push({ kind: 'batch', batch, assignments: list.filter(x => batchByAssignmentId.get(x.id)?.package_assignment_id === batch.package_assignment_id) });
+      if (seenPackages.has(batch.package_id)) return;
+      seenPackages.add(batch.package_id);
+      rows.push({ kind: 'batch', batch, assignments: list.filter(x => batchByAssignmentId.get(x.id)?.package_id === batch.package_id) });
     });
     return rows;
   };
-  const eligible = (assignments || []).filter(a => a.status === 'ELIGIBLE' && (!a.start_time || new Date(a.start_time).getTime() <= now));
+  // An eligible row whose activation deadline has already passed must disappear immediately, not linger until the
+  // backend's periodic sweep (up to 60s later) flips its status to EXPIRED.
+  const eligible = (assignments || []).filter(a => a.status === 'ELIGIBLE' && (!a.start_time || new Date(a.start_time).getTime() <= now) && (!a.expiration_time || new Date(a.expiration_time).getTime() > now));
   const active = (assignments || []).filter(a => a.status === 'ACTIVE');
   const eligibleRows = useMemo(() => groupRows(eligible), [eligible, batchByAssignmentId]);
   const activeRows = useMemo(() => groupRows(active), [active, batchByAssignmentId]);
 
-  const openActivate = (ids: string[], label: string) => { setActivateTarget({ ids, label }); setDurationHours(String(maxHours)); setActivateMessage(''); };
+  const openActivate = (ids: string[], label: string) => { setActivateTarget({ ids, label }); setDurationHours(String(maxHours)); setActivateJustification(''); setActivateMessage(''); };
 
   const submitActivate = async () => {
     if (!activateTarget) return;
     const hours = Number(durationHours);
     if (!hours || hours <= 0) { setActivateMessage('Enter a duration greater than zero.'); return; }
     if (hours > maxHours) { setActivateMessage(`The maximum self-activation duration is ${maxHours} hours.`); return; }
+    if (activateJustification.trim().length < 3) { setActivateMessage('A justification (at least 3 characters) is required to activate.'); return; }
     setActivateSaving(true); setActivateMessage('');
     try {
-      const responses = await Promise.all(activateTarget.ids.map(id => auth.apiRequest(`/api/v1/assignments/${id}/activate`, { method: 'POST', body: JSON.stringify({ duration_hours: hours }) })));
+      const responses = await Promise.all(activateTarget.ids.map(id => auth.apiRequest(`/api/v1/assignments/${id}/activate`, { method: 'POST', body: JSON.stringify({ duration_hours: hours, justification: activateJustification.trim() }) })));
       const failedResponse = responses.find(r => !r.ok);
       if (!failedResponse) { setActivateTarget(null); reload(); }
       else { const body = await failedResponse.json().catch(() => null); setActivateMessage(body?.error?.message || 'Unable to activate this access.'); reload(); }
@@ -251,7 +258,7 @@ function MyAccess() {
       <div className="detail-section">
         {loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : eligibleRows.length === 0 ? <div className="notice">Nothing eligible to activate right now.</div> : eligibleRows.map(row => row.kind === 'single'
           ? <div key={row.assignment.id} className="activity-row"><span className="avatar"><Shield size={14}/></span><div className="activity-copy"><strong>{row.assignment.resource_display_name || row.assignment.resource_id}</strong><small>{row.assignment.resource_type}{row.assignment.package_name ? ` · ${row.assignment.package_name}` : ''} · {row.assignment.assignment_type === 'TEMPORARY' && row.assignment.expiration_time ? `Activate by ${new Date(row.assignment.expiration_time).toLocaleString()}` : 'No activation deadline'}</small></div><button className="btn btn-primary" onClick={() => openActivate([row.assignment.id], row.assignment.resource_display_name || 'this access')}>Activate <ArrowRight size={13}/></button></div>
-          : <div key={row.batch.package_assignment_id} className="activity-row"><span className="avatar">📦</span><div className="activity-copy"><strong>{row.batch.package_name}</strong><small>PACKAGE · {row.assignments.length} items</small></div><button className="btn btn-primary" onClick={() => openActivate(row.assignments.map(a => a.id), `"${row.batch.package_name}" (${row.assignments.length} items)`)}>Activate all <ArrowRight size={13}/></button></div>
+          : <div key={row.batch.package_id} className="activity-row"><span className="avatar">📦</span><div className="activity-copy"><strong>{row.batch.package_name}</strong><small>PACKAGE · {row.assignments.length} items</small></div><button className="btn btn-primary" onClick={() => openActivate(row.assignments.map(a => a.id), `"${row.batch.package_name}" (${row.assignments.length} items)`)}>Activate all <ArrowRight size={13}/></button></div>
         )}
       </div>
     </div>
@@ -259,13 +266,14 @@ function MyAccess() {
       <div className="panel-head"><h2>Activate {activateTarget.label}</h2><button type="button" className="btn" aria-label="Close" onClick={() => setActivateTarget(null)}><X size={14}/></button></div>
       <div className="detail-section">
         <label className="key" style={{display:'block'}}><span>Duration (hours) — up to {maxHours}</span><input className="select" style={{width:'100%'}} type="number" min={1} max={maxHours} step={0.5} value={durationHours} onChange={event => setDurationHours(event.target.value)}/></label>
+        <label className="key" style={{display:'block',marginTop:14}}><span>Justification — why do you need this now? (required)</span><input className="select" style={{width:'100%'}} required value={activateJustification} onChange={event => setActivateJustification(event.target.value)}/></label>
         {activateMessage && <div className="notice" style={{marginTop:14}}>{activateMessage}</div>}
       </div>
       <div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setActivateTarget(null)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={activateSaving}>{activateSaving ? 'Activating...' : 'Activate'}</button></div>
     </form>}
     <TablePanel toolbar={undefined}>{loading ? <div className="empty">Loading access...</div> : error ? <div className="empty">{error}</div> : activeRows.length === 0 ? <div className="empty">No active access.</div> : <table><thead><tr><th>Resource</th><th>Type</th><th>Package</th><th>Activated</th><th>Expires</th><th>Remaining</th><th></th></tr></thead><tbody>{activeRows.map(row => row.kind === 'single'
       ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.resource_display_name || row.assignment.resource_id}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.package_name || '—'}</td><td>{row.assignment.activated_at ? new Date(row.assignment.activated_at).toLocaleString() : '—'}</td><td>{row.assignment.expiration_time ? new Date(row.assignment.expiration_time).toLocaleString() : 'Never'}</td><td>{row.assignment.expiration_time ? formatRemaining(row.assignment.expiration_time) : '—'}</td><td><button className="btn" disabled={busyIds === row.assignment.id} onClick={() => void deactivate([row.assignment.id], row.assignment.resource_display_name || 'this access')}>Deactivate</button></td></tr>
-      : <tr key={row.batch.package_assignment_id}><td className="user-name">📦 {row.batch.package_name}</td><td>PACKAGE ({row.assignments.length})</td><td>{row.batch.package_name}</td><td>{row.assignments[0]?.activated_at ? new Date(row.assignments[0].activated_at!).toLocaleString() : '—'}</td><td>{row.assignments[0]?.expiration_time ? new Date(row.assignments[0].expiration_time!).toLocaleString() : 'Never'}</td><td>{row.assignments[0]?.expiration_time ? formatRemaining(row.assignments[0].expiration_time) : '—'}</td><td><button className="btn" disabled={busyIds === row.assignments.map(a => a.id).join(',')} onClick={() => void deactivate(row.assignments.map(a => a.id), `"${row.batch.package_name}" (${row.assignments.length} items)`)}>Deactivate all</button></td></tr>
+      : <tr key={row.batch.package_id}><td className="user-name">📦 {row.batch.package_name}</td><td>PACKAGE ({row.assignments.length})</td><td>{row.batch.package_name}</td><td>{row.assignments[0]?.activated_at ? new Date(row.assignments[0].activated_at!).toLocaleString() : '—'}</td><td>{row.assignments[0]?.expiration_time ? new Date(row.assignments[0].expiration_time!).toLocaleString() : 'Never'}</td><td>{row.assignments[0]?.expiration_time ? formatRemaining(row.assignments[0].expiration_time) : '—'}</td><td><button className="btn" disabled={busyIds === row.assignments.map(a => a.id).join(',')} onClick={() => void deactivate(row.assignments.map(a => a.id), `"${row.batch.package_name}" (${row.assignments.length} items)`)}>Deactivate all</button></td></tr>
     )}</tbody></table>}</TablePanel>
   </Page>;
 }
@@ -288,12 +296,12 @@ function RequestPackagesPage() {
     event.preventDefault();
     if (!requestingPackage) return;
     if (form.assignment_type === 'TEMPORARY' && !form.end_date && !form.end_clock) { setMessage('Set an end date/time for a time-bound request.'); return; }
+    if (form.justification.trim().length < 3) { setMessage('A justification (at least 3 characters) is required.'); return; }
     setSaving(true); setMessage('');
     try {
-      const payload: Record<string, unknown> = { assignment_type: form.assignment_type };
+      const payload: Record<string, unknown> = { assignment_type: form.assignment_type, justification: form.justification.trim() };
       if (form.start_date || form.start_clock) payload.start_time = new Date(`${form.start_date || today}T${form.start_clock || '00:00'}`).toISOString();
       if (form.assignment_type === 'TEMPORARY' && (form.end_date || form.end_clock)) payload.expiration_time = new Date(`${form.end_date || today}T${form.end_clock || '23:59'}`).toISOString();
-      if (form.justification.trim()) payload.justification = form.justification.trim();
       const response = await auth.apiRequest(`/api/v1/packages/${requestingPackage.id}/request`, { method: 'POST', body: JSON.stringify(payload) });
       if (response.status === 201) {
         const body = await response.json();
@@ -330,7 +338,7 @@ function RequestPackagesPage() {
             <input className="select" style={{flex:1}} type="time" value={form.end_clock} onChange={event => setForm({...form, end_clock: event.target.value})}/>
           </div>
         </div>}
-        <label className="key" style={{display:'block',marginTop:14}}><span>Justification (optional)</span><input className="select" style={{width:'100%'}} value={form.justification} onChange={event => setForm({...form, justification: event.target.value})}/></label>
+        <label className="key" style={{display:'block',marginTop:14}}><span>Justification (required)</span><input className="select" style={{width:'100%'}} required value={form.justification} onChange={event => setForm({...form, justification: event.target.value})}/></label>
         {message && <div className="notice" style={{marginTop:14}}>{message}</div>}
       </div>
       <div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setRequestingPackage(null)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Requesting...' : 'Submit request'}</button></div>
@@ -381,17 +389,17 @@ function AssignmentsInteractive() {
     if (!form.user_id || !form.resource_id) { setFormMessage('Select a user and a target.'); return; }
     if (form.resource_type === 'APPLICATION' && !form.app_role_external_id) { setFormMessage('Select an application role.'); return; }
     if (form.assignment_type === 'TEMPORARY' && !form.end_date && !form.end_clock) { setFormMessage('Set an end date/time for a time-bound assignment.'); return; }
+    if (form.justification.trim().length < 3) { setFormMessage('A justification (at least 3 characters) for this assignment is required.'); return; }
     setSaving(true); setFormMessage('');
     try {
       const isPackage = form.resource_type === 'PACKAGE';
       const payload: Record<string, unknown> = isPackage
-        ? { user_id: form.user_id, assignment_type: form.assignment_type }
-        : { user_id: form.user_id, resource_type: form.resource_type, resource_id: form.resource_id, assignment_type: form.assignment_type };
+        ? { user_id: form.user_id, assignment_type: form.assignment_type, justification: form.justification.trim() }
+        : { user_id: form.user_id, resource_type: form.resource_type, resource_id: form.resource_id, assignment_type: form.assignment_type, justification: form.justification.trim() };
       if (!isPackage && form.resource_type === 'APPLICATION') payload.app_role_external_id = form.app_role_external_id;
       if (form.start_date || form.start_clock) payload.start_time = new Date(`${form.start_date || today}T${form.start_clock || '00:00'}`).toISOString();
       if (form.assignment_type === 'TEMPORARY' && (form.end_date || form.end_clock)) payload.expiration_time = new Date(`${form.end_date || today}T${form.end_clock || '23:59'}`).toISOString();
       if (form.approver_id) payload.approver_id = form.approver_id;
-      if (form.justification.trim()) payload.justification = form.justification.trim();
       const endpoint = isPackage ? `/api/v1/packages/${form.resource_id}/assign` : '/api/v1/assignments';
       const response = await auth.apiRequest(endpoint, { method: 'POST', body: JSON.stringify(payload) });
       if (response.status === 201) { setOpen(false); setForm(emptyAssignmentForm); reload(); }
@@ -403,18 +411,30 @@ function AssignmentsInteractive() {
 
   const decide = async (assignmentId: string, decision: 'approve' | 'reject') => {
     if (decision === 'reject' && !window.confirm('Reject this assignment request?')) return;
+    let justification: string | null = null;
+    if (decision === 'approve') {
+      justification = window.prompt('Justification for approving this request (required):');
+      if (justification === null) return;
+      if (justification.trim().length < 3) { window.alert('A justification (at least 3 characters) is required to approve.'); return; }
+    }
     setActioningId(assignmentId);
     try {
-      const response = await auth.apiRequest(`/api/v1/assignments/${assignmentId}/${decision}`, { method: 'POST' });
+      const response = await auth.apiRequest(`/api/v1/assignments/${assignmentId}/${decision}`, { method: 'POST', body: decision === 'approve' ? JSON.stringify({ justification: justification!.trim() }) : undefined });
       if (response.ok) reload();
     } finally { setActioningId(null); }
   };
 
   const decideBatch = async (batch: ApiPackageBatch, decision: 'approve' | 'reject') => {
     if (decision === 'reject' && !window.confirm(`Reject all ${batch.assignment_ids.length} items in "${batch.package_name}"?`)) return;
+    let justification: string | null = null;
+    if (decision === 'approve') {
+      justification = window.prompt(`Justification for approving all ${batch.assignment_ids.length} items in "${batch.package_name}" (required):`);
+      if (justification === null) return;
+      if (justification.trim().length < 3) { window.alert('A justification (at least 3 characters) is required to approve.'); return; }
+    }
     setActioningId(batch.package_assignment_id);
     try {
-      await Promise.all(batch.assignment_ids.map(id => auth.apiRequest(`/api/v1/assignments/${id}/${decision}`, { method: 'POST' })));
+      await Promise.all(batch.assignment_ids.map(id => auth.apiRequest(`/api/v1/assignments/${id}/${decision}`, { method: 'POST', body: decision === 'approve' ? JSON.stringify({ justification: justification!.trim() }) : undefined })));
       reload();
     } finally { setActioningId(null); }
   };
@@ -445,7 +465,7 @@ function AssignmentsInteractive() {
           <input className="select" style={{flex:1}} type="time" value={form.end_clock} onChange={event => setForm({...form, end_clock: event.target.value})}/>
         </div>
       </div>}
-      <label className="key" style={{display:'block',marginTop:14}}><span>Justification (optional)</span><input className="select" style={{width:'100%'}} value={form.justification} onChange={event => setForm({...form, justification: event.target.value})}/></label>
+      <label className="key" style={{display:'block',marginTop:14}}><span>Justification — why are you assigning this? (required)</span><input className="select" style={{width:'100%'}} required value={form.justification} onChange={event => setForm({...form, justification: event.target.value})}/></label>
       {formMessage && <div className="notice" style={{marginTop:14}}>{formMessage}</div>}</div>
       <div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setOpen(false)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Creating...' : 'Create assignment'}</button></div>
     </form>}
@@ -465,7 +485,7 @@ function AssignmentsInteractive() {
   </Page>;
 }
 function AssignmentsPage() { return <AssignmentsInteractive />; }
-const emptyPackageForm = { name: '', description: '', items: [] as { resource_type: string; resource_id: string; app_role_external_id: string }[] };
+const emptyPackageForm = { name: '', description: '', items: [] as { resource_type: string; resource_id: string; app_role_external_id: string }[], principals: [] as { principal_type: string; principal_id: string }[], default_approver_id: '', default_fallback_approver_id: '', fallback_unlock_hours: '' };
 const emptyPackageAssignForm = { target_type: 'USER', user_id: '', group_id: '', assignment_type: 'PERMANENT', start_date: '', start_clock: '', end_date: '', end_clock: '', approver_id: '', justification: '' };
 function AccessPackagesInteractive() {
   const auth = useAuth();
@@ -485,7 +505,7 @@ function AccessPackagesInteractive() {
   const [assignMessage, setAssignMessage] = useState('');
   const [archivingId, setArchivingId] = useState<string | null>(null);
   const [eligibilityPackage, setEligibilityPackage] = useState<ApiPackage | null>(null);
-  const [eligibilityForm, setEligibilityForm] = useState<{ principals: { principal_type: string; principal_id: string }[]; default_approver_id: string }>({ principals: [], default_approver_id: '' });
+  const [eligibilityForm, setEligibilityForm] = useState<{ principals: { principal_type: string; principal_id: string }[]; default_approver_id: string; default_fallback_approver_id: string }>({ principals: [], default_approver_id: '', default_fallback_approver_id: '' });
   const [eligibilitySaving, setEligibilitySaving] = useState(false);
   const [eligibilityMessage, setEligibilityMessage] = useState('');
   const today = todayDateValue(new Date());
@@ -494,10 +514,13 @@ function AccessPackagesInteractive() {
   const addItem = () => setForm({ ...form, items: [...form.items, { resource_type: 'GROUP', resource_id: '', app_role_external_id: '' }] });
   const removeItem = (index: number) => setForm({ ...form, items: form.items.filter((_, i) => i !== index) });
   const updateItem = (index: number, patch: Partial<{ resource_type: string; resource_id: string; app_role_external_id: string }>) => setForm({ ...form, items: form.items.map((item, i) => i === index ? { ...item, ...patch } : item) });
+  const addFormPrincipal = () => setForm({ ...form, principals: [...form.principals, { principal_type: 'USER', principal_id: '' }] });
+  const removeFormPrincipal = (index: number) => setForm({ ...form, principals: form.principals.filter((_, i) => i !== index) });
+  const updateFormPrincipal = (index: number, patch: Partial<{ principal_type: string; principal_id: string }>) => setForm({ ...form, principals: form.principals.map((p, i) => i === index ? { ...p, ...patch } : p) });
 
   const openEligibility = (pkg: ApiPackage) => {
     setEligibilityPackage(pkg);
-    setEligibilityForm({ principals: pkg.eligible_principals.map(p => ({ principal_type: p.principal_type, principal_id: p.principal_id })), default_approver_id: pkg.default_approver_id || '' });
+    setEligibilityForm({ principals: pkg.eligible_principals.map(p => ({ principal_type: p.principal_type, principal_id: p.principal_id })), default_approver_id: pkg.default_approver_id || '', default_fallback_approver_id: pkg.default_fallback_approver_id || '' });
     setEligibilityMessage('');
   };
   const addPrincipal = () => setEligibilityForm({ ...eligibilityForm, principals: [...eligibilityForm.principals, { principal_type: 'USER', principal_id: '' }] });
@@ -509,7 +532,7 @@ function AccessPackagesInteractive() {
     if (eligibilityForm.principals.some(p => !p.principal_id)) { setEligibilityMessage('Select a target for every entry.'); return; }
     setEligibilitySaving(true); setEligibilityMessage('');
     try {
-      const payload = { principals: eligibilityForm.principals, default_approver_id: eligibilityForm.default_approver_id || undefined };
+      const payload = { principals: eligibilityForm.principals, default_approver_id: eligibilityForm.default_approver_id || undefined, default_fallback_approver_id: eligibilityForm.default_fallback_approver_id || undefined };
       const response = await auth.apiRequest(`/api/v1/packages/${eligibilityPackage.id}/eligibility`, { method: 'PUT', body: JSON.stringify(payload) });
       if (response.ok) { setEligibilityPackage(null); reload(); }
       else { const errorBody = await response.json().catch(() => null); setEligibilityMessage(errorBody?.error?.message || 'Unable to update eligibility.'); }
@@ -521,7 +544,7 @@ function AccessPackagesInteractive() {
   const openCreate = () => { setEditingPackageId(null); setForm(emptyPackageForm); setFormMessage(''); setOpen(true); };
   const openEdit = (pkg: ApiPackage) => {
     setEditingPackageId(pkg.id);
-    setForm({ name: pkg.name, description: pkg.description || '', items: pkg.items.map(item => ({ resource_type: item.resource_type, resource_id: item.resource_id, app_role_external_id: item.app_role_external_id || '' })) });
+    setForm({ name: pkg.name, description: pkg.description || '', items: pkg.items.map(item => ({ resource_type: item.resource_type, resource_id: item.resource_id, app_role_external_id: item.app_role_external_id || '' })), principals: [], default_approver_id: '', default_fallback_approver_id: '', fallback_unlock_hours: '' });
     setFormMessage(''); setOpen(true);
   };
 
@@ -530,9 +553,19 @@ function AccessPackagesInteractive() {
     if (!form.name.trim()) { setFormMessage('Enter a package name.'); return; }
     if (form.items.length === 0) { setFormMessage('Add at least one item.'); return; }
     if (form.items.some(item => !item.resource_id || (item.resource_type === 'APPLICATION' && !item.app_role_external_id))) { setFormMessage('Complete every item (select a target, and an application role where needed).'); return; }
+    if (!editingPackageId) {
+      if (form.principals.some(p => !p.principal_id)) { setFormMessage('Select a target for every eligible user/group entry.'); return; }
+      if (form.fallback_unlock_hours && !form.default_fallback_approver_id) { setFormMessage('Set a fallback approver before setting how long to wait for the primary approver.'); return; }
+    }
     setSaving(true); setFormMessage('');
     try {
-      const payload = { name: form.name.trim(), description: form.description.trim() || undefined, items: form.items.map(item => ({ resource_type: item.resource_type, resource_id: item.resource_id, app_role_external_id: item.resource_type === 'APPLICATION' ? item.app_role_external_id : undefined })) };
+      const payload: Record<string, unknown> = { name: form.name.trim(), description: form.description.trim() || undefined, items: form.items.map(item => ({ resource_type: item.resource_type, resource_id: item.resource_id, app_role_external_id: item.resource_type === 'APPLICATION' ? item.app_role_external_id : undefined })) };
+      if (!editingPackageId) {
+        payload.principals = form.principals;
+        if (form.default_approver_id) payload.default_approver_id = form.default_approver_id;
+        if (form.default_fallback_approver_id) payload.default_fallback_approver_id = form.default_fallback_approver_id;
+        if (form.fallback_unlock_hours) payload.fallback_unlock_hours = Number(form.fallback_unlock_hours);
+      }
       const response = editingPackageId
         ? await auth.apiRequest(`/api/v1/packages/${editingPackageId}`, { method: 'PATCH', body: JSON.stringify(payload) })
         : await auth.apiRequest('/api/v1/packages', { method: 'POST', body: JSON.stringify(payload) });
@@ -549,13 +582,13 @@ function AccessPackagesInteractive() {
     if (assignForm.target_type === 'USER' && !assignForm.user_id) { setAssignMessage('Select a user.'); return; }
     if (assignForm.target_type === 'GROUP' && !assignForm.group_id) { setAssignMessage('Select a group.'); return; }
     if (assignForm.assignment_type === 'TEMPORARY' && !assignForm.end_date && !assignForm.end_clock) { setAssignMessage('Set an end date/time for a time-bound assignment.'); return; }
+    if (assignForm.justification.trim().length < 3) { setAssignMessage('A justification (at least 3 characters) for this assignment is required.'); return; }
     setAssigning(true); setAssignMessage('');
     try {
-      const payload: Record<string, unknown> = assignForm.target_type === 'USER' ? { user_id: assignForm.user_id, assignment_type: assignForm.assignment_type } : { group_id: assignForm.group_id, assignment_type: assignForm.assignment_type };
+      const payload: Record<string, unknown> = assignForm.target_type === 'USER' ? { user_id: assignForm.user_id, assignment_type: assignForm.assignment_type, justification: assignForm.justification.trim() } : { group_id: assignForm.group_id, assignment_type: assignForm.assignment_type, justification: assignForm.justification.trim() };
       if (assignForm.start_date || assignForm.start_clock) payload.start_time = new Date(`${assignForm.start_date || today}T${assignForm.start_clock || '00:00'}`).toISOString();
       if (assignForm.assignment_type === 'TEMPORARY' && (assignForm.end_date || assignForm.end_clock)) payload.expiration_time = new Date(`${assignForm.end_date || today}T${assignForm.end_clock || '23:59'}`).toISOString();
       if (assignForm.approver_id) payload.approver_id = assignForm.approver_id;
-      if (assignForm.justification.trim()) payload.justification = assignForm.justification.trim();
       const response = await auth.apiRequest(`/api/v1/packages/${assigningPackage.id}/assign`, { method: 'POST', body: JSON.stringify(payload) });
       if (response.status === 201) {
         const body = await response.json();
@@ -586,7 +619,27 @@ function AccessPackagesInteractive() {
           <label className="key"><span>Name</span><input className="select" style={{width:'100%'}} value={form.name} onChange={event => setForm({...form, name: event.target.value})}/></label>
           <label className="key"><span>Description (optional)</span><input className="select" style={{width:'100%'}} value={form.description} onChange={event => setForm({...form, description: event.target.value})}/></label>
         </div>
-        <div className="key" style={{marginTop:18,marginBottom:8}}><span>Items</span></div>
+        {!editingPackageId && <>
+          <div className="key" style={{marginTop:18,marginBottom:8}}><span>1. Approval flow — set this up before adding items</span></div>
+          <div className="notice" style={{marginBottom:14}}>Set an approver so requests for this package go through an approval flow. A fallback approver may also decide — immediately, or only after a wait period if the primary hasn't responded.</div>
+          <div className="key-grid">
+            <label className="key"><span>Approver (optional) — leave blank for no approval required</span><select className="select" style={{width:'100%'}} value={form.default_approver_id} onChange={event => setForm({...form, default_approver_id: event.target.value})}><option value="">No approval required</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+            <label className="key"><span>Fallback approver (optional)</span><select className="select" style={{width:'100%'}} value={form.default_fallback_approver_id} onChange={event => setForm({...form, default_fallback_approver_id: event.target.value})}><option value="">No fallback</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+            <label className="key"><span>Fallback may act after (hours) — optional; blank means immediately</span><input className="select" style={{width:'100%'}} type="number" min={1} disabled={!form.default_fallback_approver_id} value={form.fallback_unlock_hours} onChange={event => setForm({...form, fallback_unlock_hours: event.target.value})}/></label>
+          </div>
+          <div className="key" style={{marginTop:18,marginBottom:8}}><span>Who can request this package</span></div>
+          {form.principals.map((principal, index) => {
+            const options = principal.principal_type === 'USER' ? (users || []) : (groups || []);
+            return <div key={index} style={{display:'flex',gap:10,alignItems:'flex-end',marginBottom:10}}>
+              <label className="key" style={{flex:1}}><span>Type</span><select className="select" style={{width:'100%'}} value={principal.principal_type} onChange={event => updateFormPrincipal(index, { principal_type: event.target.value, principal_id: '' })}><option value="USER">Individual user</option><option value="GROUP">Group</option></select></label>
+              <label className="key" style={{flex:1}}><span>{principal.principal_type === 'USER' ? 'User' : 'Group'}</span><select className="select" style={{width:'100%'}} value={principal.principal_id} onChange={event => updateFormPrincipal(index, { principal_id: event.target.value })}><option value="">Select...</option>{options.map((o: ApiUser | ApiGroup) => <option key={o.id} value={o.id}>{principal.principal_type === 'USER' ? (o as ApiUser).display_name : (o as ApiGroup).name}</option>)}</select></label>
+              <button type="button" className="btn" aria-label="Remove" onClick={() => removeFormPrincipal(index)}><X size={14}/></button>
+            </div>;
+          })}
+          <button type="button" className="btn" onClick={addFormPrincipal}><Plus size={14}/> Add eligible user/group</button>
+          {form.principals.length === 0 && <div className="notice" style={{marginTop:14}}>No one can self-request this package yet — you can still assign it directly, or add eligible users/groups now or later.</div>}
+        </>}
+        <div className="key" style={{marginTop:18,marginBottom:8}}><span>{editingPackageId ? 'Items' : '2. Items'}</span></div>
         {form.items.map((item, index) => {
           const itemTargets = targetsFor(item.resource_type);
           const selectedApp = item.resource_type === 'APPLICATION' ? (applications || []).find(a => a.id === item.resource_id) : undefined;
@@ -624,14 +677,17 @@ function AccessPackagesInteractive() {
           <input className="select" style={{flex:1}} type="time" value={assignForm.end_clock} onChange={event => setAssignForm({...assignForm, end_clock: event.target.value})}/>
         </div>
       </div>}
-      <label className="key" style={{display:'block',marginTop:14}}><span>Justification (optional)</span><input className="select" style={{width:'100%'}} value={assignForm.justification} onChange={event => setAssignForm({...assignForm, justification: event.target.value})}/></label>
+      <label className="key" style={{display:'block',marginTop:14}}><span>Justification — why are you assigning this? (required)</span><input className="select" style={{width:'100%'}} required value={assignForm.justification} onChange={event => setAssignForm({...assignForm, justification: event.target.value})}/></label>
       {assignMessage && <div className="notice" style={{marginTop:14}}>{assignMessage}</div>}</div>
       <div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setAssigningPackage(null)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={assigning}>{assigning ? 'Assigning...' : 'Assign package'}</button></div>
     </form>}
     {eligibilityPackage && <form role="dialog" aria-modal="true" className="panel" style={{maxWidth:720,marginBottom:18}} onSubmit={submitEligibility}>
       <div className="panel-head"><h2>Who can request "{eligibilityPackage.name}"</h2><button type="button" className="btn" aria-label="Close" onClick={() => setEligibilityPackage(null)}><X size={14}/></button></div>
       <div className="detail-section">
-        <label className="key" style={{display:'block',marginBottom:14}}><span>Default approver (optional) — used automatically when someone eligible requests this package</span><select className="select" style={{width:'100%'}} value={eligibilityForm.default_approver_id} onChange={event => setEligibilityForm({...eligibilityForm, default_approver_id: event.target.value})}><option value="">No approval required</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+        <div style={{display:'flex',gap:14,marginBottom:14}}>
+          <label className="key" style={{flex:1}}><span>Default approver (optional) — used automatically when someone eligible requests this package</span><select className="select" style={{width:'100%'}} value={eligibilityForm.default_approver_id} onChange={event => setEligibilityForm({...eligibilityForm, default_approver_id: event.target.value})}><option value="">No approval required</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+          <label className="key" style={{flex:1}}><span>Fallback approver (optional) — may also approve if the default approver hasn't</span><select className="select" style={{width:'100%'}} value={eligibilityForm.default_fallback_approver_id} onChange={event => setEligibilityForm({...eligibilityForm, default_fallback_approver_id: event.target.value})}><option value="">No fallback</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+        </div>
         <div className="key" style={{marginBottom:8}}><span>Eligible users / groups</span></div>
         {eligibilityForm.principals.map((principal, index) => {
           const options = principal.principal_type === 'USER' ? (users || []) : (groups || []);
@@ -661,18 +717,30 @@ function MyApprovalsPage() {
   const [expandedBatches, setExpandedBatches] = useState<Set<string>>(new Set());
   const decide = async (assignmentId: string, decision: 'approve' | 'reject') => {
     if (decision === 'reject' && !window.confirm('Reject this access request?')) return;
+    let justification: string | null = null;
+    if (decision === 'approve') {
+      justification = window.prompt('Justification for approving this request (required):');
+      if (justification === null) return;
+      if (justification.trim().length < 3) { setMessage('A justification (at least 3 characters) is required to approve.'); return; }
+    }
     setActioningId(assignmentId); setMessage('');
     try {
-      const response = await auth.apiRequest(`/api/v1/assignments/${assignmentId}/${decision}`, { method: 'POST' });
+      const response = await auth.apiRequest(`/api/v1/assignments/${assignmentId}/${decision}`, { method: 'POST', body: decision === 'approve' ? JSON.stringify({ justification: justification!.trim() }) : undefined });
       if (response.ok) reload();
       else { const body = await response.json().catch(() => null); setMessage(body?.error?.message || 'Unable to complete this action.'); }
     } catch { setMessage('Unable to complete this action.'); } finally { setActioningId(null); }
   };
   const decideBatch = async (batch: ApiPackageBatch, decision: 'approve' | 'reject') => {
     if (decision === 'reject' && !window.confirm(`Reject all ${batch.assignment_ids.length} items in "${batch.package_name}"?`)) return;
+    let justification: string | null = null;
+    if (decision === 'approve') {
+      justification = window.prompt(`Justification for approving all ${batch.assignment_ids.length} items in "${batch.package_name}" (required):`);
+      if (justification === null) return;
+      if (justification.trim().length < 3) { setMessage('A justification (at least 3 characters) is required to approve.'); return; }
+    }
     setActioningId(batch.package_assignment_id); setMessage('');
     try {
-      const responses = await Promise.all(batch.assignment_ids.map(id => auth.apiRequest(`/api/v1/assignments/${id}/${decision}`, { method: 'POST' })));
+      const responses = await Promise.all(batch.assignment_ids.map(id => auth.apiRequest(`/api/v1/assignments/${id}/${decision}`, { method: 'POST', body: decision === 'approve' ? JSON.stringify({ justification: justification!.trim() }) : undefined })));
       if (responses.every(r => r.ok)) reload();
       else setMessage('Some items in this package could not be processed.');
     } catch { setMessage('Unable to complete this action.'); } finally { setActioningId(null); }
@@ -754,7 +822,27 @@ function RolesPage() {
   const { data: roles, error, loading } = useApiResource<ApiRole[]>('/api/v1/roles');
   return <Page eyebrow="ADMINISTRATION" title="Directory roles" subtitle="Privileged and standard roles available through AccessPilot."><TablePanel toolbar={<Toolbar placeholder="Search roles"/>}>{loading ? <div className="empty">Loading roles...</div> : error ? <div className="empty">{error}</div> : !roles || roles.length === 0 ? <div className="empty">No roles found.</div> : <table><thead><tr><th>Role</th><th>Description</th><th>Provider</th><th>Privileged</th><th>Status</th></tr></thead><tbody>{roles.map(r => <tr key={r.id}><td className="user-name">{r.name}</td><td>{r.description || '—'}</td><td>Microsoft Entra ID</td><td><span className={`risk ${r.is_privileged ? 'risk-high' : 'risk-low'}`}>{r.is_privileged ? 'Yes' : 'No'}</span></td><td><StatusBadge status={r.status}/></td></tr>)}</tbody></table>}</TablePanel></Page>;
 }
-function PoliciesPage() { return <Page eyebrow="GOVERNANCE" title="Policies" subtitle="Rules that govern access duration, approvals, and assurance." action={<button className="btn btn-primary"><Plus size={14}/> Create policy</button>}><TablePanel toolbar={<Toolbar placeholder="Search policies"/>}><table><thead><tr><th>Policy name</th><th>Description</th><th>Scope</th><th>Max duration</th><th>Approval</th><th>MFA</th><th>Ticket</th><th>Status</th><th></th></tr></thead><tbody>{policies.map(p => <tr key={p.name}><td className="user-name">{p.name}</td><td>{p.description}</td><td>{p.scope}</td><td>{p.max}</td><td>{p.approval}</td><td>{p.mfa}</td><td>{p.ticket}</td><td><StatusBadge status={p.status}/></td><td><button className="btn">Edit</button></td></tr>)}</tbody></table></TablePanel></Page>; }
+function PoliciesPage() {
+  const auth = useAuth();
+  const { data: providers, reload: reloadProviders } = useApiResource<ApiProvider[]>('/api/v1/providers');
+  const provider = providers?.find(p => p.provider_type === 'ENTRA') || providers?.[0] || null;
+  const [activationHoursValue, setActivationHoursValue] = useState('');
+  const [activationSaving, setActivationSaving] = useState(false);
+  const [activationMessage, setActivationMessage] = useState('');
+  const saveActivationCap = async (hours: number) => {
+    if (!provider) return;
+    setActivationSaving(true); setActivationMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/providers/${provider.id}`, { method: 'PATCH', body: JSON.stringify({ max_self_activation_hours: hours }) });
+      if (response.ok) { setActivationMessage(`End users may now self-activate eligible access for up to ${hours} hours.`); setActivationHoursValue(''); reloadProviders(); }
+      else { const body = await response.json().catch(() => null); setActivationMessage(body?.error?.message || 'Unable to update the self-activation limit.'); }
+    } catch { setActivationMessage('Unable to update the self-activation limit.'); } finally { setActivationSaving(false); }
+  };
+  return <Page eyebrow="GOVERNANCE" title="Policies" subtitle="Rules that govern access duration, approvals, and assurance." action={<button className="btn btn-primary"><Plus size={14}/> Create policy</button>}>
+    {provider && <section className="panel" style={{marginBottom:18}}><div className="panel-head"><h2>Self-activation (PIM)</h2><span className="badge neutral">Up to {provider.max_self_activation_hours} hours</span></div><div className="detail-section"><p className="subtitle" style={{marginBottom:14}}>The single, universal maximum duration any end user may self-activate their own eligible access for — Group, Role, Application role, or Access Package alike — from their My Access dashboard, mirroring Entra PIM's activation cap. Raising this takes effect immediately for every eligible assignment across the whole tenant.</p><div style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap'}}><label className="key"><span>Maximum self-activation duration (hours)</span><input className="select" type="number" min={1} max={8760} placeholder={String(provider.max_self_activation_hours)} value={activationHoursValue} onChange={event => setActivationHoursValue(event.target.value)}/></label><button className="btn btn-primary" disabled={activationSaving || !activationHoursValue} onClick={() => void saveActivationCap(Number(activationHoursValue))}><Clock3 size={14}/> {activationSaving ? 'Saving...' : 'Save limit'}</button></div>{activationMessage && <div className="notice" style={{marginTop:12}}>{activationMessage}</div>}</div></section>}
+    <TablePanel toolbar={<Toolbar placeholder="Search policies"/>}><table><thead><tr><th>Policy name</th><th>Description</th><th>Scope</th><th>Max duration</th><th>Approval</th><th>MFA</th><th>Ticket</th><th>Status</th><th></th></tr></thead><tbody>{policies.map(p => <tr key={p.name}><td className="user-name">{p.name}</td><td>{p.description}</td><td>{p.scope}</td><td>{p.max}</td><td>{p.approval}</td><td>{p.mfa}</td><td>{p.ticket}</td><td><StatusBadge status={p.status}/></td><td><button className="btn">Edit</button></td></tr>)}</tbody></table></TablePanel>
+  </Page>;
+}
 interface ApiAuditLog { id: string; timestamp: string; actor_user_id: string | null; actor_display_name: string | null; action: string; target_type: string; target_id: string | null; provider_id: string | null; provider_name: string | null; request_id: string; result: string; target_user_display_name: string | null; target_user_email: string | null; }
 function AuditPage() {
   const { data: logs, error, loading, reload } = useApiResource<ApiAuditLog[]>('/api/v1/audit-logs');
@@ -773,9 +861,6 @@ function SyncPage() {
   const [intervalValue, setIntervalValue] = useState('');
   const [scheduleSaving, setScheduleSaving] = useState(false);
   const [scheduleMessage, setScheduleMessage] = useState('');
-  const [activationHoursValue, setActivationHoursValue] = useState('');
-  const [activationSaving, setActivationSaving] = useState(false);
-  const [activationMessage, setActivationMessage] = useState('');
   const runSync = async () => {
     if (!provider) return;
     setSyncing(true); setMessage('');
@@ -794,19 +879,10 @@ function SyncPage() {
       else { const body = await response.json().catch(() => null); setScheduleMessage(body?.error?.message || 'Unable to update the sync schedule.'); }
     } catch { setScheduleMessage('Unable to update the sync schedule.'); } finally { setScheduleSaving(false); }
   };
-  const saveActivationCap = async (hours: number) => {
-    if (!provider) return;
-    setActivationSaving(true); setActivationMessage('');
-    try {
-      const response = await auth.apiRequest(`/api/v1/providers/${provider.id}`, { method: 'PATCH', body: JSON.stringify({ max_self_activation_hours: hours }) });
-      if (response.ok) { setActivationMessage(`End users may now self-activate eligible access for up to ${hours} hours.`); setActivationHoursValue(''); reloadProviders(); }
-      else { const body = await response.json().catch(() => null); setActivationMessage(body?.error?.message || 'Unable to update the self-activation limit.'); }
-    } catch { setActivationMessage('Unable to update the self-activation limit.'); } finally { setActivationSaving(false); }
-  };
   return <Page eyebrow="SYSTEM" title="Sync history" subtitle="Provider synchronization runs and reconciliation results." action={<button className="btn btn-primary" disabled={!provider || syncing} onClick={() => void runSync()}><RefreshCw size={14}/> {syncing ? 'Syncing...' : 'Sync now'}</button>}>
     {message && <div className="detail-section" style={{marginBottom:14}}><div className="notice">{message}</div></div>}
     {provider && <section className="panel" style={{marginBottom:18}}><div className="panel-head"><h2>Scheduled sync</h2><span className="badge neutral">{provider.sync_interval_minutes ? `Every ${provider.sync_interval_minutes} min` : 'Not scheduled'}</span></div><div className="detail-section"><div className="key-grid" style={{marginBottom:14}}><div className="key"><span>Current schedule</span><strong>{provider.sync_interval_minutes ? `Every ${provider.sync_interval_minutes} minutes` : 'Manual only'}</strong></div><div className="key"><span>Last sync</span><strong>{provider.last_sync_at ? new Date(provider.last_sync_at).toLocaleString() : 'Never'}</strong></div></div><div style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap'}}><label className="key"><span>Run every (minutes)</span><input className="select" type="number" min={1} max={10080} placeholder="e.g. 60" value={intervalValue} onChange={event => setIntervalValue(event.target.value)}/></label><button className="btn btn-primary" disabled={scheduleSaving || !intervalValue} onClick={() => void saveSchedule(Number(intervalValue))}><Clock3 size={14}/> {scheduleSaving ? 'Saving...' : 'Schedule sync'}</button>{provider.sync_interval_minutes && <button className="btn" disabled={scheduleSaving} onClick={() => void saveSchedule(null)}>Disable schedule</button>}</div>{scheduleMessage && <div className="notice" style={{marginTop:12}}>{scheduleMessage}</div>}</div></section>}
-    {provider && <section className="panel" style={{marginBottom:18}}><div className="panel-head"><h2>Self-activation</h2><span className="badge neutral">Up to {provider.max_self_activation_hours} hours</span></div><div className="detail-section"><p className="subtitle" style={{marginBottom:14}}>The maximum duration an end user may self-activate their own eligible access for, from their My Access dashboard — mirrors Entra PIM's activation cap. Raising this takes effect immediately for every eligible assignment.</p><div style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap'}}><label className="key"><span>Maximum self-activation duration (hours)</span><input className="select" type="number" min={1} max={8760} placeholder={String(provider.max_self_activation_hours)} value={activationHoursValue} onChange={event => setActivationHoursValue(event.target.value)}/></label><button className="btn btn-primary" disabled={activationSaving || !activationHoursValue} onClick={() => void saveActivationCap(Number(activationHoursValue))}><Clock3 size={14}/> {activationSaving ? 'Saving...' : 'Save limit'}</button></div>{activationMessage && <div className="notice" style={{marginTop:12}}>{activationMessage}</div>}</div></section>}
+    <div className="notice" style={{marginBottom:18}}>Looking for the self-activation time limit (PIM)? That's now under <strong>Policies</strong> in the Governance section.</div>
     <TablePanel toolbar={<Toolbar placeholder="Search sync runs" select="All providers"/>}>{providersLoading || loading ? <div className="empty">Loading sync history...</div> : !provider ? <div className="empty">No identity provider is configured.</div> : error ? <div className="empty">{error}</div> : !runs || runs.length === 0 ? <div className="empty">No sync runs yet.</div> : <table><thead><tr><th>Started</th><th>Completed</th><th>Users</th><th>Groups</th><th>Roles</th><th>Errors</th><th>Status</th></tr></thead><tbody>{runs.map(run => <tr key={run.id}><td className="user-name">{new Date(run.started_at).toLocaleString()}</td><td>{run.completed_at ? new Date(run.completed_at).toLocaleString() : '—'}</td><td>{run.users_processed}</td><td>{run.groups_processed}</td><td>{run.roles_processed}</td><td>{run.errors_count}</td><td><StatusBadge status={run.status}/></td></tr>)}</tbody></table>}</TablePanel>
   </Page>;
 }

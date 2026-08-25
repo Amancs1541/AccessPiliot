@@ -4,7 +4,15 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+def require_justification(value: str) -> str:
+    """Shared rule: a justification must be real text, not just whitespace or a token filler."""
+    stripped = value.strip()
+    if len(stripped) < 3:
+        raise ValueError("A justification of at least 3 characters is required.")
+    return stripped
 
 
 class AssignmentCreate(BaseModel):
@@ -16,7 +24,20 @@ class AssignmentCreate(BaseModel):
     start_time: Optional[datetime] = None
     expiration_time: Optional[datetime] = None
     approver_id: Optional[UUID] = None
-    justification: Optional[str] = Field(default=None, max_length=2000)
+    fallback_approver_id: Optional[UUID] = None
+    fallback_unlock_hours: Optional[int] = Field(default=None, gt=0)
+    justification: str = Field(min_length=3, max_length=2000)
+
+    @field_validator("justification")
+    @classmethod
+    def _validate_justification(cls, value: str) -> str:
+        return require_justification(value)
+
+    @model_validator(mode="after")
+    def _validate_fallback_unlock(self) -> "AssignmentCreate":
+        if self.fallback_unlock_hours is not None and self.fallback_approver_id is None:
+            raise ValueError("fallback_unlock_hours requires fallback_approver_id to be set")
+        return self
 
     @model_validator(mode="after")
     def _validate_duration(self) -> "AssignmentCreate":
@@ -55,6 +76,8 @@ class AssignmentResponse(BaseModel):
     justification: Optional[str]
     requested_by: Optional[UUID]
     approved_by: Optional[UUID]
+    fallback_approver_id: Optional[UUID] = None
+    fallback_unlock_at: Optional[datetime] = None
     activated_at: Optional[datetime]
     revoked_at: Optional[datetime]
     created_at: datetime
@@ -63,3 +86,18 @@ class AssignmentResponse(BaseModel):
 
 class AssignmentActivate(BaseModel):
     duration_hours: float = Field(gt=0)
+    justification: str = Field(min_length=3, max_length=2000)
+
+    @field_validator("justification")
+    @classmethod
+    def _validate_justification(cls, value: str) -> str:
+        return require_justification(value)
+
+
+class AssignmentApprove(BaseModel):
+    justification: str = Field(min_length=3, max_length=2000)
+
+    @field_validator("justification")
+    @classmethod
+    def _validate_justification(cls, value: str) -> str:
+        return require_justification(value)

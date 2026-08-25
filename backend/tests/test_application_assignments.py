@@ -65,14 +65,14 @@ async def test_create_application_assignment_is_eligible_then_activation_grants_
     ids = await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": str(ids["application_id"]), "app_role_external_id": "approle-002", "assignment_type": "PERMANENT"})
+        response = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": str(ids["application_id"]), "app_role_external_id": "approle-002", "assignment_type": "PERMANENT", "justification": "Test justification."})
         assert response.status_code == 201
         body = response.json()
         assert body["status"] == "ELIGIBLE"
         assert body["app_role_external_id"] == "approle-002"
         assert body["resource_display_name"] == "Reporting Portal — Editor"
 
-        activated = await client.post(f"/api/v1/assignments/{body['id']}/activate", json={"duration_hours": 2})
+        activated = await client.post(f"/api/v1/assignments/{body['id']}/activate", json={"duration_hours": 2, "justification": "Test justification."})
     assert activated.status_code == 200
     assert activated.json()["status"] == "ACTIVE"
 
@@ -86,7 +86,7 @@ async def test_application_assignment_requires_app_role_external_id(db_override)
     ids = await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": str(ids["application_id"]), "assignment_type": "PERMANENT"})
+        response = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": str(ids["application_id"]), "assignment_type": "PERMANENT", "justification": "Test justification."})
     assert response.status_code == 422
 
 
@@ -95,7 +95,7 @@ async def test_application_assignment_unknown_role_returns_404(db_override):
     ids = await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": str(ids["application_id"]), "app_role_external_id": "does-not-exist", "assignment_type": "PERMANENT"})
+        response = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": str(ids["application_id"]), "app_role_external_id": "does-not-exist", "assignment_type": "PERMANENT", "justification": "Test justification."})
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "APPLICATION_ROLE_NOT_FOUND"
 
@@ -105,7 +105,7 @@ async def test_application_assignment_unknown_application_returns_404(db_overrid
     ids = await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": "00000000-0000-0000-0000-000000000000", "app_role_external_id": "approle-001", "assignment_type": "PERMANENT"})
+        response = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": "00000000-0000-0000-0000-000000000000", "app_role_external_id": "approle-001", "assignment_type": "PERMANENT", "justification": "Test justification."})
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "APPLICATION_NOT_FOUND"
 
@@ -114,7 +114,7 @@ async def test_application_assignment_unknown_application_returns_404(db_overrid
 async def test_activating_same_application_and_role_supersedes_the_other_eligible_one(db_override):
     ids = await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.Admin")
-    payload = {"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": str(ids["application_id"]), "app_role_external_id": "approle-001", "assignment_type": "PERMANENT"}
+    payload = {"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": str(ids["application_id"]), "app_role_external_id": "approle-001", "assignment_type": "PERMANENT", "justification": "Test justification."}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         first = await client.post("/api/v1/assignments", json=payload)
         first_id = first.json()["id"]
@@ -122,7 +122,7 @@ async def test_activating_same_application_and_role_supersedes_the_other_eligibl
         second_id = second.json()["id"]
         assert second.status_code == 201
         assert second.json()["status"] == "ELIGIBLE"
-        activated = await client.post(f"/api/v1/assignments/{second_id}/activate", json={"duration_hours": 2})
+        activated = await client.post(f"/api/v1/assignments/{second_id}/activate", json={"duration_hours": 2, "justification": "Test justification."})
     assert activated.status_code == 200
     assert activated.json()["status"] == "ACTIVE"
 
@@ -139,12 +139,12 @@ async def test_different_role_on_same_application_does_not_supersede(db_override
     ids = await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        viewer = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": str(ids["application_id"]), "app_role_external_id": "approle-001", "assignment_type": "PERMANENT"})
+        viewer = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": str(ids["application_id"]), "app_role_external_id": "approle-001", "assignment_type": "PERMANENT", "justification": "Test justification."})
         viewer_id = viewer.json()["id"]
-        await client.post(f"/api/v1/assignments/{viewer_id}/activate", json={"duration_hours": 2})
-        editor = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": str(ids["application_id"]), "app_role_external_id": "approle-002", "assignment_type": "PERMANENT"})
+        await client.post(f"/api/v1/assignments/{viewer_id}/activate", json={"duration_hours": 2, "justification": "Test justification."})
+        editor = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": str(ids["application_id"]), "app_role_external_id": "approle-002", "assignment_type": "PERMANENT", "justification": "Test justification."})
         editor_id = editor.json()["id"]
-        await client.post(f"/api/v1/assignments/{editor_id}/activate", json={"duration_hours": 2})
+        await client.post(f"/api/v1/assignments/{editor_id}/activate", json={"duration_hours": 2, "justification": "Test justification."})
     assert editor.status_code == 201
 
     async with db_override.factory() as session:
@@ -157,10 +157,10 @@ async def test_pending_application_approval_does_not_touch_existing_role_until_a
     ids = await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        first = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": str(ids["application_id"]), "app_role_external_id": "approle-001", "assignment_type": "PERMANENT"})
+        first = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": str(ids["application_id"]), "app_role_external_id": "approle-001", "assignment_type": "PERMANENT", "justification": "Test justification."})
         first_id = first.json()["id"]
-        await client.post(f"/api/v1/assignments/{first_id}/activate", json={"duration_hours": 2})  # make it genuinely real
-        pending = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": str(ids["application_id"]), "app_role_external_id": "approle-001", "assignment_type": "PERMANENT", "approver_id": str(ids["approver_id"])})
+        await client.post(f"/api/v1/assignments/{first_id}/activate", json={"duration_hours": 2, "justification": "Test justification."})  # make it genuinely real
+        pending = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": str(ids["application_id"]), "app_role_external_id": "approle-001", "assignment_type": "PERMANENT", "approver_id": str(ids["approver_id"]), "justification": "Test justification."})
     assert pending.json()["status"] == "PENDING_APPROVAL"
 
     async with db_override.factory() as session:
@@ -173,15 +173,15 @@ async def test_activating_an_approved_application_request_supersedes_the_existin
     ids = await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        first = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": str(ids["application_id"]), "app_role_external_id": "approle-001", "assignment_type": "PERMANENT"})
+        first = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": str(ids["application_id"]), "app_role_external_id": "approle-001", "assignment_type": "PERMANENT", "justification": "Test justification."})
         first_id = first.json()["id"]
-        await client.post(f"/api/v1/assignments/{first_id}/activate", json={"duration_hours": 2})
-        pending = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": str(ids["application_id"]), "app_role_external_id": "approle-001", "assignment_type": "PERMANENT", "approver_id": str(ids["approver_id"])})
+        await client.post(f"/api/v1/assignments/{first_id}/activate", json={"duration_hours": 2, "justification": "Test justification."})
+        pending = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": str(ids["application_id"]), "app_role_external_id": "approle-001", "assignment_type": "PERMANENT", "approver_id": str(ids["approver_id"]), "justification": "Test justification."})
         pending_id = pending.json()["id"]
-        approved = await client.post(f"/api/v1/assignments/{pending_id}/approve")
+        approved = await client.post(f"/api/v1/assignments/{pending_id}/approve", json={"justification": "Test justification."})
         assert approved.status_code == 200
         assert approved.json()["status"] == "ELIGIBLE"
-        activated = await client.post(f"/api/v1/assignments/{pending_id}/activate", json={"duration_hours": 2})
+        activated = await client.post(f"/api/v1/assignments/{pending_id}/activate", json={"duration_hours": 2, "justification": "Test justification."})
     assert activated.status_code == 200
     assert activated.json()["status"] == "ACTIVE"
 

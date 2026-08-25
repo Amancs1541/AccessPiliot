@@ -49,12 +49,12 @@ async def test_reassigning_same_group_is_visible_in_audit_logs(db_override):
         ids = {"user_id": target_user.id, "group_id": group.id}
 
     authenticate_as("AccessPilot.Admin")
-    payload = {"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"}
+    payload = {"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT", "justification": "Test justification."}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         first = await client.post("/api/v1/assignments", json=payload)
-        await client.post(f"/api/v1/assignments/{first.json()['id']}/activate", json={"duration_hours": 2})
+        await client.post(f"/api/v1/assignments/{first.json()['id']}/activate", json={"duration_hours": 2, "justification": "Test justification."})
         second = await client.post("/api/v1/assignments", json=payload)
-        await client.post(f"/api/v1/assignments/{second.json()['id']}/activate", json={"duration_hours": 2})
+        await client.post(f"/api/v1/assignments/{second.json()['id']}/activate", json={"duration_hours": 2, "justification": "Test justification."})
         logs = await client.get("/api/v1/audit-logs")
 
     assert logs.status_code == 200
@@ -78,7 +78,7 @@ async def test_assignment_audit_entries_include_target_user_detail(db_override):
         ids = {"user_id": target_user.id, "group_id": group.id}
 
     authenticate_as("AccessPilot.Admin")
-    payload = {"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"}
+    payload = {"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT", "justification": "Test justification."}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         await client.post("/api/v1/assignments", json=payload)
         logs = await client.get("/api/v1/audit-logs")

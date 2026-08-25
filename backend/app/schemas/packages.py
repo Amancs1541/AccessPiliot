@@ -4,9 +4,9 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.schemas.assignments import AssignmentResponse
+from app.schemas.assignments import AssignmentResponse, require_justification
 
 
 class PackageItemCreate(BaseModel):
@@ -32,10 +32,25 @@ class PackageItemResponse(BaseModel):
     app_role_external_id: Optional[str] = None
 
 
+class PackageEligibilityPrincipalInput(BaseModel):
+    principal_type: str = Field(pattern="^(USER|GROUP)$")
+    principal_id: UUID
+
+
 class PackageCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     description: Optional[str] = Field(default=None, max_length=2000)
     items: list[PackageItemCreate] = Field(min_length=1)
+    principals: list[PackageEligibilityPrincipalInput] = []
+    default_approver_id: Optional[UUID] = None
+    default_fallback_approver_id: Optional[UUID] = None
+    fallback_unlock_hours: Optional[int] = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_fallback_unlock(self) -> "PackageCreate":
+        if self.fallback_unlock_hours is not None and self.default_fallback_approver_id is None:
+            raise ValueError("fallback_unlock_hours requires default_fallback_approver_id to be set")
+        return self
 
 
 class PackageEligibilityPrincipal(BaseModel):
@@ -51,6 +66,8 @@ class PackageResponse(BaseModel):
     status: str
     items: list[PackageItemResponse]
     default_approver_id: Optional[UUID] = None
+    default_fallback_approver_id: Optional[UUID] = None
+    fallback_unlock_hours: Optional[int] = None
     eligible_principals: list[PackageEligibilityPrincipal] = []
     created_at: datetime
 
@@ -61,21 +78,29 @@ class PackageUpdate(BaseModel):
     items: Optional[list[PackageItemCreate]] = Field(default=None, min_length=1)
 
 
-class PackageEligibilityPrincipalInput(BaseModel):
-    principal_type: str = Field(pattern="^(USER|GROUP)$")
-    principal_id: UUID
-
-
 class PackageEligibilityUpdate(BaseModel):
     principals: list[PackageEligibilityPrincipalInput] = []
     default_approver_id: Optional[UUID] = None
+    default_fallback_approver_id: Optional[UUID] = None
+    fallback_unlock_hours: Optional[int] = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_fallback_unlock(self) -> "PackageEligibilityUpdate":
+        if self.fallback_unlock_hours is not None and self.default_fallback_approver_id is None:
+            raise ValueError("fallback_unlock_hours requires default_fallback_approver_id to be set")
+        return self
 
 
 class PackageRequestCreate(BaseModel):
     assignment_type: str = Field(pattern="^(PERMANENT|TEMPORARY)$")
     start_time: Optional[datetime] = None
     expiration_time: Optional[datetime] = None
-    justification: Optional[str] = Field(default=None, max_length=2000)
+    justification: str = Field(min_length=3, max_length=2000)
+
+    @field_validator("justification")
+    @classmethod
+    def _validate_justification(cls, value: str) -> str:
+        return require_justification(value)
 
     @model_validator(mode="after")
     def _validate_duration(self) -> "PackageRequestCreate":
@@ -96,7 +121,12 @@ class PackageAssignCreate(BaseModel):
     start_time: Optional[datetime] = None
     expiration_time: Optional[datetime] = None
     approver_id: Optional[UUID] = None
-    justification: Optional[str] = Field(default=None, max_length=2000)
+    justification: str = Field(min_length=3, max_length=2000)
+
+    @field_validator("justification")
+    @classmethod
+    def _validate_justification(cls, value: str) -> str:
+        return require_justification(value)
 
     @model_validator(mode="after")
     def _validate_duration(self) -> "PackageAssignCreate":

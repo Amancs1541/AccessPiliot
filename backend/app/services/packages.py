@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AccessPilotError
@@ -42,7 +42,7 @@ async def _hydrate_eligibility(session: AsyncSession, package_id: UUID) -> list[
 async def _to_package_response(session: AsyncSession, package: AccessPackage) -> PackageResponse:
     items = list((await session.scalars(select(AccessPackageItem).where(AccessPackageItem.package_id == package.id))).all())
     eligible_principals = await _hydrate_eligibility(session, package.id)
-    return PackageResponse(id=package.id, name=package.name, description=package.description, status=package.status, items=[await _hydrate_item(session, item) for item in items], default_approver_id=package.default_approver_id, eligible_principals=eligible_principals, created_at=package.created_at)
+    return PackageResponse(id=package.id, name=package.name, description=package.description, status=package.status, items=[await _hydrate_item(session, item) for item in items], default_approver_id=package.default_approver_id, default_fallback_approver_id=package.default_fallback_approver_id, fallback_unlock_hours=package.fallback_unlock_hours, eligible_principals=eligible_principals, created_at=package.created_at)
 
 
 async def _validate_items(session: AsyncSession, items: list[PackageItemCreate]) -> None:
@@ -59,7 +59,35 @@ async def _validate_items(session: AsyncSession, items: list[PackageItemCreate])
                 raise AccessPilotError("APPLICATION_ROLE_NOT_FOUND", "The selected application role was not found.", 404)
 
 
+async def _apply_package_eligibility(session: AsyncSession, package: AccessPackage, *, principals, default_approver_id: UUID | None, default_fallback_approver_id: UUID | None, fallback_unlock_hours: int | None) -> None:
+    """Shared by create_package() and set_package_eligibility(): validates and writes who may self-request the
+    package plus its approver/fallback-approver/escalation-window setup. Setup can happen either during creation
+    (one combined flow) or afterward via the dedicated eligibility endpoint — both paths behave identically."""
+    for principal in principals:
+        if principal.principal_type == "USER":
+            if not await session.get(User, principal.principal_id):
+                raise AccessPilotError("USER_NOT_FOUND", "One of the selected users was not found.", 404)
+        else:
+            if not await session.get(Group, principal.principal_id):
+                raise AccessPilotError("GROUP_NOT_FOUND", "One of the selected groups was not found.", 404)
+    if default_approver_id is not None and not await session.get(User, default_approver_id):
+        raise AccessPilotError("USER_NOT_FOUND", "The selected default approver was not found.", 404)
+    if default_fallback_approver_id is not None and not await session.get(User, default_fallback_approver_id):
+        raise AccessPilotError("USER_NOT_FOUND", "The selected fallback approver was not found.", 404)
+
+    for existing_row in list((await session.scalars(select(AccessPackageEligibility).where(AccessPackageEligibility.package_id == package.id))).all()):
+        await session.delete(existing_row)
+    await session.flush()
+    for principal in principals:
+        session.add(AccessPackageEligibility(package_id=package.id, principal_type=principal.principal_type, principal_id=principal.principal_id))
+    package.default_approver_id = default_approver_id
+    package.default_fallback_approver_id = default_fallback_approver_id
+    package.fallback_unlock_hours = fallback_unlock_hours
+
+
 async def create_package(session: AsyncSession, data: PackageCreate, actor_subject: str, request_id: str) -> PackageResponse:
+    """One combined setup flow: name/description, who can request it, the approver + optional fallback approver
+    (and how long the fallback must wait before it may act), and finally the items — all in a single call."""
     existing = (await session.execute(select(AccessPackage).where(AccessPackage.name == data.name))).scalars().first()
     if existing:
         raise AccessPilotError("PACKAGE_ALREADY_EXISTS", "A package with this name already exists.", 409)
@@ -68,12 +96,13 @@ async def create_package(session: AsyncSession, data: PackageCreate, actor_subje
     package = AccessPackage(name=data.name, description=data.description, status="ACTIVE")
     session.add(package)
     await session.flush()
+    await _apply_package_eligibility(session, package, principals=data.principals, default_approver_id=data.default_approver_id, default_fallback_approver_id=data.default_fallback_approver_id, fallback_unlock_hours=data.fallback_unlock_hours)
     for item in data.items:
         session.add(AccessPackageItem(package_id=package.id, resource_type=item.resource_type, resource_id=item.resource_id, app_role_external_id=item.app_role_external_id))
     await session.flush()
 
     actor_id = await _resolve_internal_user_id(session, actor_subject)
-    await record_audit(session, action="PACKAGE_CREATED", target_type="PACKAGE", target_id=package.id, actor_user_id=actor_id, request_id=request_id, metadata={"item_count": len(data.items)})
+    await record_audit(session, action="PACKAGE_CREATED", target_type="PACKAGE", target_id=package.id, actor_user_id=actor_id, request_id=request_id, metadata={"item_count": len(data.items), "principal_count": len(data.principals)})
     await session.commit()
     await session.refresh(package)
     return await _to_package_response(session, package)
@@ -155,12 +184,17 @@ async def _assign_package_to_user(session: AsyncSession, package_id: UUID, items
     batch_id = uuid4()
     results: list[PackageAssignItemResult] = []
     created_count = 0
+    # The package's own configured fallback approver (and its escalation wait, if any) applies regardless of which
+    # primary approver_id ends up being used for this particular assign/request (see _authorize_decision).
+    package = await session.get(AccessPackage, package_id)
+    fallback_approver_id = package.default_fallback_approver_id if package and data.approver_id is not None else None
+    fallback_unlock_hours = package.fallback_unlock_hours if package and fallback_approver_id else None
     for item in items:
         payload = AssignmentCreate(
             user_id=user_id, resource_type=item.resource_type, resource_id=item.resource_id,
             app_role_external_id=item.app_role_external_id, assignment_type=data.assignment_type,
             start_time=data.start_time, expiration_time=data.expiration_time,
-            approver_id=data.approver_id, justification=data.justification,
+            approver_id=data.approver_id, fallback_approver_id=fallback_approver_id, fallback_unlock_hours=fallback_unlock_hours, justification=data.justification,
         )
         try:
             assignment, hydrated = await create_assignment(session, payload, actor_subject, request_id)
@@ -232,9 +266,10 @@ async def list_assignment_batches(session: AsyncSession) -> list[PackageAssignme
 
 
 async def list_my_assignment_batches(session: AsyncSession, actor_subject: str) -> list[PackageAssignmentBatch]:
-    """Package assignment batches where the caller is the designated approver — available to any authenticated
-    user, not just Admins, mirroring list_my_approvals(). A batch's items always share one approver (assign_package
-    applies one approver_id to every item), so filtering by approved_by naturally scopes to whole batches."""
+    """Package assignment batches where the caller is the designated approver OR the configured fallback approver —
+    available to any authenticated user, not just Admins, mirroring list_my_approvals(). A batch's items always
+    share one approver pair (assign_package applies the same approver_id/fallback to every item), so filtering by
+    either naturally scopes to whole batches."""
     actor_id = await _resolve_internal_user_id(session, actor_subject)
     if actor_id is None:
         return []
@@ -242,7 +277,7 @@ async def list_my_assignment_batches(session: AsyncSession, actor_subject: str) 
         select(AccessPackageAssignment.package_assignment_id, AccessPackageAssignment.package_id, AccessPackageAssignment.user_id, AccessPackageAssignment.assignment_id, AccessPackage.name)
         .join(AccessPackage, AccessPackage.id == AccessPackageAssignment.package_id)
         .join(AccessAssignment, AccessAssignment.id == AccessPackageAssignment.assignment_id)
-        .where(AccessAssignment.approved_by == actor_id)
+        .where(or_(AccessAssignment.approved_by == actor_id, AccessAssignment.fallback_approver_id == actor_id))
         .order_by(AccessPackageAssignment.created_at)
     )).all()
     return _group_batch_rows(rows)
@@ -267,24 +302,12 @@ async def list_my_package_batches(session: AsyncSession, actor_subject: str) -> 
 async def set_package_eligibility(session: AsyncSession, package_id: UUID, data: PackageEligibilityUpdate, actor_subject: str, request_id: str) -> PackageResponse:
     """Replaces the full set of who may self-request this package (individual users and/or whole groups), and
     sets the approver automatically applied when someone eligible actually requests it (optional — no approver
-    means the request activates immediately, exactly like an admin-created assignment with no approver_id)."""
+    means the request lands eligible immediately, exactly like an admin-created assignment with no approver_id).
+    An optional fallback approver may also be set — either the primary or the fallback approving is sufficient
+    (immediately, or after fallback_unlock_hours has elapsed with no primary response if that's configured); it
+    applies to every assignment made from this package, whether via self-request or an admin's direct assign."""
     package = await get_package(session, package_id)
-    for principal in data.principals:
-        if principal.principal_type == "USER":
-            if not await session.get(User, principal.principal_id):
-                raise AccessPilotError("USER_NOT_FOUND", "One of the selected users was not found.", 404)
-        else:
-            if not await session.get(Group, principal.principal_id):
-                raise AccessPilotError("GROUP_NOT_FOUND", "One of the selected groups was not found.", 404)
-    if data.default_approver_id is not None and not await session.get(User, data.default_approver_id):
-        raise AccessPilotError("USER_NOT_FOUND", "The selected default approver was not found.", 404)
-
-    for existing_row in list((await session.scalars(select(AccessPackageEligibility).where(AccessPackageEligibility.package_id == package_id))).all()):
-        await session.delete(existing_row)
-    await session.flush()
-    for principal in data.principals:
-        session.add(AccessPackageEligibility(package_id=package_id, principal_type=principal.principal_type, principal_id=principal.principal_id))
-    package.default_approver_id = data.default_approver_id
+    await _apply_package_eligibility(session, package, principals=data.principals, default_approver_id=data.default_approver_id, default_fallback_approver_id=data.default_fallback_approver_id, fallback_unlock_hours=data.fallback_unlock_hours)
 
     actor_id = await _resolve_internal_user_id(session, actor_subject)
     await record_audit(session, action="PACKAGE_ELIGIBILITY_UPDATED", target_type="PACKAGE", target_id=package_id, actor_user_id=actor_id, request_id=request_id, metadata={"principal_count": len(data.principals)})

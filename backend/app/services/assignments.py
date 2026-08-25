@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AccessPilotError
@@ -22,6 +22,7 @@ def to_response(assignment: AccessAssignment, hydrated: dict) -> AssignmentRespo
         app_role_external_id=assignment.app_role_external_id,
         assignment_type=assignment.assignment_type, status=assignment.status, start_time=assignment.start_time, expiration_time=assignment.expiration_time,
         justification=assignment.justification, requested_by=assignment.requested_by, approved_by=assignment.approved_by,
+        fallback_approver_id=assignment.fallback_approver_id, fallback_unlock_at=assignment.fallback_unlock_at,
         activated_at=assignment.activated_at, revoked_at=assignment.revoked_at, created_at=assignment.created_at,
         package_name=hydrated.get("package_name"),
     )
@@ -175,6 +176,11 @@ async def create_assignment(session: AsyncSession, data, actor_subject: str, req
         if not approver:
             raise AccessPilotError("USER_NOT_FOUND", "The selected approver was not found.", 404)
 
+    if data.fallback_approver_id is not None:
+        fallback_approver = await session.get(User, data.fallback_approver_id)
+        if not fallback_approver:
+            raise AccessPilotError("USER_NOT_FOUND", "The selected fallback approver was not found.", 404)
+
     requested_by = await _resolve_internal_user_id(session, actor_subject)
     now = datetime.now(timezone.utc)
     approval_required = data.approver_id is not None
@@ -185,6 +191,11 @@ async def create_assignment(session: AsyncSession, data, actor_subject: str, req
     # regardless of assignment_type (Permanent vs Temporary) and regardless of who created it (Admin, self-service
     # package request, etc.) — Permanent means "eligible indefinitely", not "granted forever with no activation".
     status = "PENDING_APPROVAL" if approval_required else "ELIGIBLE"
+
+    fallback_approver_id = data.fallback_approver_id if approval_required else None
+    # If a wait period is configured, the fallback approver can only act once it elapses without the primary
+    # approver having responded; with no wait period, either approver may act at any time (immediate fallback).
+    fallback_unlock_at = now + timedelta(hours=data.fallback_unlock_hours) if fallback_approver_id and data.fallback_unlock_hours else None
 
     assignment = AccessAssignment(
         provider_id=provider_id,
@@ -199,6 +210,8 @@ async def create_assignment(session: AsyncSession, data, actor_subject: str, req
         justification=data.justification,
         requested_by=requested_by,
         approved_by=data.approver_id,
+        fallback_approver_id=fallback_approver_id,
+        fallback_unlock_at=fallback_unlock_at,
         activated_at=None,
     )
     session.add(assignment)
@@ -222,11 +235,12 @@ async def list_assignments(session: AsyncSession) -> list[tuple[AccessAssignment
 
 
 async def list_my_approvals(session: AsyncSession, actor_subject: str) -> list[tuple[AccessAssignment, dict]]:
-    """Assignments where the caller is the designated approver — regardless of AccessPilot role."""
+    """Assignments where the caller is the designated approver OR the configured fallback approver — either one
+    is authorized to decide, regardless of AccessPilot role."""
     actor_id = await _resolve_internal_user_id(session, actor_subject)
     if actor_id is None:
         return []
-    assignments = list((await session.scalars(select(AccessAssignment).where(AccessAssignment.approved_by == actor_id).order_by(AccessAssignment.created_at.desc()))).all())
+    assignments = list((await session.scalars(select(AccessAssignment).where(or_(AccessAssignment.approved_by == actor_id, AccessAssignment.fallback_approver_id == actor_id)).order_by(AccessAssignment.created_at.desc()))).all())
     return [(assignment, await hydrate_display_fields(session, assignment)) for assignment in assignments]
 
 
@@ -241,13 +255,24 @@ async def list_my_assignments(session: AsyncSession, actor_subject: str) -> list
 
 
 async def _authorize_decision(session: AsyncSession, assignment: AccessAssignment, actor_subject: str, actor_roles: tuple[str, ...]) -> Optional[UUID]:
-    """Only the designated approver, or an Admin, may approve/reject. Returns the actor's internal user id (or None)."""
+    """The designated approver or an Admin may always act. The configured fallback approver may act too — either
+    immediately (if no wait period is configured) or, once one is, only after fallback_unlock_at has passed
+    without the primary approver having responded. Returns the actor's internal user id (or None)."""
     actor_id = await _resolve_internal_user_id(session, actor_subject)
     if "AccessPilot.Admin" in actor_roles:
         return actor_id
     if actor_id is not None and actor_id == assignment.approved_by:
         return actor_id
-    raise AccessPilotError("ACCESS_DENIED", "Only the designated approver or an administrator can act on this assignment.", 403)
+    if actor_id is not None and actor_id == assignment.fallback_approver_id:
+        if assignment.fallback_unlock_at is not None:
+            now = datetime.now(timezone.utc)
+            unlock_at = assignment.fallback_unlock_at
+            if unlock_at.tzinfo is None:
+                unlock_at = unlock_at.replace(tzinfo=timezone.utc)
+            if now < unlock_at:
+                raise AccessPilotError("FALLBACK_NOT_YET_AVAILABLE", f"The fallback approver may only act after {unlock_at.isoformat()} if the primary approver has not responded.", 403)
+        return actor_id
+    raise AccessPilotError("ACCESS_DENIED", "Only the designated approver, the fallback approver (once eligible), or an administrator can act on this assignment.", 403)
 
 
 async def _authorize_activation(session: AsyncSession, assignment: AccessAssignment, actor_subject: str, actor_roles: tuple[str, ...]) -> Optional[UUID]:
@@ -260,10 +285,12 @@ async def _authorize_activation(session: AsyncSession, assignment: AccessAssignm
     raise AccessPilotError("ACCESS_DENIED", "Only this assignment's own user or an administrator can activate it.", 403)
 
 
-async def activate_assignment(session: AsyncSession, assignment_id: UUID, actor_subject: str, actor_roles: tuple[str, ...], duration_hours: float, request_id: str) -> tuple[AccessAssignment, dict]:
+async def activate_assignment(session: AsyncSession, assignment_id: UUID, actor_subject: str, actor_roles: tuple[str, ...], duration_hours: float, justification: str, request_id: str) -> tuple[AccessAssignment, dict]:
     """Self-service (or admin-on-behalf-of) activation of an ELIGIBLE assignment — the custom-PIM equivalent of
     Entra PIM's 'Activate'. Grants real Entra/Graph access for a duration chosen by the caller, capped at the
-    provider's max_self_activation_hours."""
+    provider's max_self_activation_hours. A justification is mandatory (enforced by the schema) and recorded on
+    the ASSIGNMENT_ACTIVATED audit entry — why THIS activation happened, distinct from the assignment's own
+    original creation-time justification."""
     assignment = await get_assignment(session, assignment_id)
     if assignment.status != "ELIGIBLE":
         raise AccessPilotError("REQUEST_ALREADY_PROCESSED", "Only eligible assignments can be activated.", 409)
@@ -297,14 +324,14 @@ async def activate_assignment(session: AsyncSession, assignment_id: UUID, actor_
     try:
         await _grant_provider_access(session, assignment.provider_id, assignment.resource_type, target_external_id, target_user.external_id, assignment.app_role_external_id)
     except AccessPilotError as exc:
-        await record_audit(session, action="ASSIGNMENT_ACTIVATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, actor_user_id=actor_id, request_id=request_id, result="FAILURE", metadata={"decision": "SELF_ACTIVATED", "error_code": exc.code})
+        await record_audit(session, action="ASSIGNMENT_ACTIVATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, actor_user_id=actor_id, request_id=request_id, result="FAILURE", metadata={"decision": "SELF_ACTIVATED", "error_code": exc.code, "justification": justification})
         await session.commit()
         raise
 
     assignment.status = "ACTIVE"
     assignment.activated_at = now
     assignment.expiration_time = now + timedelta(hours=duration_hours)
-    await record_audit(session, action="ASSIGNMENT_ACTIVATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, actor_user_id=actor_id, request_id=request_id, metadata={"decision": "SELF_ACTIVATED", "duration_hours": duration_hours})
+    await record_audit(session, action="ASSIGNMENT_ACTIVATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, actor_user_id=actor_id, request_id=request_id, metadata={"decision": "SELF_ACTIVATED", "duration_hours": duration_hours, "justification": justification})
     await session.commit()
     await session.refresh(assignment)
     return assignment, await hydrate_display_fields(session, assignment)
@@ -335,14 +362,15 @@ async def deactivate_assignment(session: AsyncSession, assignment_id: UUID, acto
     return assignment, await hydrate_display_fields(session, assignment)
 
 
-async def approve_assignment(session: AsyncSession, assignment_id: UUID, actor_subject: str, actor_roles: tuple[str, ...], request_id: str) -> tuple[AccessAssignment, dict]:
+async def approve_assignment(session: AsyncSession, assignment_id: UUID, actor_subject: str, actor_roles: tuple[str, ...], justification: str, request_id: str) -> tuple[AccessAssignment, dict]:
     """Approves a pending request — but under the custom-PIM eligible/activate model, approval only grants
     ELIGIBILITY, never real access directly. The target user (or an Admin on their behalf) still activates it from
     My Access afterward, exactly like any other eligible assignment, capped at the provider's
     max_self_activation_hours. This mirrors create_assignment()'s no-approver branch — the only difference is the
     starting state (PENDING_APPROVAL) and that approved_by is already known. Superseding any existing access to the
     exact same target is deferred to that later activation, not done here — same reasoning as everywhere else in
-    this file: nothing about the user's real access should change until it's actually about to become real."""
+    this file: nothing about the user's real access should change until it's actually about to become real. A
+    justification for the decision is mandatory (enforced by the schema) and recorded on the audit entry."""
     assignment = await get_assignment(session, assignment_id)
     if assignment.status != "PENDING_APPROVAL":
         raise AccessPilotError("REQUEST_ALREADY_PROCESSED", "Only assignments pending approval can be approved.", 409)
@@ -350,7 +378,7 @@ async def approve_assignment(session: AsyncSession, assignment_id: UUID, actor_s
 
     assignment.status = "ELIGIBLE"
     assignment.approved_by = actor_id or assignment.approved_by
-    await record_audit(session, action="ASSIGNMENT_APPROVED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, actor_user_id=actor_id, request_id=request_id, metadata={"decision": "APPROVED"})
+    await record_audit(session, action="ASSIGNMENT_APPROVED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, actor_user_id=actor_id, request_id=request_id, metadata={"decision": "APPROVED", "justification": justification})
     await session.commit()
     await session.refresh(assignment)
     return assignment, await hydrate_display_fields(session, assignment)

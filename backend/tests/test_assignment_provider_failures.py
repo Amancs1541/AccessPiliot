@@ -60,7 +60,7 @@ async def test_create_assignment_never_calls_the_provider_and_always_succeeds(db
     monkeypatch.delenv("ENTRA_API_CLIENT_SECRET", raising=False)
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
+        response = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT", "justification": "Test justification."})
     assert response.status_code == 201
     assert response.json()["status"] == "ELIGIBLE"
 
@@ -72,9 +72,9 @@ async def test_activate_does_not_activate_when_graph_grant_fails(db_override, mo
     monkeypatch.delenv("ENTRA_API_CLIENT_SECRET", raising=False)
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        created = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
+        created = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT", "justification": "Test justification."})
         assignment_id = created.json()["id"]
-        response = await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 2})
+        response = await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 2, "justification": "Test justification."})
     assert response.status_code in (502, 503)
 
     async with db_override.factory() as session:
@@ -89,7 +89,7 @@ async def test_approve_never_calls_the_provider_and_always_succeeds(db_override,
     ids = await _seed(db_override.factory, "MOCK")
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        created = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT", "approver_id": str(ids["user_id"])})
+        created = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT", "approver_id": str(ids["user_id"]), "justification": "Test justification."})
         assignment_id = created.json()["id"]
 
     async def failing_activate(self, request):
@@ -98,7 +98,7 @@ async def test_approve_never_calls_the_provider_and_always_succeeds(db_override,
     monkeypatch.setattr("app.providers.mock.MockProvider.activate_assignment", failing_activate)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        approved = await client.post(f"/api/v1/assignments/{assignment_id}/approve")
+        approved = await client.post(f"/api/v1/assignments/{assignment_id}/approve", json={"justification": "Test justification."})
     assert approved.status_code == 200
     assert approved.json()["status"] == "ELIGIBLE"
 
@@ -108,9 +108,9 @@ async def test_activating_an_approved_assignment_does_not_activate_when_graph_gr
     ids = await _seed(db_override.factory, "MOCK")
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        created = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT", "approver_id": str(ids["user_id"])})
+        created = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT", "approver_id": str(ids["user_id"]), "justification": "Test justification."})
         assignment_id = created.json()["id"]
-        await client.post(f"/api/v1/assignments/{assignment_id}/approve")
+        await client.post(f"/api/v1/assignments/{assignment_id}/approve", json={"justification": "Test justification."})
 
     async def failing_activate(self, request):
         from app.providers.graph_client import GraphError
@@ -118,7 +118,7 @@ async def test_activating_an_approved_assignment_does_not_activate_when_graph_gr
     monkeypatch.setattr("app.providers.mock.MockProvider.activate_assignment", failing_activate)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        activated = await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 2})
+        activated = await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 2, "justification": "Test justification."})
     assert activated.status_code in (502, 503)
 
     async with db_override.factory() as session:

@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import pytest
@@ -134,10 +135,10 @@ async def test_assign_package_creates_one_assignment_per_item_as_eligible_then_a
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         created = await client.post("/api/v1/packages", json=_package_payload(ids))
         package_id = created.json()["id"]
-        assigned = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT"})
+        assigned = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT", "justification": "Test justification."})
         member = assigned.json()["members"][0]
         first_item_id = member["results"][0]["assignment"]["id"]
-        activated = await client.post(f"/api/v1/assignments/{first_item_id}/activate", json={"duration_hours": 2})
+        activated = await client.post(f"/api/v1/assignments/{first_item_id}/activate", json={"duration_hours": 2, "justification": "Test justification."})
     assert assigned.status_code == 201
     body = assigned.json()
     assert len(body["members"]) == 1
@@ -159,13 +160,13 @@ async def test_assign_package_with_approver_does_not_touch_existing_access_until
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         # Pre-existing direct assignment to the same group, already ACTIVE.
-        direct = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
+        direct = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT", "justification": "Test justification."})
         direct_id = direct.json()["id"]
-        await client.post(f"/api/v1/assignments/{direct_id}/activate", json={"duration_hours": 2})
+        await client.post(f"/api/v1/assignments/{direct_id}/activate", json={"duration_hours": 2, "justification": "Test justification."})
 
         created = await client.post("/api/v1/packages", json=_package_payload(ids))
         package_id = created.json()["id"]
-        assigned = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT", "approver_id": str(ids["approver_id"])})
+        assigned = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT", "approver_id": str(ids["approver_id"]), "justification": "Test justification."})
     assert assigned.status_code == 201
     member = assigned.json()["members"][0]
     assert all(result["assignment"]["status"] == "PENDING_APPROVAL" for result in member["results"])
@@ -182,13 +183,13 @@ async def test_approving_a_package_item_individually_via_existing_endpoint(db_ov
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         created = await client.post("/api/v1/packages", json=_package_payload(ids))
         package_id = created.json()["id"]
-        assigned = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT", "approver_id": str(ids["approver_id"])})
+        assigned = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT", "approver_id": str(ids["approver_id"]), "justification": "Test justification."})
         first_item_assignment_id = assigned.json()["members"][0]["results"][0]["assignment"]["id"]
 
-        approved = await client.post(f"/api/v1/assignments/{first_item_assignment_id}/approve")
+        approved = await client.post(f"/api/v1/assignments/{first_item_assignment_id}/approve", json={"justification": "Test justification."})
         assert approved.status_code == 200
         assert approved.json()["status"] == "ELIGIBLE"
-        activated = await client.post(f"/api/v1/assignments/{first_item_assignment_id}/activate", json={"duration_hours": 2})
+        activated = await client.post(f"/api/v1/assignments/{first_item_assignment_id}/activate", json={"duration_hours": 2, "justification": "Test justification."})
     assert activated.status_code == 200
     assert activated.json()["status"] == "ACTIVE"
 
@@ -200,12 +201,12 @@ async def test_reassigning_same_package_to_same_user_does_not_supersede_until_ac
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         created = await client.post("/api/v1/packages", json=_package_payload(ids))
         package_id = created.json()["id"]
-        first = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT"})
+        first = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT", "justification": "Test justification."})
         first_ids = [UUID(r["assignment"]["id"]) for r in first.json()["members"][0]["results"]]
         for assignment_id in first_ids:
-            await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 2})
+            await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 2, "justification": "Test justification."})
 
-        second = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT"})
+        second = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT", "justification": "Test justification."})
         second_ids = [UUID(r["assignment"]["id"]) for r in second.json()["members"][0]["results"]]
     assert second.status_code == 201
     assert all(result["assignment"]["status"] == "ELIGIBLE" for result in second.json()["members"][0]["results"])
@@ -217,7 +218,7 @@ async def test_reassigning_same_package_to_same_user_does_not_supersede_until_ac
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         for assignment_id in second_ids:
-            activated = await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 2})
+            activated = await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 2, "justification": "Test justification."})
             assert activated.status_code == 200
 
     async with db_override.factory() as session:
@@ -247,14 +248,14 @@ async def test_activating_package_items_partial_failure_leaves_others_active(db_
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         created = await client.post("/api/v1/packages", json=_package_payload(ids))
         package_id = created.json()["id"]
-        assigned = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT"})
+        assigned = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT", "justification": "Test justification."})
         results = assigned.json()["members"][0]["results"]
         assert all(result["status"] == "CREATED" for result in results)  # creation itself never touches the provider
 
         outcomes = {}
         for result in results:
             item_id = result["assignment"]["id"]
-            activated = await client.post(f"/api/v1/assignments/{item_id}/activate", json={"duration_hours": 2})
+            activated = await client.post(f"/api/v1/assignments/{item_id}/activate", json={"duration_hours": 2, "justification": "Test justification."})
             outcomes[result["resource_type"]] = activated.status_code
 
     assert outcomes["ROLE"] in (502, 503)
@@ -310,7 +311,7 @@ async def test_update_package_allowed_even_after_assignment_history(db_override)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         created = await client.post("/api/v1/packages", json=_package_payload(ids))
         package_id = created.json()["id"]
-        await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT"})
+        await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT", "justification": "Test justification."})
         updated = await client.patch(f"/api/v1/packages/{package_id}", json={"description": "Updated after use"})
     assert updated.status_code == 200
     assert updated.json()["description"] == "Updated after use"
@@ -347,9 +348,9 @@ async def test_delete_package_with_assignment_history_archives_instead(db_overri
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         created = await client.post("/api/v1/packages", json=_package_payload(ids))
         package_id = created.json()["id"]
-        await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT"})
+        await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT", "justification": "Test justification."})
         deleted = await client.delete(f"/api/v1/packages/{package_id}")
-        second_assign = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT"})
+        second_assign = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT", "justification": "Test justification."})
     assert deleted.status_code == 200
     assert deleted.json()["status"] == "ARCHIVED"
     assert second_assign.status_code == 409
@@ -374,7 +375,7 @@ async def test_list_assignment_batches_groups_items_by_package_assignment_id(db_
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         created = await client.post("/api/v1/packages", json=_package_payload(ids))
         package_id = created.json()["id"]
-        assigned = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT"})
+        assigned = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT", "justification": "Test justification."})
         batches = await client.get("/api/v1/packages/assignment-batches")
     assert batches.status_code == 200
     body = batches.json()
@@ -392,7 +393,7 @@ async def test_my_assignment_batches_is_available_to_a_non_admin_designated_appr
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         created = await client.post("/api/v1/packages", json=_package_payload(ids))
         package_id = created.json()["id"]
-        assigned = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT", "approver_id": str(ids["approver_id"])})
+        assigned = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT", "approver_id": str(ids["approver_id"]), "justification": "Test justification."})
 
     # The designated approver is a plain User, not an Admin — PACKAGE_READ would deny them.
     authenticate_as("AccessPilot.User", subject="admin-oid")
@@ -431,7 +432,7 @@ async def test_assign_package_to_group_creates_one_batch_per_member(db_override)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         created = await client.post("/api/v1/packages", json=_package_payload(ids))
         package_id = created.json()["id"]
-        assigned = await client.post(f"/api/v1/packages/{package_id}/assign", json={"group_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
+        assigned = await client.post(f"/api/v1/packages/{package_id}/assign", json={"group_id": str(ids["group_id"]), "assignment_type": "PERMANENT", "justification": "Test justification."})
     assert assigned.status_code == 201
     body = assigned.json()
     assert len(body["members"]) == 2
@@ -451,7 +452,7 @@ async def test_assign_package_to_empty_group_returns_conflict(db_override):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         created = await client.post("/api/v1/packages", json=_package_payload(ids))
         package_id = created.json()["id"]
-        assigned = await client.post(f"/api/v1/packages/{package_id}/assign", json={"group_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
+        assigned = await client.post(f"/api/v1/packages/{package_id}/assign", json={"group_id": str(ids["group_id"]), "assignment_type": "PERMANENT", "justification": "Test justification."})
     assert assigned.status_code == 409
     assert assigned.json()["error"]["code"] == "GROUP_EMPTY"
 
@@ -520,7 +521,7 @@ async def test_request_package_with_default_approver_creates_pending_assignment(
 
     authenticate_as("AccessPilot.User", subject="target-user")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        requested = await client.post(f"/api/v1/packages/{package_id}/request", json={"assignment_type": "PERMANENT"})
+        requested = await client.post(f"/api/v1/packages/{package_id}/request", json={"assignment_type": "PERMANENT", "justification": "Test justification."})
     assert requested.status_code == 201
     body = requested.json()
     assert body["user_id"] == str(ids["user_id"])
@@ -539,7 +540,7 @@ async def test_request_package_without_default_approver_is_eligible_not_active(d
 
     authenticate_as("AccessPilot.User", subject="target-user")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        requested = await client.post(f"/api/v1/packages/{package_id}/request", json={"assignment_type": "PERMANENT"})
+        requested = await client.post(f"/api/v1/packages/{package_id}/request", json={"assignment_type": "PERMANENT", "justification": "Test justification."})
     assert requested.status_code == 201
     assert all(result["assignment"]["status"] == "ELIGIBLE" for result in requested.json()["results"])
 
@@ -554,7 +555,7 @@ async def test_request_package_denied_for_ineligible_user(db_override):
 
     authenticate_as("AccessPilot.User", subject="target-user")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        requested = await client.post(f"/api/v1/packages/{package_id}/request", json={"assignment_type": "PERMANENT"})
+        requested = await client.post(f"/api/v1/packages/{package_id}/request", json={"assignment_type": "PERMANENT", "justification": "Test justification."})
     assert requested.status_code == 403
     assert requested.json()["error"]["code"] == "NOT_ELIGIBLE"
 
@@ -580,8 +581,8 @@ async def test_assign_package_requires_exactly_one_of_user_or_group(db_override)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         created = await client.post("/api/v1/packages", json=_package_payload(ids))
         package_id = created.json()["id"]
-        neither = await client.post(f"/api/v1/packages/{package_id}/assign", json={"assignment_type": "PERMANENT"})
-        both = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "group_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
+        neither = await client.post(f"/api/v1/packages/{package_id}/assign", json={"assignment_type": "PERMANENT", "justification": "Test justification."})
+        both = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "group_id": str(ids["group_id"]), "assignment_type": "PERMANENT", "justification": "Test justification."})
     assert neither.status_code == 422
     assert both.status_code == 422
 
@@ -595,7 +596,7 @@ async def test_my_package_batches_lets_the_target_user_group_their_own_package_i
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         created = await client.post("/api/v1/packages", json=_package_payload(ids))
         package_id = created.json()["id"]
-        assigned = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT"})
+        assigned = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT", "justification": "Test justification."})
 
     authenticate_as("AccessPilot.User", subject="target-user")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -612,3 +613,187 @@ async def test_my_package_batches_lets_the_target_user_group_their_own_package_i
         theirs = await client.get("/api/v1/packages/my-package-batches")
     assert theirs.status_code == 200
     assert theirs.json() == []
+
+
+async def _seed_fallback_approver(factory, provider_id) -> UUID:
+    async with factory() as session:
+        fallback = User(provider_id=provider_id, external_id="fallback-oid", email="fallback@x.com", display_name="Fallback Approver", status="ACTIVE")
+        session.add(fallback)
+        await session.commit()
+        return fallback.id
+
+
+@pytest.mark.asyncio
+async def test_fallback_approver_can_approve_a_package_request_when_primary_has_not(db_override):
+    """Either the primary or the fallback approver configured on the package may approve — whichever acts first."""
+    ids = await _seed_directory(db_override.factory)
+    fallback_id = await _seed_fallback_approver(db_override.factory, ids["provider_id"])
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/packages", json=_package_payload(ids))
+        package_id = created.json()["id"]
+        eligibility = await client.put(f"/api/v1/packages/{package_id}/eligibility", json={"principals": [{"principal_type": "USER", "principal_id": str(ids["user_id"])}], "default_approver_id": str(ids["approver_id"]), "default_fallback_approver_id": str(fallback_id)})
+    assert eligibility.status_code == 200
+    assert eligibility.json()["default_fallback_approver_id"] == str(fallback_id)
+
+    authenticate_as("AccessPilot.User", subject="target-user")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        requested = await client.post(f"/api/v1/packages/{package_id}/request", json={"assignment_type": "PERMANENT", "justification": "Need it for onboarding."})
+    assert requested.status_code == 201
+    item_id = requested.json()["results"][0]["assignment"]["id"]
+    assert requested.json()["results"][0]["assignment"]["approved_by"] == str(ids["approver_id"])
+    assert requested.json()["results"][0]["assignment"]["fallback_approver_id"] == str(fallback_id)
+
+    # The fallback approver (not the primary) approves it.
+    authenticate_as("AccessPilot.User", subject="fallback-oid")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        mine = await client.get("/api/v1/assignments/pending-approval")
+        approved = await client.post(f"/api/v1/assignments/{item_id}/approve", json={"justification": "Approved as fallback."})
+    assert len(mine.json()) >= 1
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "ELIGIBLE"
+    assert approved.json()["approved_by"] == str(fallback_id)
+
+
+@pytest.mark.asyncio
+async def test_someone_who_is_neither_approver_nor_fallback_cannot_approve_package_request(db_override):
+    ids = await _seed_directory(db_override.factory)
+    fallback_id = await _seed_fallback_approver(db_override.factory, ids["provider_id"])
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/packages", json=_package_payload(ids))
+        package_id = created.json()["id"]
+        await client.put(f"/api/v1/packages/{package_id}/eligibility", json={"principals": [{"principal_type": "USER", "principal_id": str(ids["user_id"])}], "default_approver_id": str(ids["approver_id"]), "default_fallback_approver_id": str(fallback_id)})
+
+    authenticate_as("AccessPilot.User", subject="target-user")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        requested = await client.post(f"/api/v1/packages/{package_id}/request", json={"assignment_type": "PERMANENT", "justification": "Need it for onboarding."})
+    item_id = requested.json()["results"][0]["assignment"]["id"]
+
+    authenticate_as("AccessPilot.User", subject="someone-else-oid")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(f"/api/v1/assignments/{item_id}/approve", json={"justification": "Trying anyway."})
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "ACCESS_DENIED"
+
+
+@pytest.mark.asyncio
+async def test_admin_assign_package_with_ad_hoc_approver_still_attaches_configured_fallback(db_override):
+    """The package's configured fallback applies even when an admin picks a different one-off approver_id at
+    assign time (rather than relying on the package's own default_approver_id via self-request)."""
+    ids = await _seed_directory(db_override.factory)
+    fallback_id = await _seed_fallback_approver(db_override.factory, ids["provider_id"])
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/packages", json=_package_payload(ids))
+        package_id = created.json()["id"]
+        await client.put(f"/api/v1/packages/{package_id}/eligibility", json={"principals": [], "default_fallback_approver_id": str(fallback_id)})
+        assigned = await client.post(f"/api/v1/packages/{package_id}/assign", json={"user_id": str(ids["user_id"]), "assignment_type": "PERMANENT", "approver_id": str(ids["approver_id"]), "justification": "Test justification."})
+    item = assigned.json()["members"][0]["results"][0]["assignment"]
+    assert item["approved_by"] == str(ids["approver_id"])
+    assert item["fallback_approver_id"] == str(fallback_id)
+
+
+@pytest.mark.asyncio
+async def test_create_package_with_approver_flow_setup_in_one_call(db_override):
+    """The whole 'setup --> then add items' creation flow: name/description, who can request it, the approver +
+    fallback approver + escalation window, and the items, all in a single POST /packages call."""
+    ids = await _seed_directory(db_override.factory)
+    fallback_id = await _seed_fallback_approver(db_override.factory, ids["provider_id"])
+    authenticate_as("AccessPilot.Admin")
+    payload = {
+        **_package_payload(ids),
+        "principals": [{"principal_type": "USER", "principal_id": str(ids["user_id"])}],
+        "default_approver_id": str(ids["approver_id"]),
+        "default_fallback_approver_id": str(fallback_id),
+        "fallback_unlock_hours": 24,
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/packages", json=payload)
+    assert created.status_code == 201
+    body = created.json()
+    assert body["default_approver_id"] == str(ids["approver_id"])
+    assert body["default_fallback_approver_id"] == str(fallback_id)
+    assert body["fallback_unlock_hours"] == 24
+    assert len(body["eligible_principals"]) == 1
+    assert len(body["items"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_create_package_rejects_fallback_unlock_hours_without_fallback_approver(db_override):
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    payload = {**_package_payload(ids), "fallback_unlock_hours": 24}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/packages", json=payload)
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_fallback_approver_cannot_act_before_the_escalation_window_elapses(db_override):
+    ids = await _seed_directory(db_override.factory)
+    fallback_id = await _seed_fallback_approver(db_override.factory, ids["provider_id"])
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/packages", json={
+            **_package_payload(ids),
+            "principals": [{"principal_type": "USER", "principal_id": str(ids["user_id"])}],
+            "default_approver_id": str(ids["approver_id"]),
+            "default_fallback_approver_id": str(fallback_id),
+            "fallback_unlock_hours": 24,
+        })
+        package_id = created.json()["id"]
+
+    authenticate_as("AccessPilot.User", subject="target-user")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        requested = await client.post(f"/api/v1/packages/{package_id}/request", json={"assignment_type": "PERMANENT", "justification": "Need it now."})
+    item_id = requested.json()["results"][0]["assignment"]["id"]
+    assert requested.json()["results"][0]["assignment"]["fallback_unlock_at"] is not None
+
+    # The fallback tries immediately — the 24-hour window hasn't elapsed yet.
+    authenticate_as("AccessPilot.User", subject="fallback-oid")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        too_early = await client.post(f"/api/v1/assignments/{item_id}/approve", json={"justification": "Trying early."})
+    assert too_early.status_code == 403
+    assert too_early.json()["error"]["code"] == "FALLBACK_NOT_YET_AVAILABLE"
+
+    # The primary approver, meanwhile, may still act at any time.
+    authenticate_as("AccessPilot.User", subject="admin-oid")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        approved = await client.post(f"/api/v1/assignments/{item_id}/approve", json={"justification": "Approved by primary."})
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "ELIGIBLE"
+
+
+@pytest.mark.asyncio
+async def test_fallback_approver_can_act_once_the_escalation_window_has_elapsed(db_override):
+    ids = await _seed_directory(db_override.factory)
+    fallback_id = await _seed_fallback_approver(db_override.factory, ids["provider_id"])
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/packages", json={
+            **_package_payload(ids),
+            "principals": [{"principal_type": "USER", "principal_id": str(ids["user_id"])}],
+            "default_approver_id": str(ids["approver_id"]),
+            "default_fallback_approver_id": str(fallback_id),
+            "fallback_unlock_hours": 24,
+        })
+        package_id = created.json()["id"]
+
+    authenticate_as("AccessPilot.User", subject="target-user")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        requested = await client.post(f"/api/v1/packages/{package_id}/request", json={"assignment_type": "PERMANENT", "justification": "Need it now."})
+    item_id = UUID(requested.json()["results"][0]["assignment"]["id"])
+
+    # Simulate the 24-hour window having already elapsed with no primary response.
+    async with db_override.factory() as session:
+        assignment = await session.get(AccessAssignment, item_id)
+        assignment.fallback_unlock_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        await session.commit()
+
+    authenticate_as("AccessPilot.User", subject="fallback-oid")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        approved = await client.post(f"/api/v1/assignments/{item_id}/approve", json={"justification": "Approved as fallback after timeout."})
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "ELIGIBLE"
+    assert approved.json()["approved_by"] == str(fallback_id)

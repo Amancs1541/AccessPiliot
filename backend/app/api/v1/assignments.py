@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
-from app.schemas.assignments import AssignmentActivate, AssignmentCreate, AssignmentResponse
+from app.schemas.assignments import AssignmentActivate, AssignmentApprove, AssignmentCreate, AssignmentResponse
 from app.security.auth import AuthenticatedUser, require_authenticated_user, require_permission
 from app.services import assignments as assignment_service
 from app.api.v1.directory import _primary_provider
@@ -55,9 +55,9 @@ async def get_assignment(assignment_id: UUID, _: AuthenticatedUser = Depends(ass
 
 
 @router.post("/{assignment_id}/approve", response_model=AssignmentResponse)
-async def approve_assignment(assignment_id: UUID, request: Request, actor: AuthenticatedUser = Depends(require_authenticated_user), db: AsyncSession = Depends(get_db)):
-    """Any authenticated user may call this — the service enforces that only the designated approver or an Admin can actually decide."""
-    assignment, hydrated = await assignment_service.approve_assignment(db, assignment_id, actor.directory_object_id, actor.roles, request.state.request_id)
+async def approve_assignment(assignment_id: UUID, data: AssignmentApprove, request: Request, actor: AuthenticatedUser = Depends(require_authenticated_user), db: AsyncSession = Depends(get_db)):
+    """Any authenticated user may call this — the service enforces that only the designated approver or an Admin can actually decide. A justification for the approval is mandatory."""
+    assignment, hydrated = await assignment_service.approve_assignment(db, assignment_id, actor.directory_object_id, actor.roles, data.justification, request.state.request_id)
     return assignment_service.to_response(assignment, hydrated)
 
 
@@ -69,8 +69,8 @@ async def reject_assignment(assignment_id: UUID, request: Request, actor: Authen
 
 @router.post("/{assignment_id}/activate", response_model=AssignmentResponse)
 async def activate_assignment(assignment_id: UUID, data: AssignmentActivate, request: Request, actor: AuthenticatedUser = Depends(require_authenticated_user), db: AsyncSession = Depends(get_db)):
-    """Any authenticated user may call this — the service enforces that only the assignment's own user or an Admin can actually activate it."""
-    assignment, hydrated = await assignment_service.activate_assignment(db, assignment_id, actor.directory_object_id, actor.roles, data.duration_hours, request.state.request_id)
+    """Any authenticated user may call this — the service enforces that only the assignment's own user or an Admin can actually activate it. A justification for the activation is mandatory."""
+    assignment, hydrated = await assignment_service.activate_assignment(db, assignment_id, actor.directory_object_id, actor.roles, data.duration_hours, data.justification, request.state.request_id)
     return assignment_service.to_response(assignment, hydrated)
 
 
