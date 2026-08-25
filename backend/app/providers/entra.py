@@ -137,6 +137,33 @@ class EntraProvider(IdentityProvider):
             item = await client.get_one(f"/users/{external_id}?$select={USER_SELECT}")
         return self._user_from_graph(item) if item else None
 
+    async def get_user_licenses(self, external_id: str) -> list[dict[str, str]]:
+        """Best-effort live read of a user's assigned Microsoft 365/Entra licenses — not synced/stored, fetched
+        on demand. Resolving human-readable SKU names needs Organization.Read.All; if that's not granted, the
+        raw SKU id is used as the name instead of failing the whole lookup."""
+        async with self._client() as client:
+            item = await client.get_one(f"/users/{external_id}?$select=assignedLicenses")
+            sku_ids = [entry["skuId"] for entry in (item or {}).get("assignedLicenses", []) if entry.get("skuId")]
+            if not sku_ids:
+                return []
+            names = {sku_id: sku_id for sku_id in sku_ids}
+            try:
+                skus = await client.get_all("/subscribedSkus")
+                names.update({sku["skuId"]: (sku.get("skuPartNumber") or sku["skuId"]) for sku in skus})
+            except GraphError:
+                pass
+        return [{"sku_id": sku_id, "name": names[sku_id]} for sku_id in sku_ids]
+
+    async def get_user_app_role_assignments(self, external_id: str) -> list[dict[str, str]]:
+        """Live read of ALL of a user's application role assignments — including ones granted directly in Entra
+        (outside AccessPilot). Not synced/stored; only needs AppRoleAssignment.ReadWrite.All, already granted."""
+        async with self._client() as client:
+            items = await client.get_all(f"/users/{external_id}/appRoleAssignments")
+        return [
+            {"resource_id": item["resourceId"], "resource_display_name": item.get("resourceDisplayName") or item["resourceId"], "app_role_id": item.get("appRoleId") or ""}
+            for item in items if item.get("resourceId")
+        ]
+
     async def get_groups(self, query: str | None = None) -> list[NormalizedGroup]:
         params: dict[str, Any] = {"$select": GROUP_SELECT, "$top": "999"}
         headers: dict[str, str] | None = None

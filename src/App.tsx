@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Box, Check, ChevronRight, Clock3, Cloud, Database, FileCheck2, FolderKanban, Gauge, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldCheck, SlidersHorizontal, UserRound, Users, X } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Box, Check, ChevronRight, Clock3, Cloud, Copy, Database, FileCheck2, FolderKanban, Gauge, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldCheck, SlidersHorizontal, UserRound, Users, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { auditEvents, currentUser, policies, requests, type AccessRequest, type RequestStatus, type Role } from './mock';
 import { mockService, useMockState } from './mockService';
@@ -12,6 +12,13 @@ interface ApiGroup { id: string; external_id: string; name: string; description:
 interface ApiRole { id: string; external_id: string; name: string; description: string | null; role_type: string; is_privileged: boolean; status: string; }
 interface ApiApplicationRole { id: string; name: string; description: string | null; }
 interface ApiApplication { id: string; external_id: string; name: string; status: string; app_roles: ApiApplicationRole[] | null; last_synced_at: string | null; }
+interface ApiPackageItem { id: string; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; }
+interface ApiPackageEligiblePrincipal { principal_type: string; principal_id: string; display_name: string | null; }
+interface ApiPackage { id: string; name: string; description: string | null; status: string; items: ApiPackageItem[]; default_approver_id: string | null; eligible_principals: ApiPackageEligiblePrincipal[]; created_at: string; }
+interface ApiUserAccessItem { id: string | null; resource_type: string; resource_display_name: string | null; status: string; assignment_type: string; expiration_time: string | null; package_name: string | null; source: string; }
+interface ApiUserLicense { sku_id: string; name: string; }
+interface ApiUserAccessSummary { assignments: ApiUserAccessItem[]; licenses: ApiUserLicense[]; }
+interface ApiPackageBatch { package_assignment_id: string; package_id: string; package_name: string; user_id: string; assignment_ids: string[]; }
 interface DashboardAdmin { users: number; groups: number; roles: number; privilegedRoles: number; provider: { id: string; name: string; status: string; lastSyncAt: string | null } | null; lastSync: { id: string; status: string; startedAt: string; completedAt: string | null; usersProcessed: number; groupsProcessed: number; rolesProcessed: number; errorsCount: number } | null; }
 
 function useApiResource<T>(path: string, enabled = true) {
@@ -47,6 +54,7 @@ const nav = [
   { label: 'Dashboard', icon: LayoutDashboard, to: '/dashboard', roles: ['user','admin'] },
   { label: 'My Access', icon: KeyRound, to: '/my-access', roles: ['user'] },
   { label: 'Request Access', icon: Plus, to: '/request-access', roles: ['user'] },
+  { label: 'Request Packages', icon: Box, to: '/request-packages', roles: ['user'] },
   { label: 'My Requests', icon: ListChecks, to: '/my-requests', roles: ['user'] },
   { label: 'Approvals', icon: Check, to: '/approvals', roles: ['user','admin'] },
   { label: 'Profile', icon: UserRound, to: '/profile', roles: ['user'] },
@@ -55,6 +63,7 @@ const nav = [
   { label: 'Roles', icon: Shield, to: '/admin/roles', roles: ['admin'] },
   { label: 'Access Requests', icon: FolderKanban, to: '/admin/access-requests', roles: ['admin'], section: 'ACCESS MANAGEMENT' },
   { label: 'Assignments', icon: KeyRound, to: '/admin/assignments', roles: ['admin'] },
+  { label: 'Access Packages', icon: Box, to: '/admin/access-packages', roles: ['admin'] },
   { label: 'Policies', icon: SlidersHorizontal, to: '/admin/policies', roles: ['admin'], section: 'GOVERNANCE' },
   { label: 'Audit Logs', icon: BookOpen, to: '/admin/audit', roles: ['admin'] },
   { label: 'Providers', icon: Cloud, to: '/admin/providers', roles: ['admin'], section: 'SYSTEM' },
@@ -68,7 +77,7 @@ function App() {
   if (entraConfigured && !auth.account) return <div className="empty"><h1>Sign in to AccessPilot</h1><p className="subtitle">Use your Microsoft Entra account to continue.</p><button className="btn btn-primary" onClick={auth.signIn} style={{marginTop:18}}>Sign in</button></div>;
   const role = entraConfigured ? auth.role : mockRole;
   const changeRole = (nextRole: Role) => { localStorage.setItem('accesspilot.mockRole', nextRole); setMockRole(nextRole); };
-  return <Shell role={role} setRole={changeRole}><Routes><Route path="/" element={<Navigate to="/dashboard" replace />} /><Route path="/dashboard" element={<Dashboard role={role} />} /><Route path="/my-access" element={<MyAccess />} /><Route path="/request-access" element={<RequestAccess />} /><Route path="/my-requests" element={<Requests mine />} /><Route path="/approvals" element={<MyApprovalsPage />} /><Route path="/profile" element={<Profile />} /><Route path="/admin/users" element={<AdminOnly role={role}><UsersPage /></AdminOnly>} /><Route path="/admin/users/:id" element={<AdminOnly role={role}><UserDetail /></AdminOnly>} /><Route path="/admin/groups" element={<AdminOnly role={role}><GroupsPage /></AdminOnly>} /><Route path="/admin/roles" element={<AdminOnly role={role}><RolesPage /></AdminOnly>} /><Route path="/admin/access-requests" element={<AdminOnly role={role}><Requests /></AdminOnly>} /><Route path="/admin/access-requests/:id" element={<AdminOnly role={role}><RequestDetailInteractive /></AdminOnly>} /><Route path="/admin/assignments" element={<AdminOnly role={role}><AssignmentsInteractive /></AdminOnly>} /><Route path="/admin/policies" element={<AdminOnly role={role}><PoliciesPage /></AdminOnly>} /><Route path="/admin/audit" element={<AdminOnly role={role}><AuditPage /></AdminOnly>} /><Route path="/admin/providers" element={<AdminOnly role={role}><ProvidersPage /></AdminOnly>} /><Route path="/admin/sync" element={<AdminOnly role={role}><SyncPage /></AdminOnly>} /><Route path="*" element={<Navigate to="/dashboard" replace />} /></Routes></Shell>;
+  return <Shell role={role} setRole={changeRole}><Routes><Route path="/" element={<Navigate to="/dashboard" replace />} /><Route path="/dashboard" element={<Dashboard role={role} />} /><Route path="/my-access" element={<MyAccess />} /><Route path="/request-access" element={<RequestAccess />} /><Route path="/request-packages" element={<RequestPackagesPage />} /><Route path="/my-requests" element={<Requests mine />} /><Route path="/approvals" element={<MyApprovalsPage />} /><Route path="/profile" element={<Profile />} /><Route path="/admin/users" element={<AdminOnly role={role}><UsersPage /></AdminOnly>} /><Route path="/admin/users/:id" element={<AdminOnly role={role}><UserDetail /></AdminOnly>} /><Route path="/admin/groups" element={<AdminOnly role={role}><GroupsPage /></AdminOnly>} /><Route path="/admin/roles" element={<AdminOnly role={role}><RolesPage /></AdminOnly>} /><Route path="/admin/access-requests" element={<AdminOnly role={role}><Requests /></AdminOnly>} /><Route path="/admin/access-requests/:id" element={<AdminOnly role={role}><RequestDetailInteractive /></AdminOnly>} /><Route path="/admin/assignments" element={<AdminOnly role={role}><AssignmentsInteractive /></AdminOnly>} /><Route path="/admin/access-packages" element={<AdminOnly role={role}><AccessPackagesInteractive /></AdminOnly>} /><Route path="/admin/policies" element={<AdminOnly role={role}><PoliciesPage /></AdminOnly>} /><Route path="/admin/audit" element={<AdminOnly role={role}><AuditPage /></AdminOnly>} /><Route path="/admin/providers" element={<AdminOnly role={role}><ProvidersPage /></AdminOnly>} /><Route path="/admin/sync" element={<AdminOnly role={role}><SyncPage /></AdminOnly>} /><Route path="*" element={<Navigate to="/dashboard" replace />} /></Routes></Shell>;
 }
 function AdminOnly({ role, children }: { role: Role; children: React.ReactNode }) { return role === 'admin' ? children : <Navigate to="/dashboard" replace />; }
 function Shell({ role, setRole, children }: { role: Role; setRole: (r: Role) => void; children: React.ReactNode }) {
@@ -131,17 +140,206 @@ function UsersPage() {
 function UserDetail() {
   const { id } = useParams();
   const { data: user, error, loading } = useApiResource<ApiUser>(`/api/v1/users/${id}`);
+  const { data: access, error: accessError, loading: accessLoading, reload: reloadAccess } = useApiResource<ApiUserAccessSummary>(`/api/v1/users/${id}/access-summary`);
+  const groupItems = (access?.assignments || []).filter(item => item.resource_type === 'GROUP');
+  const applicationItems = (access?.assignments || []).filter(item => item.resource_type === 'APPLICATION');
+  const roleItems = (access?.assignments || []).filter(item => item.resource_type === 'ROLE');
+  const groupCount = groupItems.filter(item => item.status === 'ACTIVE').length;
+  const applicationCount = applicationItems.filter(item => item.status === 'ACTIVE').length;
+  const packageGroups = useMemo(() => {
+    const map = new Map<string, ApiUserAccessItem[]>();
+    (access?.assignments || []).forEach(item => {
+      if (!item.package_name) return;
+      if (!map.has(item.package_name)) map.set(item.package_name, []);
+      map.get(item.package_name)!.push(item);
+    });
+    return Array.from(map.entries());
+  }, [access]);
+  const renderAccessItem = (item: ApiUserAccessItem, index: number) => <div key={item.id || `${item.resource_type}-${index}`} className="timeline-item"><strong>{item.resource_display_name || item.resource_type}</strong><small>{item.source === 'DIRECT_IN_ENTRA' ? 'Added directly in Entra' : item.assignment_type}{item.expiration_time ? ` · expires ${new Date(item.expiration_time).toLocaleString()}` : ''}</small><div style={{marginTop:5}}><StatusBadge status={item.status}/></div></div>;
+  const [copied, setCopied] = useState(false);
+  const copyEmail = async () => {
+    if (!user) return;
+    try { await navigator.clipboard.writeText(user.email); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* clipboard unavailable */ }
+  };
   if (loading) return <Page eyebrow="USER DIRECTORY" title="Loading..." subtitle=""><div className="empty">Loading user...</div></Page>;
   if (error || !user) return <Page eyebrow="USER DIRECTORY" title="User" subtitle=""><div className="empty">{error || 'User not found.'}</div></Page>;
-  return <Page eyebrow="USER DIRECTORY" title={user.display_name} subtitle={user.email}><div className="detail-layout"><section className="panel"><div className="detail-section"><div className="user-cell"><span className="avatar" style={{width:45,height:45}}>{initialsFor(user.display_name)}</span><div><h2>{user.job_title || 'No job title on file'}</h2><p className="subtitle">{user.department || 'No department on file'} · {user.status}</p></div></div></div><div className="detail-section"><div className="detail-title"><h2>Overview</h2><StatusBadge status={user.status}/></div><div className="key-grid"><div className="key"><span>Email</span><strong>{user.email}</strong></div><div className="key"><span>External ID</span><strong>{user.external_id}</strong></div><div className="key"><span>Given name</span><strong>{user.given_name || '—'}</strong></div><div className="key"><span>Surname</span><strong>{user.surname || '—'}</strong></div><div className="key"><span>Last synced</span><strong>{user.last_synced_at ? new Date(user.last_synced_at).toLocaleString() : 'Never'}</strong></div></div></div></section><aside className="panel"><div className="panel-head"><h2>Access summary</h2></div><div className="detail-section"><div className="notice">Group membership, roles, and access assignment details are not available in this release.</div></div></aside></div></Page>;
+  return <Page eyebrow="USER DIRECTORY" title={user.display_name} subtitle={user.email} action={<button className="btn" aria-label="Refresh" onClick={() => reloadAccess()}><RefreshCw size={14}/></button>}><div className="detail-layout"><section className="panel"><div className="detail-section"><div className="user-cell"><span className="avatar" style={{width:45,height:45}}>{initialsFor(user.display_name)}</span><div><h2>{user.job_title || 'No job title on file'}</h2><p className="subtitle">{user.department || 'No department on file'} · {user.status}</p></div></div></div><div className="detail-section"><div className="detail-title"><h2>Overview</h2><StatusBadge status={user.status}/></div><div className="key-grid"><div className="key"><span>Email</span><strong style={{display:'flex',alignItems:'center',gap:8}}>{user.email}<button type="button" className="btn" aria-label="Copy email" onClick={() => void copyEmail()} style={{padding:'2px 7px'}}><Copy size={12}/></button>{copied && <span className="footer-note">Copied</span>}</strong></div><div className="key"><span>External ID</span><strong>{user.external_id}</strong></div><div className="key"><span>Given name</span><strong>{user.given_name || '—'}</strong></div><div className="key"><span>Surname</span><strong>{user.surname || '—'}</strong></div><div className="key"><span>Last synced</span><strong>{user.last_synced_at ? new Date(user.last_synced_at).toLocaleString() : 'Never'}</strong></div><div className="key"><span>Groups</span><strong>{accessLoading ? '…' : groupCount}</strong></div><div className="key"><span>Applications</span><strong>{accessLoading ? '…' : applicationCount}</strong></div></div></div></section><aside className="panel">
+    <div className="panel-head"><h2>Groups</h2></div>
+    <div className="detail-section">{accessLoading ? <div className="empty">Loading groups...</div> : accessError ? <div className="notice">{accessError}</div> : groupItems.length === 0 ? <div className="notice">Not a member of any group.</div> : <div className="timeline" style={{padding:0}}>{groupItems.map(renderAccessItem)}</div>}</div>
+    <div className="panel-head"><h2>Applications</h2></div>
+    <div className="detail-section">{accessLoading ? <div className="empty">Loading applications...</div> : applicationItems.length === 0 ? <div className="notice">No application role assignments.</div> : <div className="timeline" style={{padding:0}}>{applicationItems.map(renderAccessItem)}</div>}</div>
+    <div className="panel-head"><h2>Roles</h2></div>
+    <div className="detail-section">{accessLoading ? <div className="empty">Loading roles...</div> : roleItems.length === 0 ? <div className="notice">No directory role assignments.</div> : <div className="timeline" style={{padding:0}}>{roleItems.map(renderAccessItem)}</div>}</div>
+    <div className="panel-head"><h2>Access Packages</h2></div>
+    <div className="detail-section">{accessLoading ? <div className="empty">Loading packages...</div> : packageGroups.length === 0 ? <div className="notice">Not enrolled in any access package.</div> : <div className="timeline" style={{padding:0}}>{packageGroups.map(([name, items]) => <div key={name} className="timeline-item"><strong>📦 {name}</strong><small>{items.length} item{items.length === 1 ? '' : 's'}</small></div>)}</div>}</div>
+    <div className="panel-head"><h2>Licenses</h2></div>
+    <div className="detail-section">{accessLoading ? <div className="empty">Loading licenses...</div> : !access || access.licenses.length === 0 ? <div className="notice">No licenses found for this user.</div> : <ul style={{margin:0,paddingLeft:18,lineHeight:1.9}}>{access.licenses.map(lic => <li key={lic.sku_id}>{lic.name}</li>)}</ul>}</div>
+  </aside></div></Page>;
 }
 function Requests({ mine = false }: { mine?: boolean }) { const { requests: items } = useMockState(); const update = (id: string, status: RequestStatus) => { if (status === 'REJECTED' && !window.confirm('Reject this access request?')) return; mockService.transitionRequest(id, status); }; return <Page eyebrow={mine ? 'SELF-SERVICE' : 'ACCESS MANAGEMENT'} title={mine ? 'My requests' : 'Access requests'} subtitle={mine ? 'Track your access requests and approval history.' : 'Review and govern access requests across the environment.'} action={mine ? <Link to="/request-access" className="btn btn-primary"><Plus size={14}/> New request</Link> : undefined}><TablePanel toolbar={<Toolbar placeholder="Search requests"/>}><table><thead><tr><th>Requester</th><th>Resource</th><th>Type</th><th>Provider</th><th>Duration</th><th>Risk</th><th>Status</th><th>Created</th><th>Approval</th><th></th></tr></thead><tbody>{items.filter(r => !mine || r.requester === currentUser.name).map(r => <tr key={r.id}><td className="user-name">{r.requester}</td><td><Link to={`/admin/access-requests/${r.id}`} className="user-name">{r.resource}</Link></td><td>{r.type}</td><td>{r.provider}</td><td>{r.duration}</td><td><span className={`risk risk-${r.risk.toLowerCase()}`}>{r.risk}</span></td><td><StatusBadge status={r.status}/></td><td>{r.created}</td><td>{r.approval}</td><td>{r.status === 'PENDING' ? <span style={{display:'flex',gap:5}}>{mine ? <button className="btn" onClick={() => update(r.id,'CANCELLED')} aria-label="Cancel">Cancel</button> : <><button className="btn" onClick={() => update(r.id,'APPROVED')} aria-label="Approve"><Check size={14}/></button><button className="btn" onClick={() => update(r.id,'REJECTED')} aria-label="Reject"><X size={14}/></button></>}</span> : <ChevronRight size={15} color="#829198"/>}</td></tr>)}</tbody></table></TablePanel></Page>; }
 function RequestDetail() { const { id } = useParams(); const req = requests.find(r => r.id === id) || requests[0]; return <Page eyebrow="ACCESS REQUEST" title={req.id} subtitle="Request details and approval history" action={<div style={{display:'flex',gap:8}}><button className="btn btn-primary"><Check size={14}/> Approve</button><button className="btn"><X size={14}/> Reject</button></div>}><div className="detail-layout"><section className="panel"><div className="detail-section"><div className="detail-title"><h2>{req.resource}</h2><StatusBadge status={req.status}/></div><div className="key-grid"><div className="key"><span>Requester</span><strong>{req.requester}</strong></div><div className="key"><span>Provider</span><strong>{req.provider}</strong></div><div className="key"><span>Resource type</span><strong>{req.type}</strong></div><div className="key"><span>Requested duration</span><strong>{req.duration}</strong></div><div className="key"><span>Risk assessment</span><strong className={`risk risk-${req.risk.toLowerCase()}`}>{req.risk} risk</strong></div><div className="key"><span>Ticket number</span><strong>INC-48291</strong></div></div></div><div className="detail-section"><div className="detail-title"><h2>Justification</h2></div><p className="subtitle" style={{lineHeight:1.7,color:'#39525c'}}>{req.justification}</p></div><div className="detail-section"><div className="detail-title"><h2>Policy evaluation</h2><StatusBadge status="SUCCESS"/></div><div className="notice">MFA and a valid ticket are required before activation. The requested duration is within the policy maximum of 4 hours.</div></div></section><aside className="panel"><div className="panel-head"><h2>Request timeline</h2></div><div className="timeline"><div className="timeline-item"><strong>Request created</strong><small>{req.requester} · {req.created}</small></div><div className="timeline-item"><strong>Policy evaluated</strong><small>Passed · Today, 10:14</small></div><div className="timeline-item"><strong>Awaiting approval</strong><small>{req.approval}</small></div></div></aside></div></Page>; }
 function RequestDetailInteractive() { const { id } = useParams(); const { requests: items } = useMockState(); const req = items.find(item => item.id === id) || items[0]; const update = (status: RequestStatus) => { if ((status === 'REJECTED' || status === 'CANCELLED') && !window.confirm(`${status === 'REJECTED' ? 'Reject' : 'Cancel'} this access request?`)) return; mockService.transitionRequest(req.id, status); }; return <Page eyebrow="ACCESS REQUEST" title={req.id} subtitle="Request details and approval history" action={<div style={{display:'flex',gap:8}}>{req.status === 'PENDING' && <><button className="btn btn-primary" onClick={() => update('APPROVED')}><Check size={14}/> Approve</button><button className="btn" onClick={() => update('REJECTED')}><X size={14}/> Reject</button></>}</div>}><div className="detail-layout"><section className="panel"><div className="detail-section"><div className="detail-title"><h2>{req.resource}</h2><StatusBadge status={req.status}/></div><div className="key-grid"><div className="key"><span>Requester</span><strong>{req.requester}</strong></div><div className="key"><span>Provider</span><strong>{req.provider}</strong></div><div className="key"><span>Resource type</span><strong>{req.type}</strong></div><div className="key"><span>Requested duration</span><strong>{req.duration}</strong></div><div className="key"><span>Risk assessment</span><strong className={`risk risk-${req.risk.toLowerCase()}`}>{req.risk} risk</strong></div><div className="key"><span>Ticket number</span><strong>INC-48291</strong></div></div></div><div className="detail-section"><div className="detail-title"><h2>Justification</h2></div><p className="subtitle" style={{lineHeight:1.7,color:'#39525c'}}>{req.justification}</p></div><div className="detail-section"><div className="detail-title"><h2>Policy evaluation</h2><StatusBadge status="SUCCESS"/></div><div className="notice">MFA and a valid ticket are required before activation. The requested duration is within the policy maximum of 4 hours.</div></div></section><aside className="panel"><div className="panel-head"><h2>Request timeline</h2></div><div className="timeline"><div className="timeline-item"><strong>Request created</strong><small>{req.requester} · {req.created}</small></div><div className="timeline-item"><strong>Policy evaluated</strong><small>Passed · Today, 10:14</small></div><div className="timeline-item"><strong>{req.status === 'PENDING' ? 'Awaiting approval' : `Request ${req.status.toLowerCase()}`}</strong><small>{req.approval}</small></div></div></aside></div></Page>; }
-function MyAccess() { const { assignments: items } = useMockState(); return <Page eyebrow="SELF-SERVICE" title="My access" subtitle="Your active and eligible access across connected providers."><div className="panel" style={{marginBottom:18}}><div className="panel-head"><h2>Eligible access</h2><span className="panel-link">12 available resources</span></div><div className="detail-section"><div className="activity-row"><span className="avatar"><Shield size={14}/></span><div className="activity-copy"><strong>Production Administrator</strong><small>Microsoft Entra ID · Up to 4 hours · Approval required</small></div><Link to="/request-access" className="btn btn-primary">Request <ArrowRight size={13}/></Link></div><div className="activity-row"><span className="avatar"><Users size={14}/></span><div className="activity-copy"><strong>Security Operations</strong><small>Group · Up to 8 hours · MFA required</small></div><Link to="/request-access" className="btn">Request <ArrowRight size={13}/></Link></div></div></div><TablePanel toolbar={undefined}><table><thead><tr><th>Resource</th><th>Type</th><th>Provider</th><th>Status</th><th>Activated</th><th>Expires</th><th>Remaining</th><th></th></tr></thead><tbody>{items.filter(a => a.user === currentUser.name || a.status === 'ACTIVE').slice(0,3).map(a => <tr key={a.id}><td className="user-name">{a.resource}</td><td>{a.type}</td><td>{a.provider}</td><td><StatusBadge status={a.status}/></td><td>{a.start}</td><td>{a.expiration}</td><td>{a.remaining}</td><td><button className="btn">Manage</button></td></tr>)}</tbody></table></TablePanel></Page>; }
+function formatRemaining(expirationTime: string | null): string {
+  if (!expirationTime) return '—';
+  const ms = new Date(expirationTime).getTime() - Date.now();
+  if (ms <= 0) return 'Expired';
+  const totalMinutes = Math.floor(ms / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+type MyAccessRow = { kind: 'single'; assignment: ApiAssignment } | { kind: 'batch'; batch: ApiPackageBatch; assignments: ApiAssignment[] };
+function MyAccess() {
+  const auth = useAuth();
+  const { data: assignments, error, loading, reload } = useApiResource<ApiAssignment[]>('/api/v1/assignments/mine');
+  const { data: policy } = useApiResource<ApiActivationPolicy>('/api/v1/assignments/activation-policy');
+  const { data: batches } = useApiResource<ApiPackageBatch[]>('/api/v1/packages/my-package-batches');
+  const maxHours = policy?.max_self_activation_hours ?? 8;
+  const [activateTarget, setActivateTarget] = useState<{ ids: string[]; label: string } | null>(null);
+  const [durationHours, setDurationHours] = useState('');
+  const [activateMessage, setActivateMessage] = useState('');
+  const [activateSaving, setActivateSaving] = useState(false);
+  const [busyIds, setBusyIds] = useState<string | null>(null);
+  const now = Date.now();
+
+  const batchByAssignmentId = useMemo(() => { const map = new Map<string, ApiPackageBatch>(); (batches || []).forEach(b => b.assignment_ids.forEach(id => map.set(id, b))); return map; }, [batches]);
+  const groupRows = (list: ApiAssignment[]): MyAccessRow[] => {
+    const rows: MyAccessRow[] = [];
+    const seenBatches = new Set<string>();
+    list.forEach(a => {
+      const batch = batchByAssignmentId.get(a.id);
+      if (!batch) { rows.push({ kind: 'single', assignment: a }); return; }
+      if (seenBatches.has(batch.package_assignment_id)) return;
+      seenBatches.add(batch.package_assignment_id);
+      rows.push({ kind: 'batch', batch, assignments: list.filter(x => batchByAssignmentId.get(x.id)?.package_assignment_id === batch.package_assignment_id) });
+    });
+    return rows;
+  };
+  const eligible = (assignments || []).filter(a => a.status === 'ELIGIBLE' && (!a.start_time || new Date(a.start_time).getTime() <= now));
+  const active = (assignments || []).filter(a => a.status === 'ACTIVE');
+  const eligibleRows = useMemo(() => groupRows(eligible), [eligible, batchByAssignmentId]);
+  const activeRows = useMemo(() => groupRows(active), [active, batchByAssignmentId]);
+
+  const openActivate = (ids: string[], label: string) => { setActivateTarget({ ids, label }); setDurationHours(String(maxHours)); setActivateMessage(''); };
+
+  const submitActivate = async () => {
+    if (!activateTarget) return;
+    const hours = Number(durationHours);
+    if (!hours || hours <= 0) { setActivateMessage('Enter a duration greater than zero.'); return; }
+    if (hours > maxHours) { setActivateMessage(`The maximum self-activation duration is ${maxHours} hours.`); return; }
+    setActivateSaving(true); setActivateMessage('');
+    try {
+      const responses = await Promise.all(activateTarget.ids.map(id => auth.apiRequest(`/api/v1/assignments/${id}/activate`, { method: 'POST', body: JSON.stringify({ duration_hours: hours }) })));
+      const failedResponse = responses.find(r => !r.ok);
+      if (!failedResponse) { setActivateTarget(null); reload(); }
+      else { const body = await failedResponse.json().catch(() => null); setActivateMessage(body?.error?.message || 'Unable to activate this access.'); reload(); }
+    } catch { setActivateMessage('Unable to activate this access.'); } finally { setActivateSaving(false); }
+  };
+
+  const deactivate = async (ids: string[], label: string) => {
+    if (!window.confirm(`Deactivate ${label} now? You can activate it again later.`)) return;
+    setBusyIds(ids.join(','));
+    try {
+      await Promise.all(ids.map(id => auth.apiRequest(`/api/v1/assignments/${id}/deactivate`, { method: 'POST' })));
+      reload();
+    } finally { setBusyIds(null); }
+  };
+
+  return <Page eyebrow="SELF-SERVICE" title="My access" subtitle="Your active and eligible access across connected providers." action={<button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button>}>
+    <div className="panel" style={{marginBottom:18}}>
+      <div className="panel-head"><h2>Eligible access</h2><span className="panel-link">{eligible.length} available</span></div>
+      <div className="detail-section">
+        {loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : eligibleRows.length === 0 ? <div className="notice">Nothing eligible to activate right now.</div> : eligibleRows.map(row => row.kind === 'single'
+          ? <div key={row.assignment.id} className="activity-row"><span className="avatar"><Shield size={14}/></span><div className="activity-copy"><strong>{row.assignment.resource_display_name || row.assignment.resource_id}</strong><small>{row.assignment.resource_type}{row.assignment.package_name ? ` · ${row.assignment.package_name}` : ''} · {row.assignment.assignment_type === 'TEMPORARY' && row.assignment.expiration_time ? `Activate by ${new Date(row.assignment.expiration_time).toLocaleString()}` : 'No activation deadline'}</small></div><button className="btn btn-primary" onClick={() => openActivate([row.assignment.id], row.assignment.resource_display_name || 'this access')}>Activate <ArrowRight size={13}/></button></div>
+          : <div key={row.batch.package_assignment_id} className="activity-row"><span className="avatar">📦</span><div className="activity-copy"><strong>{row.batch.package_name}</strong><small>PACKAGE · {row.assignments.length} items</small></div><button className="btn btn-primary" onClick={() => openActivate(row.assignments.map(a => a.id), `"${row.batch.package_name}" (${row.assignments.length} items)`)}>Activate all <ArrowRight size={13}/></button></div>
+        )}
+      </div>
+    </div>
+    {activateTarget && <form role="dialog" aria-modal="true" className="panel" style={{maxWidth:480,marginBottom:18}} onSubmit={event => { event.preventDefault(); void submitActivate(); }}>
+      <div className="panel-head"><h2>Activate {activateTarget.label}</h2><button type="button" className="btn" aria-label="Close" onClick={() => setActivateTarget(null)}><X size={14}/></button></div>
+      <div className="detail-section">
+        <label className="key" style={{display:'block'}}><span>Duration (hours) — up to {maxHours}</span><input className="select" style={{width:'100%'}} type="number" min={1} max={maxHours} step={0.5} value={durationHours} onChange={event => setDurationHours(event.target.value)}/></label>
+        {activateMessage && <div className="notice" style={{marginTop:14}}>{activateMessage}</div>}
+      </div>
+      <div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setActivateTarget(null)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={activateSaving}>{activateSaving ? 'Activating...' : 'Activate'}</button></div>
+    </form>}
+    <TablePanel toolbar={undefined}>{loading ? <div className="empty">Loading access...</div> : error ? <div className="empty">{error}</div> : activeRows.length === 0 ? <div className="empty">No active access.</div> : <table><thead><tr><th>Resource</th><th>Type</th><th>Package</th><th>Activated</th><th>Expires</th><th>Remaining</th><th></th></tr></thead><tbody>{activeRows.map(row => row.kind === 'single'
+      ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.resource_display_name || row.assignment.resource_id}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.package_name || '—'}</td><td>{row.assignment.activated_at ? new Date(row.assignment.activated_at).toLocaleString() : '—'}</td><td>{row.assignment.expiration_time ? new Date(row.assignment.expiration_time).toLocaleString() : 'Never'}</td><td>{row.assignment.expiration_time ? formatRemaining(row.assignment.expiration_time) : '—'}</td><td><button className="btn" disabled={busyIds === row.assignment.id} onClick={() => void deactivate([row.assignment.id], row.assignment.resource_display_name || 'this access')}>Deactivate</button></td></tr>
+      : <tr key={row.batch.package_assignment_id}><td className="user-name">📦 {row.batch.package_name}</td><td>PACKAGE ({row.assignments.length})</td><td>{row.batch.package_name}</td><td>{row.assignments[0]?.activated_at ? new Date(row.assignments[0].activated_at!).toLocaleString() : '—'}</td><td>{row.assignments[0]?.expiration_time ? new Date(row.assignments[0].expiration_time!).toLocaleString() : 'Never'}</td><td>{row.assignments[0]?.expiration_time ? formatRemaining(row.assignments[0].expiration_time) : '—'}</td><td><button className="btn" disabled={busyIds === row.assignments.map(a => a.id).join(',')} onClick={() => void deactivate(row.assignments.map(a => a.id), `"${row.batch.package_name}" (${row.assignments.length} items)`)}>Deactivate all</button></td></tr>
+    )}</tbody></table>}</TablePanel>
+  </Page>;
+}
 function RequestAccess() { const [submitted, setSubmitted] = useState(false); return <Page eyebrow="SELF-SERVICE" title="Request access" subtitle="Request temporary access with a clear business justification."><div className="detail-layout"><section className="panel"><div className="detail-section"><div className="detail-title"><h2>Access details</h2><span className="badge info">Step 1 of 2</span></div><label className="key"><span>Resource</span><select className="select" style={{width:'100%'}}><option>Production Administrator</option><option>Security Administrator</option><option>Product Analytics</option></select></label><div className="key-grid" style={{marginTop:20}}><label className="key"><span>Requested duration</span><select className="select" style={{width:'100%'}}><option>2 hours</option><option>1 hour</option><option>4 hours</option></select></label><label className="key"><span>Ticket number</span><input className="select" placeholder="INC-48291" style={{width:'100%'}}/></label></div><label className="key" style={{display:'block',marginTop:20}}><span>Business justification</span><textarea className="select" rows={5} placeholder="Explain why this access is needed and what you will do."></textarea></label></div><div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button className="btn">Cancel</button><button className="btn btn-primary" onClick={() => setSubmitted(true)}><SendIcon/> Submit request</button></div></section><aside className="panel"><div className="panel-head"><h2>Policy requirements</h2></div><div className="detail-section">{submitted && <div className="notice" style={{marginBottom:15}}>Request submitted successfully. It is now awaiting approval.</div>}<div className="notice"><strong>Privileged access</strong><br/>This resource requires MFA, an active ticket, and approval from a designated approver. Maximum duration is 4 hours.</div><div className="timeline" style={{padding:'22px 0 0'}}><div className="timeline-item"><strong>Policy evaluation</strong><small>Passed for your identity</small></div><div className="timeline-item"><strong>Approval required</strong><small>Security Operations</small></div><div className="timeline-item"><strong>Activation</strong><small>Available after approval</small></div></div></div></aside></div></Page>; }
 function SendIcon() { return <ArrowRight size={14}/>; }
-interface ApiAssignment { id: string; user_id: string; user_display_name: string | null; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; assignment_type: string; status: string; start_time: string | null; expiration_time: string | null; justification: string | null; requested_by: string | null; approved_by: string | null; activated_at: string | null; created_at: string; }
+const emptyPackageRequestForm = { assignment_type: 'PERMANENT', start_date: '', start_clock: '', end_date: '', end_clock: '', justification: '' };
+function RequestPackagesPage() {
+  const auth = useAuth();
+  const { data: packages, error, loading, reload } = useApiResource<ApiPackage[]>('/api/v1/packages/requestable');
+  const [requestingPackage, setRequestingPackage] = useState<ApiPackage | null>(null);
+  const [form, setForm] = useState(emptyPackageRequestForm);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  const [successMessage, setSuccessMessage] = useState('');
+  const today = todayDateValue(new Date());
+
+  const openRequest = (pkg: ApiPackage) => { setRequestingPackage(pkg); setForm(emptyPackageRequestForm); setMessage(''); };
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!requestingPackage) return;
+    if (form.assignment_type === 'TEMPORARY' && !form.end_date && !form.end_clock) { setMessage('Set an end date/time for a time-bound request.'); return; }
+    setSaving(true); setMessage('');
+    try {
+      const payload: Record<string, unknown> = { assignment_type: form.assignment_type };
+      if (form.start_date || form.start_clock) payload.start_time = new Date(`${form.start_date || today}T${form.start_clock || '00:00'}`).toISOString();
+      if (form.assignment_type === 'TEMPORARY' && (form.end_date || form.end_clock)) payload.expiration_time = new Date(`${form.end_date || today}T${form.end_clock || '23:59'}`).toISOString();
+      if (form.justification.trim()) payload.justification = form.justification.trim();
+      const response = await auth.apiRequest(`/api/v1/packages/${requestingPackage.id}/request`, { method: 'POST', body: JSON.stringify(payload) });
+      if (response.status === 201) {
+        const body = await response.json();
+        const results: { status: string; assignment?: { status: string } }[] = body.results || [];
+        const failed = results.filter(r => r.status === 'FAILED').length;
+        const pending = results.some(r => r.assignment?.status === 'PENDING_APPROVAL');
+        const name = requestingPackage.name;
+        setRequestingPackage(null);
+        setSuccessMessage(failed > 0 ? `Requested "${name}" — ${failed} item(s) failed, contact an admin.` : pending ? `Requested "${name}" — awaiting approval.` : `"${name}" is now eligible — activate it from My Access.`);
+        reload();
+      } else { const errorBody = await response.json().catch(() => null); setMessage(errorBody?.error?.message || 'Unable to submit this request.'); }
+    } catch (err) {
+      setMessage(err instanceof Error && err.message === 'AUTHENTICATION_REQUIRED' ? 'Please sign in to continue.' : 'Unable to submit this request.');
+    } finally { setSaving(false); }
+  };
+
+  return <Page eyebrow="SELF-SERVICE" title="Request Packages" subtitle="Access packages you're eligible to request for yourself." action={<button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button>}>
+    {successMessage && <div className="detail-section" style={{marginBottom:14}}><div className="notice">{successMessage}</div></div>}
+    {requestingPackage && <form role="dialog" aria-modal="true" className="panel" style={{maxWidth:640,marginBottom:18}} onSubmit={submit}>
+      <div className="panel-head"><h2>Request "{requestingPackage.name}"</h2><button type="button" className="btn" aria-label="Close" onClick={() => setRequestingPackage(null)}><X size={14}/></button></div>
+      <div className="detail-section">
+        <label className="key"><span>Duration</span><select className="select" value={form.assignment_type} onChange={event => setForm({...form, assignment_type: event.target.value})}><option value="PERMANENT">Permanent</option><option value="TEMPORARY">Time-bound</option></select></label>
+        <div style={{marginTop:18}}>
+          <div className="key" style={{marginBottom:8}}><span>Start (optional) — leave blank to start now</span></div>
+          <div style={{display:'flex',gap:10}}>
+            <input className="select" style={{flex:1}} type="date" min={today} value={form.start_date} onChange={event => setForm({...form, start_date: event.target.value})}/>
+            <input className="select" style={{flex:1}} type="time" value={form.start_clock} onChange={event => setForm({...form, start_clock: event.target.value})}/>
+          </div>
+        </div>
+        {form.assignment_type === 'TEMPORARY' && <div style={{marginTop:18}}>
+          <div className="key" style={{marginBottom:8}}><span>Ends</span></div>
+          <div style={{display:'flex',gap:10}}>
+            <input className="select" style={{flex:1}} type="date" min={form.start_date || today} value={form.end_date} onChange={event => setForm({...form, end_date: event.target.value})}/>
+            <input className="select" style={{flex:1}} type="time" value={form.end_clock} onChange={event => setForm({...form, end_clock: event.target.value})}/>
+          </div>
+        </div>}
+        <label className="key" style={{display:'block',marginTop:14}}><span>Justification (optional)</span><input className="select" style={{width:'100%'}} value={form.justification} onChange={event => setForm({...form, justification: event.target.value})}/></label>
+        {message && <div className="notice" style={{marginTop:14}}>{message}</div>}
+      </div>
+      <div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setRequestingPackage(null)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Requesting...' : 'Submit request'}</button></div>
+    </form>}
+    <TablePanel toolbar={undefined}>{loading ? <div className="empty">Loading packages...</div> : error ? <div className="empty">{error}</div> : !packages || packages.length === 0 ? <div className="empty">No access packages are available for you to request.</div> : <table><thead><tr><th>Name</th><th>Description</th><th>Includes</th><th></th></tr></thead><tbody>{packages.map(p => <tr key={p.id}><td className="user-name">{p.name}</td><td>{p.description || '—'}</td><td>{p.items.map(i => i.resource_display_name || i.resource_id).join(', ')}</td><td><button className="btn btn-primary" onClick={() => openRequest(p)}>Request</button></td></tr>)}</tbody></table>}</TablePanel>
+  </Page>;
+}
+interface ApiAssignment { id: string; user_id: string; user_display_name: string | null; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; assignment_type: string; status: string; start_time: string | null; expiration_time: string | null; justification: string | null; requested_by: string | null; approved_by: string | null; activated_at: string | null; created_at: string; package_name: string | null; }
+interface ApiActivationPolicy { max_self_activation_hours: number; }
 function todayDateValue(date: Date) { const pad = (n: number) => String(n).padStart(2, '0'); return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`; }
 const emptyAssignmentForm = { user_id: '', resource_type: 'GROUP', resource_id: '', app_role_external_id: '', assignment_type: 'PERMANENT', start_date: '', start_clock: '', end_date: '', end_clock: '', approver_id: '', justification: '' };
 function AssignmentsInteractive() {
@@ -151,14 +349,32 @@ function AssignmentsInteractive() {
   const { data: groups, reload: reloadGroups } = useApiResource<ApiGroup[]>('/api/v1/groups');
   const { data: roles, reload: reloadRoles } = useApiResource<ApiRole[]>('/api/v1/roles');
   const { data: applications, reload: reloadApplications } = useApiResource<ApiApplication[]>('/api/v1/applications');
+  const { data: packages, reload: reloadPackages } = useApiResource<ApiPackage[]>('/api/v1/packages');
+  const { data: batches } = useApiResource<ApiPackageBatch[]>('/api/v1/packages/assignment-batches');
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(emptyAssignmentForm);
   const [saving, setSaving] = useState(false);
   const [formMessage, setFormMessage] = useState('');
   const [actioningId, setActioningId] = useState<string | null>(null);
-  const targets = form.resource_type === 'GROUP' ? (groups || []) : form.resource_type === 'ROLE' ? (roles || []) : (applications || []);
+  const [expandedBatches, setExpandedBatches] = useState<Set<string>>(new Set());
+  const targets = form.resource_type === 'GROUP' ? (groups || []) : form.resource_type === 'ROLE' ? (roles || []) : form.resource_type === 'APPLICATION' ? (applications || []) : (packages || []).filter(p => p.status === 'ACTIVE');
   const selectedApplication = form.resource_type === 'APPLICATION' ? (applications || []).find(a => a.id === form.resource_id) : undefined;
   const today = todayDateValue(new Date());
+  const batchByAssignmentId = useMemo(() => { const map = new Map<string, ApiPackageBatch>(); (batches || []).forEach(b => b.assignment_ids.forEach(id => map.set(id, b))); return map; }, [batches]);
+  const groupedRows = useMemo(() => {
+    const rows: Array<{ kind: 'single'; assignment: ApiAssignment } | { kind: 'batch'; batch: ApiPackageBatch; assignments: ApiAssignment[] }> = [];
+    const seenBatches = new Set<string>();
+    (assignmentList || []).forEach(a => {
+      const batch = batchByAssignmentId.get(a.id);
+      if (!batch) { rows.push({ kind: 'single', assignment: a }); return; }
+      if (seenBatches.has(batch.package_assignment_id)) return;
+      seenBatches.add(batch.package_assignment_id);
+      const assignments = (assignmentList || []).filter(x => batchByAssignmentId.get(x.id)?.package_assignment_id === batch.package_assignment_id);
+      rows.push({ kind: 'batch', batch, assignments });
+    });
+    return rows;
+  }, [assignmentList, batchByAssignmentId]);
+  const toggleBatch = (id: string) => setExpandedBatches(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -167,13 +383,17 @@ function AssignmentsInteractive() {
     if (form.assignment_type === 'TEMPORARY' && !form.end_date && !form.end_clock) { setFormMessage('Set an end date/time for a time-bound assignment.'); return; }
     setSaving(true); setFormMessage('');
     try {
-      const payload: Record<string, unknown> = { user_id: form.user_id, resource_type: form.resource_type, resource_id: form.resource_id, assignment_type: form.assignment_type };
-      if (form.resource_type === 'APPLICATION') payload.app_role_external_id = form.app_role_external_id;
+      const isPackage = form.resource_type === 'PACKAGE';
+      const payload: Record<string, unknown> = isPackage
+        ? { user_id: form.user_id, assignment_type: form.assignment_type }
+        : { user_id: form.user_id, resource_type: form.resource_type, resource_id: form.resource_id, assignment_type: form.assignment_type };
+      if (!isPackage && form.resource_type === 'APPLICATION') payload.app_role_external_id = form.app_role_external_id;
       if (form.start_date || form.start_clock) payload.start_time = new Date(`${form.start_date || today}T${form.start_clock || '00:00'}`).toISOString();
       if (form.assignment_type === 'TEMPORARY' && (form.end_date || form.end_clock)) payload.expiration_time = new Date(`${form.end_date || today}T${form.end_clock || '23:59'}`).toISOString();
       if (form.approver_id) payload.approver_id = form.approver_id;
       if (form.justification.trim()) payload.justification = form.justification.trim();
-      const response = await auth.apiRequest('/api/v1/assignments', { method: 'POST', body: JSON.stringify(payload) });
+      const endpoint = isPackage ? `/api/v1/packages/${form.resource_id}/assign` : '/api/v1/assignments';
+      const response = await auth.apiRequest(endpoint, { method: 'POST', body: JSON.stringify(payload) });
       if (response.status === 201) { setOpen(false); setForm(emptyAssignmentForm); reload(); }
       else { const errorBody = await response.json().catch(() => null); setFormMessage(errorBody?.error?.message || 'Unable to create assignment.'); }
     } catch (err) {
@@ -190,26 +410,36 @@ function AssignmentsInteractive() {
     } finally { setActioningId(null); }
   };
 
-  return <Page eyebrow="ACCESS MANAGEMENT" title="Assignments" subtitle="Assign group or role access to users, with optional approval and time-bound expiration." action={<button className="btn btn-primary" onClick={() => { setOpen(true); setFormMessage(''); reloadUsers(); reloadGroups(); reloadRoles(); reloadApplications(); }}><Plus size={14}/> Add assignment</button>}>
+  const decideBatch = async (batch: ApiPackageBatch, decision: 'approve' | 'reject') => {
+    if (decision === 'reject' && !window.confirm(`Reject all ${batch.assignment_ids.length} items in "${batch.package_name}"?`)) return;
+    setActioningId(batch.package_assignment_id);
+    try {
+      await Promise.all(batch.assignment_ids.map(id => auth.apiRequest(`/api/v1/assignments/${id}/${decision}`, { method: 'POST' })));
+      reload();
+    } finally { setActioningId(null); }
+  };
+
+  return <Page eyebrow="ACCESS MANAGEMENT" title="Assignments" subtitle="Assign group, role, application, or package access to users, with optional approval and time-bound expiration." action={<><button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button><button className="btn btn-primary" onClick={() => { setOpen(true); setFormMessage(''); reloadUsers(); reloadGroups(); reloadRoles(); reloadApplications(); reloadPackages(); }}><Plus size={14}/> Add assignment</button></>}>
     {open && <form role="dialog" aria-modal="true" className="panel" style={{maxWidth:720,marginBottom:18}} onSubmit={submit}>
       <div className="panel-head"><h2>Add assignment</h2><button type="button" className="btn" aria-label="Close" onClick={() => setOpen(false)}><X size={14}/></button></div>
       <div className="detail-section"><div className="key-grid">
         <label className="key"><span>User</span><select className="select" value={form.user_id} onChange={event => setForm({...form, user_id: event.target.value})}><option value="">Select a user</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name} ({u.email})</option>)}</select></label>
-        <label className="key"><span>Target type</span><select className="select" value={form.resource_type} onChange={event => setForm({...form, resource_type: event.target.value, resource_id: '', app_role_external_id: ''})}><option value="GROUP">Group</option><option value="ROLE">Role</option><option value="APPLICATION">Application</option></select></label>
-        <label className="key"><span>{form.resource_type === 'GROUP' ? 'Group' : form.resource_type === 'ROLE' ? 'Role' : 'Application'}</span><select className="select" value={form.resource_id} onChange={event => setForm({...form, resource_id: event.target.value, app_role_external_id: ''})}><option value="">Select {form.resource_type === 'GROUP' ? 'a group' : form.resource_type === 'ROLE' ? 'a role' : 'an application'}</option>{targets.map((t: ApiGroup | ApiRole | ApiApplication) => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
+        <label className="key"><span>Target type</span><select className="select" value={form.resource_type} onChange={event => setForm({...form, resource_type: event.target.value, resource_id: '', app_role_external_id: ''})}><option value="GROUP">Group</option><option value="ROLE">Role</option><option value="APPLICATION">Application</option><option value="PACKAGE">Package</option></select></label>
+        <label className="key"><span>{form.resource_type === 'GROUP' ? 'Group' : form.resource_type === 'ROLE' ? 'Role' : form.resource_type === 'APPLICATION' ? 'Application' : 'Package'}</span><select className="select" value={form.resource_id} onChange={event => setForm({...form, resource_id: event.target.value, app_role_external_id: ''})}><option value="">Select {form.resource_type === 'GROUP' ? 'a group' : form.resource_type === 'ROLE' ? 'a role' : form.resource_type === 'APPLICATION' ? 'an application' : 'a package'}</option>{targets.map((t: ApiGroup | ApiRole | ApiApplication | ApiPackage) => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
         {form.resource_type === 'APPLICATION' && <label className="key"><span>Application role</span><select className="select" value={form.app_role_external_id} onChange={event => setForm({...form, app_role_external_id: event.target.value})} disabled={!selectedApplication}><option value="">Select a role</option>{(selectedApplication?.app_roles || []).map(r => <option key={r.id} value={r.id}>{r.name}</option>)}</select></label>}
         <label className="key"><span>Duration</span><select className="select" value={form.assignment_type} onChange={event => setForm({...form, assignment_type: event.target.value})}><option value="PERMANENT">Permanent</option><option value="TEMPORARY">Time-bound</option></select></label>
         <label className="key"><span>Approver (optional)</span><select className="select" value={form.approver_id} onChange={event => setForm({...form, approver_id: event.target.value})}><option value="">No approval required</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
       </div>
+      <div className="notice" style={{marginTop:14}}>{form.approver_id ? 'Once approved, this becomes eligible, not active — the user still activates it themselves (up to the admin-configured limit) from their My Access page.' : 'This lands as eligible, not active — the user activates it themselves (up to the admin-configured limit) from their My Access page.'}</div>
       <div style={{marginTop:18}}>
-        <div className="key" style={{marginBottom:8}}><span>Start (optional) — leave blank to start now</span></div>
+        <div className="key" style={{marginBottom:8}}><span>{form.assignment_type === 'TEMPORARY' ? 'Start (optional) — deadline to activate by is set below' : 'Start (optional) — leave blank to start now'}</span></div>
         <div style={{display:'flex',gap:10}}>
           <input className="select" style={{flex:1}} type="date" min={today} value={form.start_date} onChange={event => setForm({...form, start_date: event.target.value})}/>
           <input className="select" style={{flex:1}} type="time" value={form.start_clock} onChange={event => setForm({...form, start_clock: event.target.value})}/>
         </div>
       </div>
       {form.assignment_type === 'TEMPORARY' && <div style={{marginTop:18}}>
-        <div className="key" style={{marginBottom:8}}><span>Ends</span></div>
+        <div className="key" style={{marginBottom:8}}><span>Deadline to activate by</span></div>
         <div style={{display:'flex',gap:10}}>
           <input className="select" style={{flex:1}} type="date" min={form.start_date || today} value={form.end_date} onChange={event => setForm({...form, end_date: event.target.value})}/>
           <input className="select" style={{flex:1}} type="time" value={form.end_clock} onChange={event => setForm({...form, end_clock: event.target.value})}/>
@@ -219,15 +449,216 @@ function AssignmentsInteractive() {
       {formMessage && <div className="notice" style={{marginTop:14}}>{formMessage}</div>}</div>
       <div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setOpen(false)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Creating...' : 'Create assignment'}</button></div>
     </form>}
-    <TablePanel toolbar={<Toolbar placeholder="Search assignments"/>}>{loading ? <div className="empty">Loading assignments...</div> : error ? <div className="empty">{error}</div> : !assignmentList || assignmentList.length === 0 ? <div className="empty">No assignments found.</div> : <table><thead><tr><th>User</th><th>Resource</th><th>Type</th><th>Duration</th><th>Status</th><th>Start</th><th>Expiration</th><th></th></tr></thead><tbody>{assignmentList.map(a => <tr key={a.id}><td className="user-name">{a.user_display_name || a.user_id}</td><td>{a.resource_display_name || a.resource_id}</td><td>{a.resource_type}</td><td>{a.assignment_type}</td><td><StatusBadge status={a.status}/></td><td>{a.start_time ? new Date(a.start_time).toLocaleString() : '—'}</td><td>{a.expiration_time ? new Date(a.expiration_time).toLocaleString() : '—'}</td><td>{a.status === 'PENDING_APPROVAL' ? <span style={{display:'flex',gap:5}}><button className="btn" disabled={actioningId === a.id} onClick={() => void decide(a.id, 'approve')} aria-label="Approve"><Check size={14}/></button><button className="btn" disabled={actioningId === a.id} onClick={() => void decide(a.id, 'reject')} aria-label="Reject"><X size={14}/></button></span> : <span className="footer-note">No actions</span>}</td></tr>)}</tbody></table>}</TablePanel>
+    <TablePanel toolbar={<Toolbar placeholder="Search assignments"/>}>{loading ? <div className="empty">Loading assignments...</div> : error ? <div className="empty">{error}</div> : !assignmentList || assignmentList.length === 0 ? <div className="empty">No assignments found.</div> : <table><thead><tr><th>User</th><th>Resource</th><th>Type</th><th>Duration</th><th>Status</th><th>Start</th><th>Expiration</th><th></th></tr></thead><tbody>{groupedRows.map(row => row.kind === 'single' ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.user_display_name || row.assignment.user_id}</td><td>{row.assignment.resource_display_name || row.assignment.resource_id}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.assignment_type}</td><td><StatusBadge status={row.assignment.status}/></td><td>{row.assignment.start_time ? new Date(row.assignment.start_time).toLocaleString() : '—'}</td><td>{row.assignment.expiration_time ? new Date(row.assignment.expiration_time).toLocaleString() : '—'}</td><td>{row.assignment.status === 'PENDING_APPROVAL' ? <span style={{display:'flex',gap:5}}><button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'approve')} aria-label="Approve"><Check size={14}/></button><button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'reject')} aria-label="Reject"><X size={14}/></button></span> : <span className="footer-note">No actions</span>}</td></tr> : <>
+      <tr key={row.batch.package_assignment_id} style={{cursor:'pointer'}} onClick={() => toggleBatch(row.batch.package_assignment_id)}>
+        <td className="user-name">{row.assignments[0]?.user_display_name || row.batch.user_id}</td>
+        <td>📦 {row.batch.package_name} <span className="footer-note">({row.assignments.length} items)</span></td>
+        <td>PACKAGE</td>
+        <td>{row.assignments[0]?.assignment_type}</td>
+        <td><StatusBadge status={new Set(row.assignments.map(a => a.status)).size === 1 ? row.assignments[0].status : 'MIXED'}/></td>
+        <td>{row.assignments[0]?.start_time ? new Date(row.assignments[0].start_time!).toLocaleString() : '—'}</td>
+        <td>{row.assignments[0]?.expiration_time ? new Date(row.assignments[0].expiration_time!).toLocaleString() : '—'}</td>
+        <td>{row.assignments.some(a => a.status === 'PENDING_APPROVAL') ? <span style={{display:'flex',gap:5}} onClick={event => event.stopPropagation()}><button className="btn" disabled={actioningId === row.batch.package_assignment_id} onClick={() => void decideBatch(row.batch, 'approve')} aria-label="Approve all"><Check size={14}/></button><button className="btn" disabled={actioningId === row.batch.package_assignment_id} onClick={() => void decideBatch(row.batch, 'reject')} aria-label="Reject all"><X size={14}/></button></span> : <span className="footer-note">No actions</span>}</td>
+      </tr>
+      {expandedBatches.has(row.batch.package_assignment_id) && row.assignments.map(a => <tr key={a.id} style={{opacity:0.8}}><td className="user-name">↳</td><td>{a.resource_display_name || a.resource_id}</td><td>{a.resource_type}</td><td>{a.assignment_type}</td><td><StatusBadge status={a.status}/></td><td>{a.start_time ? new Date(a.start_time).toLocaleString() : '—'}</td><td>{a.expiration_time ? new Date(a.expiration_time).toLocaleString() : '—'}</td><td>{a.status === 'PENDING_APPROVAL' ? <span style={{display:'flex',gap:5}}><button className="btn" disabled={actioningId === a.id} onClick={() => void decide(a.id, 'approve')} aria-label="Approve"><Check size={14}/></button><button className="btn" disabled={actioningId === a.id} onClick={() => void decide(a.id, 'reject')} aria-label="Reject"><X size={14}/></button></span> : <span className="footer-note">No actions</span>}</td></tr>)}
+    </>)}</tbody></table>}</TablePanel>
   </Page>;
 }
 function AssignmentsPage() { return <AssignmentsInteractive />; }
+const emptyPackageForm = { name: '', description: '', items: [] as { resource_type: string; resource_id: string; app_role_external_id: string }[] };
+const emptyPackageAssignForm = { target_type: 'USER', user_id: '', group_id: '', assignment_type: 'PERMANENT', start_date: '', start_clock: '', end_date: '', end_clock: '', approver_id: '', justification: '' };
+function AccessPackagesInteractive() {
+  const auth = useAuth();
+  const { data: packageList, error, loading, reload } = useApiResource<ApiPackage[]>('/api/v1/packages');
+  const { data: users } = useApiResource<ApiUser[]>('/api/v1/users');
+  const { data: groups } = useApiResource<ApiGroup[]>('/api/v1/groups');
+  const { data: roles } = useApiResource<ApiRole[]>('/api/v1/roles');
+  const { data: applications } = useApiResource<ApiApplication[]>('/api/v1/applications');
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState(emptyPackageForm);
+  const [saving, setSaving] = useState(false);
+  const [formMessage, setFormMessage] = useState('');
+  const [editingPackageId, setEditingPackageId] = useState<string | null>(null);
+  const [assigningPackage, setAssigningPackage] = useState<ApiPackage | null>(null);
+  const [assignForm, setAssignForm] = useState(emptyPackageAssignForm);
+  const [assigning, setAssigning] = useState(false);
+  const [assignMessage, setAssignMessage] = useState('');
+  const [archivingId, setArchivingId] = useState<string | null>(null);
+  const [eligibilityPackage, setEligibilityPackage] = useState<ApiPackage | null>(null);
+  const [eligibilityForm, setEligibilityForm] = useState<{ principals: { principal_type: string; principal_id: string }[]; default_approver_id: string }>({ principals: [], default_approver_id: '' });
+  const [eligibilitySaving, setEligibilitySaving] = useState(false);
+  const [eligibilityMessage, setEligibilityMessage] = useState('');
+  const today = todayDateValue(new Date());
+
+  const targetsFor = (resourceType: string) => resourceType === 'GROUP' ? (groups || []) : resourceType === 'ROLE' ? (roles || []) : (applications || []);
+  const addItem = () => setForm({ ...form, items: [...form.items, { resource_type: 'GROUP', resource_id: '', app_role_external_id: '' }] });
+  const removeItem = (index: number) => setForm({ ...form, items: form.items.filter((_, i) => i !== index) });
+  const updateItem = (index: number, patch: Partial<{ resource_type: string; resource_id: string; app_role_external_id: string }>) => setForm({ ...form, items: form.items.map((item, i) => i === index ? { ...item, ...patch } : item) });
+
+  const openEligibility = (pkg: ApiPackage) => {
+    setEligibilityPackage(pkg);
+    setEligibilityForm({ principals: pkg.eligible_principals.map(p => ({ principal_type: p.principal_type, principal_id: p.principal_id })), default_approver_id: pkg.default_approver_id || '' });
+    setEligibilityMessage('');
+  };
+  const addPrincipal = () => setEligibilityForm({ ...eligibilityForm, principals: [...eligibilityForm.principals, { principal_type: 'USER', principal_id: '' }] });
+  const removePrincipal = (index: number) => setEligibilityForm({ ...eligibilityForm, principals: eligibilityForm.principals.filter((_, i) => i !== index) });
+  const updatePrincipal = (index: number, patch: Partial<{ principal_type: string; principal_id: string }>) => setEligibilityForm({ ...eligibilityForm, principals: eligibilityForm.principals.map((p, i) => i === index ? { ...p, ...patch } : p) });
+  const submitEligibility = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!eligibilityPackage) return;
+    if (eligibilityForm.principals.some(p => !p.principal_id)) { setEligibilityMessage('Select a target for every entry.'); return; }
+    setEligibilitySaving(true); setEligibilityMessage('');
+    try {
+      const payload = { principals: eligibilityForm.principals, default_approver_id: eligibilityForm.default_approver_id || undefined };
+      const response = await auth.apiRequest(`/api/v1/packages/${eligibilityPackage.id}/eligibility`, { method: 'PUT', body: JSON.stringify(payload) });
+      if (response.ok) { setEligibilityPackage(null); reload(); }
+      else { const errorBody = await response.json().catch(() => null); setEligibilityMessage(errorBody?.error?.message || 'Unable to update eligibility.'); }
+    } catch (err) {
+      setEligibilityMessage(err instanceof Error && err.message === 'AUTHENTICATION_REQUIRED' ? 'Please sign in to continue.' : 'Unable to update eligibility.');
+    } finally { setEligibilitySaving(false); }
+  };
+
+  const openCreate = () => { setEditingPackageId(null); setForm(emptyPackageForm); setFormMessage(''); setOpen(true); };
+  const openEdit = (pkg: ApiPackage) => {
+    setEditingPackageId(pkg.id);
+    setForm({ name: pkg.name, description: pkg.description || '', items: pkg.items.map(item => ({ resource_type: item.resource_type, resource_id: item.resource_id, app_role_external_id: item.app_role_external_id || '' })) });
+    setFormMessage(''); setOpen(true);
+  };
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!form.name.trim()) { setFormMessage('Enter a package name.'); return; }
+    if (form.items.length === 0) { setFormMessage('Add at least one item.'); return; }
+    if (form.items.some(item => !item.resource_id || (item.resource_type === 'APPLICATION' && !item.app_role_external_id))) { setFormMessage('Complete every item (select a target, and an application role where needed).'); return; }
+    setSaving(true); setFormMessage('');
+    try {
+      const payload = { name: form.name.trim(), description: form.description.trim() || undefined, items: form.items.map(item => ({ resource_type: item.resource_type, resource_id: item.resource_id, app_role_external_id: item.resource_type === 'APPLICATION' ? item.app_role_external_id : undefined })) };
+      const response = editingPackageId
+        ? await auth.apiRequest(`/api/v1/packages/${editingPackageId}`, { method: 'PATCH', body: JSON.stringify(payload) })
+        : await auth.apiRequest('/api/v1/packages', { method: 'POST', body: JSON.stringify(payload) });
+      if (response.status === 200 || response.status === 201) { setOpen(false); setEditingPackageId(null); setForm(emptyPackageForm); reload(); }
+      else { const errorBody = await response.json().catch(() => null); setFormMessage(errorBody?.error?.message || `Unable to ${editingPackageId ? 'update' : 'create'} package.`); }
+    } catch (err) {
+      setFormMessage(err instanceof Error && err.message === 'AUTHENTICATION_REQUIRED' ? 'Please sign in to continue.' : `Unable to ${editingPackageId ? 'update' : 'create'} package.`);
+    } finally { setSaving(false); }
+  };
+
+  const submitAssign = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!assigningPackage) return;
+    if (assignForm.target_type === 'USER' && !assignForm.user_id) { setAssignMessage('Select a user.'); return; }
+    if (assignForm.target_type === 'GROUP' && !assignForm.group_id) { setAssignMessage('Select a group.'); return; }
+    if (assignForm.assignment_type === 'TEMPORARY' && !assignForm.end_date && !assignForm.end_clock) { setAssignMessage('Set an end date/time for a time-bound assignment.'); return; }
+    setAssigning(true); setAssignMessage('');
+    try {
+      const payload: Record<string, unknown> = assignForm.target_type === 'USER' ? { user_id: assignForm.user_id, assignment_type: assignForm.assignment_type } : { group_id: assignForm.group_id, assignment_type: assignForm.assignment_type };
+      if (assignForm.start_date || assignForm.start_clock) payload.start_time = new Date(`${assignForm.start_date || today}T${assignForm.start_clock || '00:00'}`).toISOString();
+      if (assignForm.assignment_type === 'TEMPORARY' && (assignForm.end_date || assignForm.end_clock)) payload.expiration_time = new Date(`${assignForm.end_date || today}T${assignForm.end_clock || '23:59'}`).toISOString();
+      if (assignForm.approver_id) payload.approver_id = assignForm.approver_id;
+      if (assignForm.justification.trim()) payload.justification = assignForm.justification.trim();
+      const response = await auth.apiRequest(`/api/v1/packages/${assigningPackage.id}/assign`, { method: 'POST', body: JSON.stringify(payload) });
+      if (response.status === 201) {
+        const body = await response.json();
+        const members: { results: { status: string }[] }[] = body.members || [];
+        const failedCount = members.reduce((count, member) => count + member.results.filter(r => r.status === 'FAILED').length, 0);
+        if (failedCount > 0) setAssignMessage(`Assigned to ${members.length} ${members.length === 1 ? 'member' : 'members'} with ${failedCount} item(s) failed — check Assignments for details.`);
+        else { setAssigningPackage(null); setAssignForm(emptyPackageAssignForm); }
+      } else { const errorBody = await response.json().catch(() => null); setAssignMessage(errorBody?.error?.message || 'Unable to assign this package.'); }
+    } catch (err) {
+      setAssignMessage(err instanceof Error && err.message === 'AUTHENTICATION_REQUIRED' ? 'Please sign in to continue.' : 'Unable to assign this package.');
+    } finally { setAssigning(false); }
+  };
+
+  const deletePackage = async (packageId: string) => {
+    if (!window.confirm('Delete this package? If it has never been assigned it will be removed entirely; otherwise it will be archived and no longer assignable.')) return;
+    setArchivingId(packageId);
+    try {
+      const response = await auth.apiRequest(`/api/v1/packages/${packageId}`, { method: 'DELETE' });
+      if (response.ok) reload();
+    } finally { setArchivingId(null); }
+  };
+
+  return <Page eyebrow="ACCESS MANAGEMENT" title="Access Packages" subtitle="Bundle groups, roles, and application roles together and assign them to a user in one action." action={<><button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button><button className="btn btn-primary" onClick={openCreate}><Plus size={14}/> Add package</button></>}>
+    {open && <form role="dialog" aria-modal="true" className="panel" style={{maxWidth:820,marginBottom:18}} onSubmit={submit}>
+      <div className="panel-head"><h2>{editingPackageId ? 'Edit package' : 'Add package'}</h2><button type="button" className="btn" aria-label="Close" onClick={() => setOpen(false)}><X size={14}/></button></div>
+      <div className="detail-section">
+        <div className="key-grid">
+          <label className="key"><span>Name</span><input className="select" style={{width:'100%'}} value={form.name} onChange={event => setForm({...form, name: event.target.value})}/></label>
+          <label className="key"><span>Description (optional)</span><input className="select" style={{width:'100%'}} value={form.description} onChange={event => setForm({...form, description: event.target.value})}/></label>
+        </div>
+        <div className="key" style={{marginTop:18,marginBottom:8}}><span>Items</span></div>
+        {form.items.map((item, index) => {
+          const itemTargets = targetsFor(item.resource_type);
+          const selectedApp = item.resource_type === 'APPLICATION' ? (applications || []).find(a => a.id === item.resource_id) : undefined;
+          return <div key={index} style={{display:'flex',gap:10,alignItems:'flex-end',marginBottom:10}}>
+            <label className="key" style={{flex:1}}><span>Target type</span><select className="select" style={{width:'100%'}} value={item.resource_type} onChange={event => updateItem(index, { resource_type: event.target.value, resource_id: '', app_role_external_id: '' })}><option value="GROUP">Group</option><option value="ROLE">Role</option><option value="APPLICATION">Application</option></select></label>
+            <label className="key" style={{flex:1}}><span>{item.resource_type === 'GROUP' ? 'Group' : item.resource_type === 'ROLE' ? 'Role' : 'Application'}</span><select className="select" style={{width:'100%'}} value={item.resource_id} onChange={event => updateItem(index, { resource_id: event.target.value, app_role_external_id: '' })}><option value="">Select...</option>{itemTargets.map((t: ApiGroup | ApiRole | ApiApplication) => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
+            {item.resource_type === 'APPLICATION' && <label className="key" style={{flex:1}}><span>Application role</span><select className="select" style={{width:'100%'}} value={item.app_role_external_id} onChange={event => updateItem(index, { app_role_external_id: event.target.value })} disabled={!selectedApp}><option value="">Select a role</option>{(selectedApp?.app_roles || []).map(r => <option key={r.id} value={r.id}>{r.name}</option>)}</select></label>}
+            <button type="button" className="btn" aria-label="Remove item" onClick={() => removeItem(index)}><X size={14}/></button>
+          </div>;
+        })}
+        <button type="button" className="btn" onClick={addItem}><Plus size={14}/> Add item</button>
+        {formMessage && <div className="notice" style={{marginTop:14}}>{formMessage}</div>}
+      </div>
+      <div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setOpen(false)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Saving...' : editingPackageId ? 'Save changes' : 'Create package'}</button></div>
+    </form>}
+    {assigningPackage && <form role="dialog" aria-modal="true" className="panel" style={{maxWidth:720,marginBottom:18}} onSubmit={submitAssign}>
+      <div className="panel-head"><h2>Assign "{assigningPackage.name}"</h2><button type="button" className="btn" aria-label="Close" onClick={() => setAssigningPackage(null)}><X size={14}/></button></div>
+      <div className="detail-section"><div className="key-grid">
+        <label className="key"><span>Assign to</span><select className="select" value={assignForm.target_type} onChange={event => setAssignForm({...assignForm, target_type: event.target.value, user_id: '', group_id: ''})}><option value="USER">Individual user</option><option value="GROUP">Everyone in a group</option></select></label>
+        {assignForm.target_type === 'USER' ? <label className="key"><span>User</span><select className="select" value={assignForm.user_id} onChange={event => setAssignForm({...assignForm, user_id: event.target.value})}><option value="">Select a user</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name} ({u.email})</option>)}</select></label> : <label className="key"><span>Group</span><select className="select" value={assignForm.group_id} onChange={event => setAssignForm({...assignForm, group_id: event.target.value})}><option value="">Select a group</option>{(groups || []).map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select></label>}
+        <label className="key"><span>Duration</span><select className="select" value={assignForm.assignment_type} onChange={event => setAssignForm({...assignForm, assignment_type: event.target.value})}><option value="PERMANENT">Permanent</option><option value="TEMPORARY">Time-bound</option></select></label>
+        <label className="key"><span>Approver (optional)</span><select className="select" value={assignForm.approver_id} onChange={event => setAssignForm({...assignForm, approver_id: event.target.value})}><option value="">No approval required</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+      </div>
+      <div style={{marginTop:18}}>
+        <div className="key" style={{marginBottom:8}}><span>Start (optional) — leave blank to start now</span></div>
+        <div style={{display:'flex',gap:10}}>
+          <input className="select" style={{flex:1}} type="date" min={today} value={assignForm.start_date} onChange={event => setAssignForm({...assignForm, start_date: event.target.value})}/>
+          <input className="select" style={{flex:1}} type="time" value={assignForm.start_clock} onChange={event => setAssignForm({...assignForm, start_clock: event.target.value})}/>
+        </div>
+      </div>
+      {assignForm.assignment_type === 'TEMPORARY' && <div style={{marginTop:18}}>
+        <div className="key" style={{marginBottom:8}}><span>Ends</span></div>
+        <div style={{display:'flex',gap:10}}>
+          <input className="select" style={{flex:1}} type="date" min={assignForm.start_date || today} value={assignForm.end_date} onChange={event => setAssignForm({...assignForm, end_date: event.target.value})}/>
+          <input className="select" style={{flex:1}} type="time" value={assignForm.end_clock} onChange={event => setAssignForm({...assignForm, end_clock: event.target.value})}/>
+        </div>
+      </div>}
+      <label className="key" style={{display:'block',marginTop:14}}><span>Justification (optional)</span><input className="select" style={{width:'100%'}} value={assignForm.justification} onChange={event => setAssignForm({...assignForm, justification: event.target.value})}/></label>
+      {assignMessage && <div className="notice" style={{marginTop:14}}>{assignMessage}</div>}</div>
+      <div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setAssigningPackage(null)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={assigning}>{assigning ? 'Assigning...' : 'Assign package'}</button></div>
+    </form>}
+    {eligibilityPackage && <form role="dialog" aria-modal="true" className="panel" style={{maxWidth:720,marginBottom:18}} onSubmit={submitEligibility}>
+      <div className="panel-head"><h2>Who can request "{eligibilityPackage.name}"</h2><button type="button" className="btn" aria-label="Close" onClick={() => setEligibilityPackage(null)}><X size={14}/></button></div>
+      <div className="detail-section">
+        <label className="key" style={{display:'block',marginBottom:14}}><span>Default approver (optional) — used automatically when someone eligible requests this package</span><select className="select" style={{width:'100%'}} value={eligibilityForm.default_approver_id} onChange={event => setEligibilityForm({...eligibilityForm, default_approver_id: event.target.value})}><option value="">No approval required</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+        <div className="key" style={{marginBottom:8}}><span>Eligible users / groups</span></div>
+        {eligibilityForm.principals.map((principal, index) => {
+          const options = principal.principal_type === 'USER' ? (users || []) : (groups || []);
+          return <div key={index} style={{display:'flex',gap:10,alignItems:'flex-end',marginBottom:10}}>
+            <label className="key" style={{flex:1}}><span>Type</span><select className="select" style={{width:'100%'}} value={principal.principal_type} onChange={event => updatePrincipal(index, { principal_type: event.target.value, principal_id: '' })}><option value="USER">Individual user</option><option value="GROUP">Group</option></select></label>
+            <label className="key" style={{flex:1}}><span>{principal.principal_type === 'USER' ? 'User' : 'Group'}</span><select className="select" style={{width:'100%'}} value={principal.principal_id} onChange={event => updatePrincipal(index, { principal_id: event.target.value })}><option value="">Select...</option>{options.map((o: ApiUser | ApiGroup) => <option key={o.id} value={o.id}>{principal.principal_type === 'USER' ? (o as ApiUser).display_name : (o as ApiGroup).name}</option>)}</select></label>
+            <button type="button" className="btn" aria-label="Remove" onClick={() => removePrincipal(index)}><X size={14}/></button>
+          </div>;
+        })}
+        <button type="button" className="btn" onClick={addPrincipal}><Plus size={14}/> Add eligible user/group</button>
+        {eligibilityForm.principals.length === 0 && <div className="notice" style={{marginTop:14}}>No one can currently self-request this package — end users only see it under "Request Packages" once eligible.</div>}
+        {eligibilityMessage && <div className="notice" style={{marginTop:14}}>{eligibilityMessage}</div>}
+      </div>
+      <div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setEligibilityPackage(null)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={eligibilitySaving}>{eligibilitySaving ? 'Saving...' : 'Save eligibility'}</button></div>
+    </form>}
+    <TablePanel toolbar={<Toolbar placeholder="Search packages"/>}>{loading ? <div className="empty">Loading packages...</div> : error ? <div className="empty">{error}</div> : !packageList || packageList.length === 0 ? <div className="empty">No packages found.</div> : <table><thead><tr><th>Name</th><th>Description</th><th>Items</th><th>Status</th><th>Requestable by</th><th></th></tr></thead><tbody>{packageList.map(p => <tr key={p.id}><td className="user-name">{p.name}</td><td>{p.description || '—'}</td><td>{p.items.map(i => i.resource_display_name || i.resource_id).join(', ')}</td><td><StatusBadge status={p.status}/></td><td>{p.eligible_principals.length === 0 ? '—' : `${p.eligible_principals.length} ${p.eligible_principals.length === 1 ? 'entry' : 'entries'}`}</td><td><span style={{display:'flex',gap:5}}>{p.status === 'ACTIVE' && <button className="btn btn-primary" onClick={() => { setAssigningPackage(p); setAssignForm(emptyPackageAssignForm); setAssignMessage(''); }}>Assign</button>}<button className="btn" onClick={() => openEdit(p)}>Edit</button>{p.status === 'ACTIVE' && <button className="btn" onClick={() => openEligibility(p)}>Eligibility</button>}{p.status === 'ACTIVE' && <button className="btn" disabled={archivingId === p.id} onClick={() => void deletePackage(p.id)}>Delete</button>}</span></td></tr>)}</tbody></table>}</TablePanel>
+  </Page>;
+}
 function MyApprovalsPage() {
   const auth = useAuth();
   const { data: items, error, loading, reload } = useApiResource<ApiAssignment[]>('/api/v1/assignments/pending-approval');
+  // Self-scoped: returns only batches where the caller is the designated approver, so it works for any
+  // authenticated user (not just Admins) — same access model as /assignments/pending-approval above.
+  const { data: batches } = useApiResource<ApiPackageBatch[]>('/api/v1/packages/my-assignment-batches');
   const [actioningId, setActioningId] = useState<string | null>(null);
   const [message, setMessage] = useState('');
+  const [expandedBatches, setExpandedBatches] = useState<Set<string>>(new Set());
   const decide = async (assignmentId: string, decision: 'approve' | 'reject') => {
     if (decision === 'reject' && !window.confirm('Reject this access request?')) return;
     setActioningId(assignmentId); setMessage('');
@@ -237,11 +668,61 @@ function MyApprovalsPage() {
       else { const body = await response.json().catch(() => null); setMessage(body?.error?.message || 'Unable to complete this action.'); }
     } catch { setMessage('Unable to complete this action.'); } finally { setActioningId(null); }
   };
+  const decideBatch = async (batch: ApiPackageBatch, decision: 'approve' | 'reject') => {
+    if (decision === 'reject' && !window.confirm(`Reject all ${batch.assignment_ids.length} items in "${batch.package_name}"?`)) return;
+    setActioningId(batch.package_assignment_id); setMessage('');
+    try {
+      const responses = await Promise.all(batch.assignment_ids.map(id => auth.apiRequest(`/api/v1/assignments/${id}/${decision}`, { method: 'POST' })));
+      if (responses.every(r => r.ok)) reload();
+      else setMessage('Some items in this package could not be processed.');
+    } catch { setMessage('Unable to complete this action.'); } finally { setActioningId(null); }
+  };
+  const toggleBatch = (id: string) => setExpandedBatches(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  const batchByAssignmentId = useMemo(() => { const map = new Map<string, ApiPackageBatch>(); (batches || []).forEach(b => b.assignment_ids.forEach(id => map.set(id, b))); return map; }, [batches]);
+  const groupRows = (list: ApiAssignment[]) => {
+    const rows: Array<{ kind: 'single'; assignment: ApiAssignment } | { kind: 'batch'; batch: ApiPackageBatch; assignments: ApiAssignment[] }> = [];
+    const seen = new Set<string>();
+    list.forEach(a => {
+      const batch = batchByAssignmentId.get(a.id);
+      if (!batch) { rows.push({ kind: 'single', assignment: a }); return; }
+      if (seen.has(batch.package_assignment_id)) return;
+      seen.add(batch.package_assignment_id);
+      rows.push({ kind: 'batch', batch, assignments: list.filter(x => batchByAssignmentId.get(x.id)?.package_assignment_id === batch.package_assignment_id) });
+    });
+    return rows;
+  };
   const pending = (items || []).filter(a => a.status === 'PENDING_APPROVAL');
   const decided = (items || []).filter(a => a.status !== 'PENDING_APPROVAL');
-  return <Page eyebrow="ACCESS MANAGEMENT" title="Approvals" subtitle="Access assignments where you are the designated approver.">
+  const pendingRows = groupRows(pending);
+  const decidedRows = groupRows(decided);
+  return <Page eyebrow="ACCESS MANAGEMENT" title="Approvals" subtitle="Access assignments where you are the designated approver." action={<button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button>}>
     {message && <div className="detail-section" style={{marginBottom:14}}><div className="notice">{message}</div></div>}
-    <TablePanel toolbar={undefined}>{loading ? <div className="empty">Loading approvals...</div> : error ? <div className="empty">{error}</div> : !items || items.length === 0 ? <div className="empty">No assignments are waiting on your approval.</div> : <table><thead><tr><th>User</th><th>Resource</th><th>Type</th><th>Duration</th><th>Status</th><th>Requested</th><th></th></tr></thead><tbody>{pending.map(a => <tr key={a.id}><td className="user-name">{a.user_display_name || a.user_id}</td><td>{a.resource_display_name || a.resource_id}</td><td>{a.resource_type}</td><td>{a.assignment_type}</td><td><StatusBadge status={a.status}/></td><td>{new Date(a.created_at).toLocaleString()}</td><td><span style={{display:'flex',gap:5}}><button className="btn btn-primary" disabled={actioningId === a.id} onClick={() => void decide(a.id, 'approve')} aria-label="Approve"><Check size={14}/> Approve</button><button className="btn" disabled={actioningId === a.id} onClick={() => void decide(a.id, 'reject')} aria-label="Reject"><X size={14}/> Reject</button></span></td></tr>)}{decided.map(a => <tr key={a.id}><td className="user-name">{a.user_display_name || a.user_id}</td><td>{a.resource_display_name || a.resource_id}</td><td>{a.resource_type}</td><td>{a.assignment_type}</td><td><StatusBadge status={a.status}/></td><td>{new Date(a.created_at).toLocaleString()}</td><td><span className="footer-note">Decided</span></td></tr>)}</tbody></table>}</TablePanel>
+    <TablePanel toolbar={undefined}>{loading ? <div className="empty">Loading approvals...</div> : error ? <div className="empty">{error}</div> : !items || items.length === 0 ? <div className="empty">No assignments are waiting on your approval.</div> : <table><thead><tr><th>User</th><th>Resource</th><th>Type</th><th>Duration</th><th>Status</th><th>Requested</th><th></th></tr></thead><tbody>
+      {pendingRows.map(row => row.kind === 'single' ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.user_display_name || row.assignment.user_id}</td><td>{row.assignment.resource_display_name || row.assignment.resource_id}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.assignment_type}</td><td><StatusBadge status={row.assignment.status}/></td><td>{new Date(row.assignment.created_at).toLocaleString()}</td><td><span style={{display:'flex',gap:5}}><button className="btn btn-primary" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'approve')} aria-label="Approve"><Check size={14}/> Approve</button><button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'reject')} aria-label="Reject"><X size={14}/> Reject</button></span></td></tr> : <>
+        <tr key={row.batch.package_assignment_id} style={{cursor:'pointer'}} onClick={() => toggleBatch(row.batch.package_assignment_id)}>
+          <td className="user-name">{row.assignments[0]?.user_display_name || row.batch.user_id}</td>
+          <td>📦 {row.batch.package_name} <span className="footer-note">({row.assignments.length} items)</span></td>
+          <td>PACKAGE</td>
+          <td>{row.assignments[0]?.assignment_type}</td>
+          <td><StatusBadge status="PENDING_APPROVAL"/></td>
+          <td>{new Date(row.assignments[0].created_at).toLocaleString()}</td>
+          <td><span style={{display:'flex',gap:5}} onClick={event => event.stopPropagation()}><button className="btn btn-primary" disabled={actioningId === row.batch.package_assignment_id} onClick={() => void decideBatch(row.batch, 'approve')} aria-label="Approve all"><Check size={14}/> Approve all</button><button className="btn" disabled={actioningId === row.batch.package_assignment_id} onClick={() => void decideBatch(row.batch, 'reject')} aria-label="Reject all"><X size={14}/> Reject all</button></span></td>
+        </tr>
+        {expandedBatches.has(row.batch.package_assignment_id) && row.assignments.map(a => <tr key={a.id} style={{opacity:0.8}}><td className="user-name">↳</td><td>{a.resource_display_name || a.resource_id}</td><td>{a.resource_type}</td><td>{a.assignment_type}</td><td><StatusBadge status={a.status}/></td><td>{new Date(a.created_at).toLocaleString()}</td><td></td></tr>)}
+      </>)}
+      {decidedRows.map(row => row.kind === 'single' ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.user_display_name || row.assignment.user_id}</td><td>{row.assignment.resource_display_name || row.assignment.resource_id}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.assignment_type}</td><td><StatusBadge status={row.assignment.status}/></td><td>{new Date(row.assignment.created_at).toLocaleString()}</td><td><span className="footer-note">Decided</span></td></tr> : <>
+        <tr key={row.batch.package_assignment_id} style={{cursor:'pointer'}} onClick={() => toggleBatch(row.batch.package_assignment_id)}>
+          <td className="user-name">{row.assignments[0]?.user_display_name || row.batch.user_id}</td>
+          <td>📦 {row.batch.package_name} <span className="footer-note">({row.assignments.length} items)</span></td>
+          <td>PACKAGE</td>
+          <td>{row.assignments[0]?.assignment_type}</td>
+          <td><StatusBadge status={new Set(row.assignments.map(a => a.status)).size === 1 ? row.assignments[0].status : 'MIXED'}/></td>
+          <td>{new Date(row.assignments[0].created_at).toLocaleString()}</td>
+          <td><span className="footer-note">Decided</span></td>
+        </tr>
+        {expandedBatches.has(row.batch.package_assignment_id) && row.assignments.map(a => <tr key={a.id} style={{opacity:0.8}}><td className="user-name">↳</td><td>{a.resource_display_name || a.resource_id}</td><td>{a.resource_type}</td><td>{a.assignment_type}</td><td><StatusBadge status={a.status}/></td><td>{new Date(a.created_at).toLocaleString()}</td><td></td></tr>)}
+      </>)}
+    </tbody></table>}</TablePanel>
   </Page>;
 }
 function GroupsPage() {
@@ -274,13 +755,13 @@ function RolesPage() {
   return <Page eyebrow="ADMINISTRATION" title="Directory roles" subtitle="Privileged and standard roles available through AccessPilot."><TablePanel toolbar={<Toolbar placeholder="Search roles"/>}>{loading ? <div className="empty">Loading roles...</div> : error ? <div className="empty">{error}</div> : !roles || roles.length === 0 ? <div className="empty">No roles found.</div> : <table><thead><tr><th>Role</th><th>Description</th><th>Provider</th><th>Privileged</th><th>Status</th></tr></thead><tbody>{roles.map(r => <tr key={r.id}><td className="user-name">{r.name}</td><td>{r.description || '—'}</td><td>Microsoft Entra ID</td><td><span className={`risk ${r.is_privileged ? 'risk-high' : 'risk-low'}`}>{r.is_privileged ? 'Yes' : 'No'}</span></td><td><StatusBadge status={r.status}/></td></tr>)}</tbody></table>}</TablePanel></Page>;
 }
 function PoliciesPage() { return <Page eyebrow="GOVERNANCE" title="Policies" subtitle="Rules that govern access duration, approvals, and assurance." action={<button className="btn btn-primary"><Plus size={14}/> Create policy</button>}><TablePanel toolbar={<Toolbar placeholder="Search policies"/>}><table><thead><tr><th>Policy name</th><th>Description</th><th>Scope</th><th>Max duration</th><th>Approval</th><th>MFA</th><th>Ticket</th><th>Status</th><th></th></tr></thead><tbody>{policies.map(p => <tr key={p.name}><td className="user-name">{p.name}</td><td>{p.description}</td><td>{p.scope}</td><td>{p.max}</td><td>{p.approval}</td><td>{p.mfa}</td><td>{p.ticket}</td><td><StatusBadge status={p.status}/></td><td><button className="btn">Edit</button></td></tr>)}</tbody></table></TablePanel></Page>; }
-interface ApiAuditLog { id: string; timestamp: string; actor_user_id: string | null; actor_display_name: string | null; action: string; target_type: string; target_id: string | null; provider_id: string | null; provider_name: string | null; request_id: string; result: string; }
+interface ApiAuditLog { id: string; timestamp: string; actor_user_id: string | null; actor_display_name: string | null; action: string; target_type: string; target_id: string | null; provider_id: string | null; provider_name: string | null; request_id: string; result: string; target_user_display_name: string | null; target_user_email: string | null; }
 function AuditPage() {
-  const { data: logs, error, loading } = useApiResource<ApiAuditLog[]>('/api/v1/audit-logs');
-  return <Page eyebrow="GOVERNANCE" title="Audit logs" subtitle="A tamper-evident record of identity and access activity."><TablePanel toolbar={<Toolbar placeholder="Search audit events" select="All actions"/>}>{loading ? <div className="empty">Loading audit logs...</div> : error ? <div className="empty">{error}</div> : !logs || logs.length === 0 ? <div className="empty">No audit events found.</div> : <table><thead><tr><th>Timestamp</th><th>Actor</th><th>Action</th><th>Target</th><th>Provider</th><th>Result</th><th>Request ID</th></tr></thead><tbody>{logs.map(entry => <tr key={entry.id}><td>{new Date(entry.timestamp).toLocaleString()}</td><td className="user-name">{entry.actor_display_name || 'System'}</td><td>{entry.action}</td><td>{entry.target_type}</td><td>{entry.provider_name || '—'}</td><td><StatusBadge status={entry.result}/></td><td>{entry.request_id}</td></tr>)}</tbody></table>}</TablePanel></Page>;
+  const { data: logs, error, loading, reload } = useApiResource<ApiAuditLog[]>('/api/v1/audit-logs');
+  return <Page eyebrow="GOVERNANCE" title="Audit logs" subtitle="A tamper-evident record of identity and access activity." action={<button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button>}><TablePanel toolbar={<Toolbar placeholder="Search audit events" select="All actions"/>}>{loading ? <div className="empty">Loading audit logs...</div> : error ? <div className="empty">{error}</div> : !logs || logs.length === 0 ? <div className="empty">No audit events found.</div> : <table><thead><tr><th>Timestamp</th><th>Actor</th><th>Action</th><th>Target</th><th>User</th><th>Provider</th><th>Result</th><th>Request ID</th></tr></thead><tbody>{logs.map(entry => <tr key={entry.id}><td>{new Date(entry.timestamp).toLocaleString()}</td><td className="user-name">{entry.actor_display_name || 'System'}</td><td>{entry.action}</td><td>{entry.target_type}</td><td>{entry.target_user_display_name ? `${entry.target_user_display_name}${entry.target_user_email ? ` (${entry.target_user_email})` : ''}` : '—'}</td><td>{entry.provider_name || '—'}</td><td><StatusBadge status={entry.result}/></td><td>{entry.request_id}</td></tr>)}</tbody></table>}</TablePanel></Page>;
 }
 function ProvidersPage() { return <ProviderConfiguration />; }
-interface ApiProvider { id: string; name: string; provider_type: string; status: string; sync_interval_minutes: number | null; last_sync_at: string | null; }
+interface ApiProvider { id: string; name: string; provider_type: string; status: string; sync_interval_minutes: number | null; last_sync_at: string | null; max_self_activation_hours: number; }
 interface ApiSyncRun { id: string; status: string; started_at: string; completed_at: string | null; users_processed: number; groups_processed: number; roles_processed: number; errors_count: number; }
 function SyncPage() {
   const auth = useAuth();
@@ -292,6 +773,9 @@ function SyncPage() {
   const [intervalValue, setIntervalValue] = useState('');
   const [scheduleSaving, setScheduleSaving] = useState(false);
   const [scheduleMessage, setScheduleMessage] = useState('');
+  const [activationHoursValue, setActivationHoursValue] = useState('');
+  const [activationSaving, setActivationSaving] = useState(false);
+  const [activationMessage, setActivationMessage] = useState('');
   const runSync = async () => {
     if (!provider) return;
     setSyncing(true); setMessage('');
@@ -310,9 +794,19 @@ function SyncPage() {
       else { const body = await response.json().catch(() => null); setScheduleMessage(body?.error?.message || 'Unable to update the sync schedule.'); }
     } catch { setScheduleMessage('Unable to update the sync schedule.'); } finally { setScheduleSaving(false); }
   };
+  const saveActivationCap = async (hours: number) => {
+    if (!provider) return;
+    setActivationSaving(true); setActivationMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/providers/${provider.id}`, { method: 'PATCH', body: JSON.stringify({ max_self_activation_hours: hours }) });
+      if (response.ok) { setActivationMessage(`End users may now self-activate eligible access for up to ${hours} hours.`); setActivationHoursValue(''); reloadProviders(); }
+      else { const body = await response.json().catch(() => null); setActivationMessage(body?.error?.message || 'Unable to update the self-activation limit.'); }
+    } catch { setActivationMessage('Unable to update the self-activation limit.'); } finally { setActivationSaving(false); }
+  };
   return <Page eyebrow="SYSTEM" title="Sync history" subtitle="Provider synchronization runs and reconciliation results." action={<button className="btn btn-primary" disabled={!provider || syncing} onClick={() => void runSync()}><RefreshCw size={14}/> {syncing ? 'Syncing...' : 'Sync now'}</button>}>
     {message && <div className="detail-section" style={{marginBottom:14}}><div className="notice">{message}</div></div>}
     {provider && <section className="panel" style={{marginBottom:18}}><div className="panel-head"><h2>Scheduled sync</h2><span className="badge neutral">{provider.sync_interval_minutes ? `Every ${provider.sync_interval_minutes} min` : 'Not scheduled'}</span></div><div className="detail-section"><div className="key-grid" style={{marginBottom:14}}><div className="key"><span>Current schedule</span><strong>{provider.sync_interval_minutes ? `Every ${provider.sync_interval_minutes} minutes` : 'Manual only'}</strong></div><div className="key"><span>Last sync</span><strong>{provider.last_sync_at ? new Date(provider.last_sync_at).toLocaleString() : 'Never'}</strong></div></div><div style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap'}}><label className="key"><span>Run every (minutes)</span><input className="select" type="number" min={1} max={10080} placeholder="e.g. 60" value={intervalValue} onChange={event => setIntervalValue(event.target.value)}/></label><button className="btn btn-primary" disabled={scheduleSaving || !intervalValue} onClick={() => void saveSchedule(Number(intervalValue))}><Clock3 size={14}/> {scheduleSaving ? 'Saving...' : 'Schedule sync'}</button>{provider.sync_interval_minutes && <button className="btn" disabled={scheduleSaving} onClick={() => void saveSchedule(null)}>Disable schedule</button>}</div>{scheduleMessage && <div className="notice" style={{marginTop:12}}>{scheduleMessage}</div>}</div></section>}
+    {provider && <section className="panel" style={{marginBottom:18}}><div className="panel-head"><h2>Self-activation</h2><span className="badge neutral">Up to {provider.max_self_activation_hours} hours</span></div><div className="detail-section"><p className="subtitle" style={{marginBottom:14}}>The maximum duration an end user may self-activate their own eligible access for, from their My Access dashboard — mirrors Entra PIM's activation cap. Raising this takes effect immediately for every eligible assignment.</p><div style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap'}}><label className="key"><span>Maximum self-activation duration (hours)</span><input className="select" type="number" min={1} max={8760} placeholder={String(provider.max_self_activation_hours)} value={activationHoursValue} onChange={event => setActivationHoursValue(event.target.value)}/></label><button className="btn btn-primary" disabled={activationSaving || !activationHoursValue} onClick={() => void saveActivationCap(Number(activationHoursValue))}><Clock3 size={14}/> {activationSaving ? 'Saving...' : 'Save limit'}</button></div>{activationMessage && <div className="notice" style={{marginTop:12}}>{activationMessage}</div>}</div></section>}
     <TablePanel toolbar={<Toolbar placeholder="Search sync runs" select="All providers"/>}>{providersLoading || loading ? <div className="empty">Loading sync history...</div> : !provider ? <div className="empty">No identity provider is configured.</div> : error ? <div className="empty">{error}</div> : !runs || runs.length === 0 ? <div className="empty">No sync runs yet.</div> : <table><thead><tr><th>Started</th><th>Completed</th><th>Users</th><th>Groups</th><th>Roles</th><th>Errors</th><th>Status</th></tr></thead><tbody>{runs.map(run => <tr key={run.id}><td className="user-name">{new Date(run.started_at).toLocaleString()}</td><td>{run.completed_at ? new Date(run.completed_at).toLocaleString() : '—'}</td><td>{run.users_processed}</td><td>{run.groups_processed}</td><td>{run.roles_processed}</td><td>{run.errors_count}</td><td><StatusBadge status={run.status}/></td></tr>)}</tbody></table>}</TablePanel>
   </Page>;
 }

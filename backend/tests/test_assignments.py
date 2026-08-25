@@ -67,21 +67,24 @@ async def _seed_directory(factory):
 
 
 @pytest.mark.asyncio
-async def test_create_assignment_without_approver_is_immediately_active(db_override):
+async def test_create_assignment_without_approver_is_eligible_not_active(db_override):
+    """Phase 5: no assignment ever grants real access at creation time — no-approver requests become ELIGIBLE
+    and must be self-activated (or admin-activated) before any real Entra/Graph grant happens."""
     ids = await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
     assert response.status_code == 201
     body = response.json()
-    assert body["status"] == "ACTIVE"
+    assert body["status"] == "ELIGIBLE"
+    assert body["activated_at"] is None
     assert body["user_display_name"] == "Target User"
     assert body["resource_display_name"] == "Security Team"
 
 
 @pytest.mark.asyncio
-async def test_create_assignment_with_future_start_time_is_scheduled_not_active(db_override):
-    """A future start_time must NOT grant access immediately — it should wait for the activation worker."""
+async def test_create_assignment_with_future_start_time_is_eligible_with_future_start(db_override):
+    """A future start_time on a no-approver request still lands ELIGIBLE — it just can't be activated until then."""
     ids = await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.Admin")
     future_start = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
@@ -89,8 +92,13 @@ async def test_create_assignment_with_future_start_time_is_scheduled_not_active(
         response = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT", "start_time": future_start})
     assert response.status_code == 201
     body = response.json()
-    assert body["status"] == "SCHEDULED"
+    assert body["status"] == "ELIGIBLE"
     assert body["activated_at"] is None
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        too_early = await client.post(f"/api/v1/assignments/{body['id']}/activate", json={"duration_hours": 2})
+    assert too_early.status_code == 409
+    assert too_early.json()["error"]["code"] == "NOT_YET_ELIGIBLE"
 
 
 @pytest.mark.asyncio
@@ -142,7 +150,10 @@ async def test_activation_worker_does_not_activate_when_graph_grant_fails(db_ove
 
 
 @pytest.mark.asyncio
-async def test_approving_a_future_dated_assignment_schedules_it_instead_of_activating(db_override):
+async def test_approving_a_future_dated_assignment_is_eligible_not_active(db_override):
+    """Approval only ever grants eligibility, never real access directly — a future start_time just means the
+    resulting eligible assignment can't be self-activated until that time arrives (same NOT_YET_ELIGIBLE gate
+    activate_assignment already enforces for the no-approver path)."""
     ids = await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.Admin")
     future_start = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat()
@@ -151,9 +162,13 @@ async def test_approving_a_future_dated_assignment_schedules_it_instead_of_activ
         assignment_id = created.json()["id"]
         assert created.json()["status"] == "PENDING_APPROVAL"
         approved = await client.post(f"/api/v1/assignments/{assignment_id}/approve")
-    assert approved.status_code == 200
-    assert approved.json()["status"] == "SCHEDULED"
-    assert approved.json()["activated_at"] is None
+        assert approved.status_code == 200
+        assert approved.json()["status"] == "ELIGIBLE"
+        assert approved.json()["activated_at"] is None
+
+        too_early = await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 2})
+    assert too_early.status_code == 409
+    assert too_early.json()["error"]["code"] == "NOT_YET_ELIGIBLE"
 
 
 @pytest.mark.asyncio
@@ -176,16 +191,22 @@ async def test_temporary_assignment_requires_expiration_time(db_override):
 
 
 @pytest.mark.asyncio
-async def test_approve_pending_assignment_activates_it(db_override):
+async def test_approve_pending_assignment_makes_it_eligible_then_activation_grants_real_access(db_override):
+    """Phase 5: approval never grants real access directly anymore — it only lifts the request to ELIGIBLE. The
+    target user still has to activate it themselves (or an Admin on their behalf) from My Access."""
     ids = await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         created = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT", "approver_id": str(ids["approver_id"])})
         assignment_id = created.json()["id"]
         approved = await client.post(f"/api/v1/assignments/{assignment_id}/approve")
-    assert approved.status_code == 200
-    assert approved.json()["status"] == "ACTIVE"
-    assert approved.json()["approved_by"] == str(ids["approver_id"])
+        assert approved.status_code == 200
+        assert approved.json()["status"] == "ELIGIBLE"
+        assert approved.json()["approved_by"] == str(ids["approver_id"])
+
+        activated = await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 2})
+    assert activated.status_code == 200
+    assert activated.json()["status"] == "ACTIVE"
 
 
 @pytest.mark.asyncio
@@ -226,7 +247,7 @@ async def test_designated_approver_who_is_a_normal_user_can_approve(db_override)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         approved = await client.post(f"/api/v1/assignments/{assignment_id}/approve")
     assert approved.status_code == 200
-    assert approved.json()["status"] == "ACTIVE"
+    assert approved.json()["status"] == "ELIGIBLE"
 
 
 @pytest.mark.asyncio
@@ -280,7 +301,7 @@ async def test_approver_is_recognized_via_oid_not_pairwise_sub(db_override):
         approved = await client.post(f"/api/v1/assignments/{assignment_id}/approve")
     assert len(mine.json()) == 1
     assert approved.status_code == 200
-    assert approved.json()["status"] == "ACTIVE"
+    assert approved.json()["status"] == "ELIGIBLE"
 
 
 @pytest.mark.asyncio
@@ -303,7 +324,9 @@ async def test_create_assignment_unknown_group_returns_404(db_override):
 
 
 @pytest.mark.asyncio
-async def test_reassigning_same_group_revokes_the_old_active_one_first(db_override):
+async def test_creating_two_eligible_assignments_to_same_target_does_not_supersede_until_activated(db_override):
+    """Phase 5: superseding a same-target assignment is deferred to activation time (like the approval path already
+    defers to approval time) — two merely-eligible assignments to the same target simply coexist."""
     ids = await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.Admin")
     payload = {"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"}
@@ -311,10 +334,29 @@ async def test_reassigning_same_group_revokes_the_old_active_one_first(db_overri
         first = await client.post("/api/v1/assignments", json=payload)
         first_id = first.json()["id"]
         second = await client.post("/api/v1/assignments", json=payload)
-    assert first.json()["status"] == "ACTIVE"
+    assert first.json()["status"] == "ELIGIBLE"
     assert second.status_code == 201
-    assert second.json()["status"] == "ACTIVE"
+    assert second.json()["status"] == "ELIGIBLE"
     assert second.json()["id"] != first_id
+
+    async with db_override.factory() as session:
+        old = await session.get(AccessAssignment, UUID(first_id))
+        assert old.status == "ELIGIBLE"  # untouched — nothing real happened yet for either
+
+
+@pytest.mark.asyncio
+async def test_activating_an_eligible_assignment_supersedes_the_other_eligible_one_to_same_target(db_override):
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    payload = {"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        first = await client.post("/api/v1/assignments", json=payload)
+        first_id = first.json()["id"]
+        second = await client.post("/api/v1/assignments", json=payload)
+        second_id = second.json()["id"]
+        activated = await client.post(f"/api/v1/assignments/{second_id}/activate", json={"duration_hours": 2})
+    assert activated.status_code == 200
+    assert activated.json()["status"] == "ACTIVE"
 
     async with db_override.factory() as session:
         old = await session.get(AccessAssignment, UUID(first_id))
@@ -325,32 +367,15 @@ async def test_reassigning_same_group_revokes_the_old_active_one_first(db_overri
 
 
 @pytest.mark.asyncio
-async def test_reassigning_same_group_removes_stale_scheduled_one_without_graph_call(db_override):
-    ids = await _seed_directory(db_override.factory)
-    authenticate_as("AccessPilot.Admin")
-    future_start = (datetime.now(timezone.utc) + timedelta(hours=5)).isoformat()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        scheduled = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT", "start_time": future_start})
-        scheduled_id = scheduled.json()["id"]
-        assert scheduled.json()["status"] == "SCHEDULED"
-        replacement = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
-    assert replacement.status_code == 201
-    assert replacement.json()["status"] == "ACTIVE"
-
-    async with db_override.factory() as session:
-        old = await session.get(AccessAssignment, UUID(scheduled_id))
-        assert old.status == "REVOKED"
-
-
-@pytest.mark.asyncio
 async def test_pending_approval_request_does_not_touch_existing_access_until_approved(db_override):
-    """Regression: creating a request that requires approval must NOT revoke the user's current access —
+    """Regression: creating a request that requires approval must NOT revoke the user's current REAL access —
     only an actual approval decision may replace it. A later rejection must leave the original untouched."""
     ids = await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         first = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
         first_id = first.json()["id"]
+        await client.post(f"/api/v1/assignments/{first_id}/activate", json={"duration_hours": 2})  # make it genuinely real, not just eligible
         pending = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT", "approver_id": str(ids["approver_id"])})
         pending_id = pending.json()["id"]
     assert pending.json()["status"] == "PENDING_APPROVAL"
@@ -369,17 +394,28 @@ async def test_pending_approval_request_does_not_touch_existing_access_until_app
 
 
 @pytest.mark.asyncio
-async def test_approving_a_request_supersedes_the_existing_active_assignment(db_override):
+async def test_approving_a_request_does_not_touch_existing_access_until_activated(db_override):
+    """Approval alone must never touch the user's existing real access — only actually activating the newly
+    approved (now eligible) request supersedes it, mirroring the no-approver activation path exactly."""
     ids = await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         first = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
         first_id = first.json()["id"]
+        await client.post(f"/api/v1/assignments/{first_id}/activate", json={"duration_hours": 2})
         pending = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT", "approver_id": str(ids["approver_id"])})
         pending_id = pending.json()["id"]
         approved = await client.post(f"/api/v1/assignments/{pending_id}/approve")
-    assert approved.status_code == 200
-    assert approved.json()["status"] == "ACTIVE"
+        assert approved.status_code == 200
+        assert approved.json()["status"] == "ELIGIBLE"
+
+        async with db_override.factory() as session:
+            still_active = await session.get(AccessAssignment, UUID(first_id))
+            assert still_active.status == "ACTIVE"  # untouched — the approved request is only eligible so far
+
+        activated = await client.post(f"/api/v1/assignments/{pending_id}/activate", json={"duration_hours": 2})
+    assert activated.status_code == 200
+    assert activated.json()["status"] == "ACTIVE"
 
     async with db_override.factory() as session:
         old = await session.get(AccessAssignment, UUID(first_id))
@@ -399,8 +435,8 @@ async def test_assigning_a_different_resource_does_not_touch_unrelated_assignmen
         await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "ROLE", "resource_id": str(ids["role_id"]), "assignment_type": "PERMANENT"})
 
     async with db_override.factory() as session:
-        still_active = await session.get(AccessAssignment, UUID(group_id))
-        assert still_active.status == "ACTIVE"  # a different resource_type must not revoke this one
+        still_eligible = await session.get(AccessAssignment, UUID(group_id))
+        assert still_eligible.status == "ELIGIBLE"  # a different resource_type must not touch this one
 
 
 @pytest.mark.asyncio
@@ -412,6 +448,113 @@ async def test_list_assignments_returns_created_ones(db_override):
         listed = await client.get("/api/v1/assignments")
     assert listed.status_code == 200
     assert len(listed.json()) == 1
+
+
+@pytest.mark.asyncio
+async def test_activate_eligible_assignment_grants_real_access_for_chosen_duration(db_override):
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
+        assignment_id = created.json()["id"]
+        activated = await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 3})
+    assert activated.status_code == 200
+    body = activated.json()
+    assert body["status"] == "ACTIVE"
+    assert body["activated_at"] is not None
+    activated_at = datetime.fromisoformat(body["activated_at"].replace("Z", "+00:00"))
+    expiration_time = datetime.fromisoformat(body["expiration_time"].replace("Z", "+00:00"))
+    assert abs((expiration_time - activated_at) - timedelta(hours=3)) < timedelta(seconds=5)
+
+
+@pytest.mark.asyncio
+async def test_activate_rejects_duration_exceeding_provider_cap(db_override):
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
+        assignment_id = created.json()["id"]
+        rejected = await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 9})  # default cap is 8
+    assert rejected.status_code == 422
+    assert rejected.json()["error"]["code"] == "DURATION_EXCEEDS_MAXIMUM"
+
+
+@pytest.mark.asyncio
+async def test_activate_denied_for_someone_other_than_the_assignment_user_or_admin(db_override):
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
+        assignment_id = created.json()["id"]
+
+    authenticate_as("AccessPilot.User", subject="someone-else-oid")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 2})
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "ACCESS_DENIED"
+
+
+@pytest.mark.asyncio
+async def test_target_user_can_activate_their_own_eligible_assignment(db_override):
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
+        assignment_id = created.json()["id"]
+
+    authenticate_as("AccessPilot.User", subject="target-user")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        activated = await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 2})
+    assert activated.status_code == 200
+    assert activated.json()["status"] == "ACTIVE"
+
+
+@pytest.mark.asyncio
+async def test_cannot_activate_already_active_assignment(db_override):
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
+        assignment_id = created.json()["id"]
+        await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 2})
+        second_attempt = await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 2})
+    assert second_attempt.status_code == 409
+    assert second_attempt.json()["error"]["code"] == "REQUEST_ALREADY_PROCESSED"
+
+
+@pytest.mark.asyncio
+async def test_list_my_assignments_returns_only_callers_own(db_override):
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
+
+    authenticate_as("AccessPilot.User", subject="target-user")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        mine = await client.get("/api/v1/assignments/mine")
+    assert mine.status_code == 200
+    assert len(mine.json()) == 1
+    assert mine.json()[0]["status"] == "ELIGIBLE"
+
+    authenticate_as("AccessPilot.User", subject="admin-oid")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        theirs = await client.get("/api/v1/assignments/mine")
+    assert theirs.json() == []  # the approver/admin user has no assignments of their own here
+
+
+@pytest.mark.asyncio
+async def test_activation_policy_reflects_admin_configured_cap(db_override):
+    ids = await _seed_directory(db_override.factory)
+    async with db_override.factory() as session:
+        provider = await session.get(IdentityProvider, ids["provider_id"])
+        provider.max_self_activation_hours = 24
+        await session.commit()
+
+    authenticate_as("AccessPilot.User", subject="target-user")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        policy = await client.get("/api/v1/assignments/activation-policy")
+    assert policy.status_code == 200
+    assert policy.json()["max_self_activation_hours"] == 24
 
 
 @pytest.mark.asyncio
@@ -434,3 +577,94 @@ async def test_expiration_worker_expires_due_temporary_assignments(db_override):
         assert still_active.status == "ACTIVE"
         audit_actions = {row.action for row in (await session.execute(select(AuditLog))).scalars().all()}
         assert "ASSIGNMENT_EXPIRED" in audit_actions
+
+
+@pytest.mark.asyncio
+async def test_expiration_worker_expires_eligible_assignments_never_activated_by_deadline(db_override):
+    """An ELIGIBLE (Temporary) assignment that's never activated by its expiration_time deadline must be swept to
+    EXPIRED with no provider call — nothing was ever granted, so there's nothing to revoke."""
+    from app.workers.expiration import expire_due_eligibility
+
+    ids = await _seed_directory(db_override.factory)
+    async with db_override.factory() as session:
+        missed = AccessAssignment(provider_id=ids["provider_id"], user_id=ids["user_id"], resource_type="GROUP", resource_id=ids["group_id"], assignment_type="TEMPORARY", status="ELIGIBLE", expiration_time=datetime.now(timezone.utc) - timedelta(minutes=1))
+        still_open = AccessAssignment(provider_id=ids["provider_id"], user_id=ids["user_id"], resource_type="ROLE", resource_id=ids["role_id"], assignment_type="TEMPORARY", status="ELIGIBLE", expiration_time=datetime.now(timezone.utc) + timedelta(hours=2))
+        session.add_all([missed, still_open])
+        await session.commit()
+        missed_id, still_open_id = missed.id, still_open.id
+
+    expired_count = await expire_due_eligibility(db_override.factory)
+    assert expired_count == 1
+
+    async with db_override.factory() as session:
+        expired = await session.get(AccessAssignment, missed_id)
+        open_one = await session.get(AccessAssignment, still_open_id)
+        assert expired.status == "EXPIRED"
+        assert open_one.status == "ELIGIBLE"
+
+
+@pytest.mark.asyncio
+async def test_target_user_can_deactivate_their_own_active_assignment(db_override):
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
+        assignment_id = created.json()["id"]
+        await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 2})
+
+    authenticate_as("AccessPilot.User", subject="target-user")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        deactivated = await client.post(f"/api/v1/assignments/{assignment_id}/deactivate")
+    assert deactivated.status_code == 200
+    body = deactivated.json()
+    assert body["status"] == "ELIGIBLE"
+    assert body["expiration_time"] is None
+
+    async with db_override.factory() as session:
+        row = await session.get(AccessAssignment, UUID(assignment_id))
+        assert row.activated_at is None
+        audit_actions = {r.action for r in (await session.execute(select(AuditLog))).scalars().all()}
+        assert "ASSIGNMENT_DEACTIVATED" in audit_actions
+
+
+@pytest.mark.asyncio
+async def test_deactivated_assignment_can_be_activated_again(db_override):
+    """Reactivating a deactivated assignment needs no new request/approval — it just goes through /activate again."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
+        assignment_id = created.json()["id"]
+        await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 2})
+        await client.post(f"/api/v1/assignments/{assignment_id}/deactivate")
+        reactivated = await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 3})
+    assert reactivated.status_code == 200
+    assert reactivated.json()["status"] == "ACTIVE"
+
+
+@pytest.mark.asyncio
+async def test_cannot_deactivate_an_assignment_that_is_not_active(db_override):
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
+        assignment_id = created.json()["id"]
+        response = await client.post(f"/api/v1/assignments/{assignment_id}/deactivate")
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "REQUEST_ALREADY_PROCESSED"
+
+
+@pytest.mark.asyncio
+async def test_deactivate_is_denied_to_someone_other_than_the_target_user_or_admin(db_override):
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
+        assignment_id = created.json()["id"]
+        await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 2})
+
+    authenticate_as("AccessPilot.User", subject="someone-else-oid")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(f"/api/v1/assignments/{assignment_id}/deactivate")
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "ACCESS_DENIED"

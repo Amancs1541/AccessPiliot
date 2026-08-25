@@ -28,6 +28,7 @@ class ProviderUpdate(BaseModel):
     redirect_uri_metadata: Optional[dict[str, Any]] = None
     configuration_ref: Optional[str] = None
     sync_interval_minutes: Optional[int] = Field(default=None, ge=1, le=10080)
+    max_self_activation_hours: Optional[int] = Field(default=None, ge=1, le=8760)
 
 
 class ProviderCredentialUpdate(BaseModel):
@@ -52,4 +53,5 @@ class ProviderResponse(BaseModel):
     graph_client_id: Optional[str]
     credential_configured: bool
     sync_interval_minutes: Optional[int]
+    max_self_activation_hours: int
     last_sync_at: Optional[datetime]

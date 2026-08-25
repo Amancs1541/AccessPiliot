@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -6,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
-from app.models import Group, IdentityProvider, Role, User, UserGroup
+from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, Application, Group, IdentityProvider, Role, User, UserGroup
 from app.providers.base import CreatedUser, NormalizedGroup, NormalizedUser, ProviderConflictError
 from app.security.auth import AuthenticatedUser, require_authenticated_user
 
@@ -180,4 +182,174 @@ async def test_dashboard_admin_denied_for_normal_user(db_override):
     authenticate_as("AccessPilot.User")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/dashboard/admin")
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_user_access_summary_lists_active_assignments_and_package_name(db_override):
+    async with db_override.factory() as session:
+        provider = IdentityProvider(name="Directory", type="MOCK", status="CONNECTED", tenant_id="t")
+        session.add(provider)
+        await session.flush()
+        target_user = User(provider_id=provider.id, external_id="target-user", email="target@x.com", display_name="Target User", status="ACTIVE")
+        group = Group(provider_id=provider.id, external_id="g1", name="Security Team", status="ACTIVE", is_privileged=False)
+        session.add_all([target_user, group])
+        await session.flush()
+        # A direct assignment (no package).
+        direct = AccessAssignment(provider_id=provider.id, user_id=target_user.id, resource_type="GROUP", resource_id=group.id, assignment_type="PERMANENT", status="ACTIVE")
+        # A package-originated assignment, linked via AccessPackageAssignment.
+        package = AccessPackage(name="Starter Kit", status="ACTIVE")
+        session.add_all([direct, package])
+        await session.flush()
+        from_package = AccessAssignment(provider_id=provider.id, user_id=target_user.id, resource_type="GROUP", resource_id=group.id, assignment_type="PERMANENT", status="SCHEDULED")
+        session.add(from_package)
+        await session.flush()
+        session.add(AccessPackageAssignment(package_id=package.id, package_assignment_id=uuid4(), assignment_id=from_package.id, user_id=target_user.id))
+        # A revoked assignment — must NOT appear in the summary.
+        session.add(AccessAssignment(provider_id=provider.id, user_id=target_user.id, resource_type="GROUP", resource_id=group.id, assignment_type="PERMANENT", status="REVOKED"))
+        await session.commit()
+        user_id = target_user.id
+
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/users/{user_id}/access-summary")
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["assignments"]) == 2
+    assert body["licenses"] == []  # MOCK provider — no live Graph license lookup attempted
+    package_item = next(item for item in body["assignments"] if item["package_name"] is not None)
+    assert package_item["package_name"] == "Starter Kit"
+    assert package_item["status"] == "SCHEDULED"
+
+
+@pytest.mark.asyncio
+async def test_user_access_summary_includes_group_membership_added_directly_in_entra(db_override):
+    """A group membership with no corresponding AccessAssignment (only a synced UserGroup row) means the user
+    was added to the group directly in Entra, not through AccessPilot — must still show up."""
+    async with db_override.factory() as session:
+        provider = IdentityProvider(name="Directory", type="MOCK", status="CONNECTED", tenant_id="t")
+        session.add(provider)
+        await session.flush()
+        target_user = User(provider_id=provider.id, external_id="target-user", email="target@x.com", display_name="Target User", status="ACTIVE")
+        group = Group(provider_id=provider.id, external_id="g1", name="Finance", status="ACTIVE", is_privileged=False)
+        session.add_all([target_user, group])
+        await session.flush()
+        session.add(UserGroup(user_id=target_user.id, group_id=group.id, source="SYNC"))
+        await session.commit()
+        user_id = target_user.id
+
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/users/{user_id}/access-summary")
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["assignments"]) == 1
+    item = body["assignments"][0]
+    assert item["resource_type"] == "GROUP"
+    assert item["resource_display_name"] == "Finance"
+    assert item["source"] == "DIRECT_IN_ENTRA"
+    assert item["id"] is None
+
+
+@pytest.mark.asyncio
+async def test_user_access_summary_does_not_duplicate_group_tracked_by_both_sync_and_accesspilot(db_override):
+    async with db_override.factory() as session:
+        provider = IdentityProvider(name="Directory", type="MOCK", status="CONNECTED", tenant_id="t")
+        session.add(provider)
+        await session.flush()
+        target_user = User(provider_id=provider.id, external_id="target-user", email="target@x.com", display_name="Target User", status="ACTIVE")
+        group = Group(provider_id=provider.id, external_id="g1", name="Finance", status="ACTIVE", is_privileged=False)
+        session.add_all([target_user, group])
+        await session.flush()
+        session.add(UserGroup(user_id=target_user.id, group_id=group.id, source="SYNC"))
+        session.add(AccessAssignment(provider_id=provider.id, user_id=target_user.id, resource_type="GROUP", resource_id=group.id, assignment_type="PERMANENT", status="ACTIVE"))
+        await session.commit()
+        user_id = target_user.id
+
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/users/{user_id}/access-summary")
+    body = response.json()
+    assert len(body["assignments"]) == 1
+    assert body["assignments"][0]["source"] == "ACCESSPILOT"
+
+
+@pytest.mark.asyncio
+async def test_user_access_summary_includes_application_role_assigned_directly_in_entra(db_override, monkeypatch):
+    async with db_override.factory() as session:
+        provider = IdentityProvider(name="Entra", type="ENTRA", status="CONNECTED", tenant_id="tenant-1")
+        session.add(provider)
+        await session.flush()
+        target_user = User(provider_id=provider.id, external_id="target-user", email="target@x.com", display_name="Target User", status="ACTIVE")
+        application = Application(provider_id=provider.id, external_id="app-1", name="Reporting Portal", status="ACTIVE", app_roles=[{"id": "role-1", "name": "Viewer", "description": None}])
+        session.add_all([target_user, application])
+        await session.commit()
+        user_id = target_user.id
+
+    async def fake_get_licenses(self, external_id):
+        return []
+
+    async def fake_get_app_roles(self, external_id):
+        return [{"resource_id": "app-1", "resource_display_name": "Reporting Portal", "app_role_id": "role-1"}]
+
+    monkeypatch.setattr("app.providers.entra.EntraProvider.get_user_licenses", fake_get_licenses)
+    monkeypatch.setattr("app.providers.entra.EntraProvider.get_user_app_role_assignments", fake_get_app_roles)
+
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/users/{user_id}/access-summary")
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["assignments"]) == 1
+    item = body["assignments"][0]
+    assert item["resource_type"] == "APPLICATION"
+    assert item["resource_display_name"] == "Reporting Portal — Viewer"
+    assert item["source"] == "DIRECT_IN_ENTRA"
+
+
+@pytest.mark.asyncio
+async def test_user_access_summary_does_not_duplicate_application_role_tracked_by_accesspilot(db_override, monkeypatch):
+    async with db_override.factory() as session:
+        provider = IdentityProvider(name="Entra", type="ENTRA", status="CONNECTED", tenant_id="tenant-1")
+        session.add(provider)
+        await session.flush()
+        target_user = User(provider_id=provider.id, external_id="target-user", email="target@x.com", display_name="Target User", status="ACTIVE")
+        application = Application(provider_id=provider.id, external_id="app-1", name="Reporting Portal", status="ACTIVE", app_roles=[{"id": "role-1", "name": "Viewer", "description": None}])
+        session.add_all([target_user, application])
+        await session.flush()
+        session.add(AccessAssignment(provider_id=provider.id, user_id=target_user.id, resource_type="APPLICATION", resource_id=application.id, app_role_external_id="role-1", assignment_type="PERMANENT", status="ACTIVE"))
+        await session.commit()
+        user_id = target_user.id
+
+    async def fake_get_licenses(self, external_id):
+        return []
+
+    async def fake_get_app_roles(self, external_id):
+        return [{"resource_id": "app-1", "resource_display_name": "Reporting Portal", "app_role_id": "role-1"}]
+
+    monkeypatch.setattr("app.providers.entra.EntraProvider.get_user_licenses", fake_get_licenses)
+    monkeypatch.setattr("app.providers.entra.EntraProvider.get_user_app_role_assignments", fake_get_app_roles)
+
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/users/{user_id}/access-summary")
+    body = response.json()
+    assert len(body["assignments"]) == 1
+    assert body["assignments"][0]["source"] == "ACCESSPILOT"
+
+
+@pytest.mark.asyncio
+async def test_user_access_summary_denied_for_normal_user(db_override):
+    async with db_override.factory() as session:
+        provider = IdentityProvider(name="Directory", type="MOCK", status="CONNECTED", tenant_id="t")
+        session.add(provider)
+        await session.flush()
+        target_user = User(provider_id=provider.id, external_id="target-user", email="target@x.com", display_name="Target User", status="ACTIVE")
+        session.add(target_user)
+        await session.commit()
+        user_id = target_user.id
+
+    authenticate_as("AccessPilot.User")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/users/{user_id}/access-summary")
     assert response.status_code == 403

@@ -8,12 +8,14 @@ from app.api.v1.providers import router as providers_router
 from app.api.v1.directory import router as directory_router
 from app.api.v1.assignments import router as assignments_router
 from app.api.v1.audit import router as audit_router
+from app.api.v1.packages import router as packages_router
 
 logger = logging.getLogger("accesspilot.api.v1")
 router = APIRouter(prefix="/api/v1")
 router.include_router(directory_router)
 router.include_router(assignments_router)
 router.include_router(audit_router)
+router.include_router(packages_router)
 router.include_router(placeholder_router)
 router.include_router(providers_router)
 

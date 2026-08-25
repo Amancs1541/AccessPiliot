@@ -16,6 +16,8 @@ class AuditLogResponse(BaseModel):
     action: str
     target_type: str
     target_id: Optional[UUID]
+    target_user_display_name: Optional[str] = None
+    target_user_email: Optional[str] = None
     provider_id: Optional[UUID]
     provider_name: Optional[str] = None
     request_id: str

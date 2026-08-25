@@ -25,6 +25,15 @@ def _is_expired(assignment: AccessAssignment, now: datetime) -> bool:
     return expiration_time <= now
 
 
+def _is_eligibility_expired(assignment: AccessAssignment, now: datetime) -> bool:
+    if assignment.status != "ELIGIBLE" or assignment.expiration_time is None:
+        return False
+    expiration_time = assignment.expiration_time
+    if expiration_time.tzinfo is None:
+        expiration_time = expiration_time.replace(tzinfo=timezone.utc)
+    return expiration_time <= now
+
+
 async def expire_due_assignments(session_factory: async_sessionmaker[AsyncSession]) -> int:
     """Transitions ACTIVE, time-bound assignments past their expiration_time to EXPIRED. Returns the count expired."""
     async with session_factory() as session:
@@ -57,10 +66,32 @@ async def expire_due_assignments(session_factory: async_sessionmaker[AsyncSessio
     return expired_count
 
 
+async def expire_due_eligibility(session_factory: async_sessionmaker[AsyncSession]) -> int:
+    """Transitions ELIGIBLE assignments whose activation deadline has passed (never activated) to EXPIRED.
+    No provider call needed — nothing was ever granted. Returns the count expired."""
+    async with session_factory() as session:
+        candidates = list((await session.scalars(select(AccessAssignment).where(AccessAssignment.status == "ELIGIBLE", AccessAssignment.expiration_time.isnot(None)))).all())
+    now = datetime.now(timezone.utc)
+    expired_count = 0
+    for candidate in candidates:
+        if not _is_eligibility_expired(candidate, now):
+            continue
+        async with session_factory() as session:
+            assignment = await session.get(AccessAssignment, candidate.id)
+            if assignment is None or not _is_eligibility_expired(assignment, now):
+                continue
+            assignment.status = "EXPIRED"
+            await record_audit(session, action="ASSIGNMENT_EXPIRED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, request_id=f"expiration-worker-{assignment.id}", metadata={"reason": "ELIGIBILITY_NEVER_ACTIVATED"})
+            await session.commit()
+            expired_count += 1
+    return expired_count
+
+
 async def expiration_worker_loop(session_factory: async_sessionmaker[AsyncSession]) -> None:
     while True:
         try:
             await expire_due_assignments(session_factory)
+            await expire_due_eligibility(session_factory)
         except asyncio.CancelledError:
             raise
         except Exception:

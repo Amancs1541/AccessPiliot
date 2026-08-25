@@ -53,23 +53,39 @@ async def _seed(factory, provider_type: str):
 
 
 @pytest.mark.asyncio
-async def test_create_assignment_does_not_activate_when_graph_grant_fails(db_override, monkeypatch):
-    # ENTRA type with no configured secret -> the real Graph call fails safely.
+async def test_create_assignment_never_calls_the_provider_and_always_succeeds(db_override, monkeypatch):
+    """Phase 5: create_assignment never grants real access (and so never calls the provider) — even against a
+    misconfigured ENTRA provider, creation itself always succeeds, landing ELIGIBLE."""
     ids = await _seed(db_override.factory, "ENTRA")
     monkeypatch.delenv("ENTRA_API_CLIENT_SECRET", raising=False)
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
-    assert response.status_code in (502, 503)
-
-    async with db_override.factory() as session:
-        from sqlalchemy import select
-        remaining = (await session.execute(select(AccessAssignment))).scalars().all()
-        assert len(remaining) == 0  # no row persisted for a grant that never actually happened
+    assert response.status_code == 201
+    assert response.json()["status"] == "ELIGIBLE"
 
 
 @pytest.mark.asyncio
-async def test_approve_does_not_activate_when_graph_grant_fails(db_override, monkeypatch):
+async def test_activate_does_not_activate_when_graph_grant_fails(db_override, monkeypatch):
+    # ENTRA type with no configured secret -> the real Graph call fails safely.
+    ids = await _seed(db_override.factory, "ENTRA")
+    monkeypatch.delenv("ENTRA_API_CLIENT_SECRET", raising=False)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT"})
+        assignment_id = created.json()["id"]
+        response = await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 2})
+    assert response.status_code in (502, 503)
+
+    async with db_override.factory() as session:
+        still_eligible = await session.get(AccessAssignment, UUID(assignment_id))
+        assert still_eligible.status == "ELIGIBLE"  # never falsely marked ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_approve_never_calls_the_provider_and_always_succeeds(db_override, monkeypatch):
+    """Phase 5: approve_assignment only lifts a request to ELIGIBLE — it never grants real access (and so never
+    calls the provider) itself, even against a provider whose grant call is broken."""
     ids = await _seed(db_override.factory, "MOCK")
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -83,11 +99,31 @@ async def test_approve_does_not_activate_when_graph_grant_fails(db_override, mon
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         approved = await client.post(f"/api/v1/assignments/{assignment_id}/approve")
-    assert approved.status_code in (502, 503)
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "ELIGIBLE"
+
+
+@pytest.mark.asyncio
+async def test_activating_an_approved_assignment_does_not_activate_when_graph_grant_fails(db_override, monkeypatch):
+    ids = await _seed(db_override.factory, "MOCK")
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT", "approver_id": str(ids["user_id"])})
+        assignment_id = created.json()["id"]
+        await client.post(f"/api/v1/assignments/{assignment_id}/approve")
+
+    async def failing_activate(self, request):
+        from app.providers.graph_client import GraphError
+        raise GraphError("PROVIDER_UNAVAILABLE", "boom", 503)
+    monkeypatch.setattr("app.providers.mock.MockProvider.activate_assignment", failing_activate)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        activated = await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 2})
+    assert activated.status_code in (502, 503)
 
     async with db_override.factory() as session:
         assignment = await session.get(AccessAssignment, UUID(assignment_id))
-        assert assignment.status == "PENDING_APPROVAL"  # unchanged — approval must not silently grant
+        assert assignment.status == "ELIGIBLE"  # unchanged — a failed grant must not silently mark it active
 
 
 @pytest.mark.asyncio

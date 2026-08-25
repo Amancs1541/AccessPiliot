@@ -9,7 +9,7 @@ from app.core.errors import AccessPilotError
 from app.db.session import get_db
 from app.providers.base import NewGroupRequest, NewUserRequest, ProviderConflictError
 from app.providers.graph_client import GraphError
-from app.schemas.directory import ApplicationResponse, GroupCreate, GroupResponse, RoleResponse, UserCreate, UserCreateResponse, UserResponse
+from app.schemas.directory import ApplicationResponse, GroupCreate, GroupResponse, RoleResponse, UserAccessSummary, UserCreate, UserCreateResponse, UserResponse
 from app.security.auth import AuthenticatedUser, require_permission
 from app.services import directory_read
 from app.services.audit import record_audit
@@ -40,6 +40,11 @@ async def users(q: str | None = Query(default=None), _: AuthenticatedUser = Depe
 @router.get("/users/{user_id}", response_model=UserResponse)
 async def user_detail(user_id: UUID, _: AuthenticatedUser = Depends(user_read), db: AsyncSession = Depends(get_db)):
     return await directory_read.get_user(db, user_id)
+
+
+@router.get("/users/{user_id}/access-summary", response_model=UserAccessSummary)
+async def user_access_summary(user_id: UUID, _: AuthenticatedUser = Depends(user_read), db: AsyncSession = Depends(get_db)):
+    return await directory_read.get_user_access_summary(db, user_id)
 
 
 @router.post("/users", response_model=UserCreateResponse, status_code=201)

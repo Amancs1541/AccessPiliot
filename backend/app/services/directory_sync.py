@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AccessPilotError
-from app.models import Application, Group, IdentityProvider, Role, SyncError, SyncRun, User, UserGroup
+from app.models import AccessAssignment, Application, Group, IdentityProvider, Role, SyncError, SyncRun, User, UserGroup
 from app.providers.base import NormalizedApplication, NormalizedGroup, NormalizedRole, NormalizedUser
 from app.providers.graph_client import GraphError
 from app.services.audit import record_audit
@@ -71,11 +71,22 @@ async def _upsert_membership(session: AsyncSession, user_id: UUID, group_id: UUI
         await session.flush()
 
 
-async def _remove_stale_memberships(session: AsyncSession, group_id: UUID, current_user_ids: set[UUID]) -> None:
+async def _remove_stale_memberships(session: AsyncSession, group_id: UUID, current_user_ids: set[UUID], request_id: str) -> None:
     rows = (await session.execute(select(UserGroup).where(UserGroup.group_id == group_id))).scalars().all()
     for row in rows:
         if row.user_id not in current_user_ids:
             await session.delete(row)
+            # Reconcile: if AccessPilot still thinks this user has ACTIVE access to this group, that's now stale —
+            # the real membership is gone (removed directly in Entra, or any other way that bypassed AccessPilot).
+            # Correct our own record to match reality rather than leaving a permanently-wrong "ACTIVE" status.
+            stale_assignment = (await session.execute(select(AccessAssignment).where(
+                AccessAssignment.user_id == row.user_id, AccessAssignment.resource_type == "GROUP",
+                AccessAssignment.resource_id == group_id, AccessAssignment.status == "ACTIVE",
+            ))).scalars().first()
+            if stale_assignment:
+                stale_assignment.status = "REVOKED"
+                stale_assignment.revoked_at = datetime.now(timezone.utc)
+                await record_audit(session, action="ASSIGNMENT_REVOKED", target_type="ASSIGNMENT", target_id=stale_assignment.id, provider_id=stale_assignment.provider_id, request_id=request_id, metadata={"reason": "MEMBERSHIP_REMOVED_OUTSIDE_ACCESSPILOT"})
     await session.flush()
 
 
@@ -108,7 +119,7 @@ async def run_sync(session: AsyncSession, provider: IdentityProvider, request_id
                 user_row = user_by_external_id.get(member.external_id) or await upsert_user(session, provider.id, member)
                 member_ids.add(user_row.id)
                 await _upsert_membership(session, user_row.id, group_row.id)
-            await _remove_stale_memberships(session, group_row.id, member_ids)
+            await _remove_stale_memberships(session, group_row.id, member_ids, request_id)
 
         roles = await connector.get_roles()
         for normalized_role in roles:

@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.base import Base
-from app.models import AuditLog, Group, IdentityProvider, Role, SyncError, SyncRun, User, UserGroup
+from app.models import AccessAssignment, AuditLog, Group, IdentityProvider, Role, SyncError, SyncRun, User, UserGroup
 from app.providers.base import IdentityProvider as IdentityProviderProtocol
 from app.providers.base import NormalizedGroup, NormalizedRole, NormalizedUser
 from app.services.directory_sync import run_sync
@@ -114,6 +114,34 @@ async def test_sync_removes_stale_membership_when_member_leaves(session, monkeyp
 
     memberships = (await db.scalars(select(UserGroup))).all()
     assert len(memberships) == 0
+
+
+@pytest.mark.asyncio
+async def test_sync_revokes_active_assignment_when_member_removed_directly_in_entra(session, monkeypatch):
+    """Regression: if AccessPilot granted a user ACTIVE group access, and they're later removed from that group
+    directly in Entra (bypassing AccessPilot entirely), the next sync must correct AccessPilot's own record —
+    otherwise the assignment stays falsely "ACTIVE" forever, disconnected from the real membership."""
+    db, provider = session
+    users, groups, members, roles = connector_fixture()
+    monkeypatch.setattr("app.services.directory_sync._connector", lambda p: FakeConnector(users, groups, members, roles))
+    await run_sync(db, provider, "req-1")
+
+    group_row = (await db.scalars(select(Group))).first()
+    member_row = (await db.scalars(select(User).where(User.external_id == "u1"))).first()
+    assignment = AccessAssignment(provider_id=provider.id, user_id=member_row.id, resource_type="GROUP", resource_id=group_row.id, assignment_type="PERMANENT", status="ACTIVE")
+    db.add(assignment)
+    await db.commit()
+    assignment_id = assignment.id
+
+    members_after_removal = {"g1": []}
+    monkeypatch.setattr("app.services.directory_sync._connector", lambda p: FakeConnector(users, groups, members_after_removal, roles))
+    await run_sync(db, provider, "req-2")
+
+    revoked = await db.get(AccessAssignment, assignment_id)
+    assert revoked.status == "REVOKED"
+    assert revoked.revoked_at is not None
+    audit_entry = next(a for a in (await db.scalars(select(AuditLog))).all() if a.action == "ASSIGNMENT_REVOKED")
+    assert audit_entry.metadata_json["reason"] == "MEMBERSHIP_REMOVED_OUTSIDE_ACCESSPILOT"
 
 
 @pytest.mark.asyncio

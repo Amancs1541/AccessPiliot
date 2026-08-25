@@ -58,3 +58,8 @@ class AssignmentResponse(BaseModel):
     activated_at: Optional[datetime]
     revoked_at: Optional[datetime]
     created_at: datetime
+    package_name: Optional[str] = None
+
+
+class AssignmentActivate(BaseModel):
+    duration_hours: float = Field(gt=0)

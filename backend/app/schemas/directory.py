@@ -72,6 +72,27 @@ class ApplicationResponse(BaseModel):
     last_synced_at: Optional[datetime]
 
 
+class UserAccessItem(BaseModel):
+    id: Optional[UUID] = None
+    resource_type: str
+    resource_display_name: Optional[str]
+    status: str
+    assignment_type: str
+    expiration_time: Optional[datetime]
+    package_name: Optional[str] = None
+    source: str = "ACCESSPILOT"
+
+
+class UserLicense(BaseModel):
+    sku_id: str
+    name: str
+
+
+class UserAccessSummary(BaseModel):
+    assignments: list[UserAccessItem]
+    licenses: list[UserLicense]
+
+
 class SyncRunResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: UUID

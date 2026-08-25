@@ -31,6 +31,7 @@ class IdentityProvider(Base):
     configuration_ref: Mapped[Optional[str]] = mapped_column(String(500)); client_id: Mapped[Optional[str]] = mapped_column(String(255)); authority: Mapped[Optional[str]] = mapped_column(String(500)); api_audience: Mapped[Optional[str]] = mapped_column(String(500)); api_scope: Mapped[Optional[str]] = mapped_column(String(500)); redirect_uri_metadata: Mapped[Optional[dict]] = mapped_column("redirect_uri_metadata", JSON); last_sync_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     graph_client_id: Mapped[Optional[str]] = mapped_column(String(255)); graph_client_secret_encrypted: Mapped[Optional[str]] = mapped_column(Text)
     sync_interval_minutes: Mapped[Optional[int]] = mapped_column(Integer)
+    max_self_activation_hours: Mapped[int] = mapped_column(Integer, nullable=False, server_default="8")
     created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at()
 
     @property
@@ -126,3 +127,23 @@ class SyncError(Base):
 class ProviderResource(Base):
     __tablename__ = "provider_resources"
     id: Mapped[UUID] = uuid_pk(); provider_id: Mapped[UUID] = mapped_column(ForeignKey("identity_providers.id"), nullable=False); resource_type: Mapped[str] = mapped_column(String(50), nullable=False); external_id: Mapped[str] = mapped_column(String(255), nullable=False); display_name: Mapped[str] = mapped_column(String(255), nullable=False); metadata_json: Mapped[Optional[dict]] = mapped_column("metadata", JSON); created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at()
+
+
+class AccessPackage(Base):
+    __tablename__ = "access_packages"
+    id: Mapped[UUID] = uuid_pk(); name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True); description: Mapped[Optional[str]] = mapped_column(Text); status: Mapped[str] = mapped_column(String(50), nullable=False); default_approver_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at()
+
+
+class AccessPackageEligibility(Base):
+    __tablename__ = "access_package_eligibility"
+    id: Mapped[UUID] = uuid_pk(); package_id: Mapped[UUID] = mapped_column(ForeignKey("access_packages.id"), nullable=False); principal_type: Mapped[str] = mapped_column(String(20), nullable=False); principal_id: Mapped[UUID] = mapped_column(Uuid, nullable=False); created_at: Mapped[datetime] = created_at(); __table_args__ = (Index("ix_access_package_eligibility_package", "package_id"), UniqueConstraint("package_id", "principal_type", "principal_id", name="uq_package_eligibility_principal"))
+
+
+class AccessPackageItem(Base):
+    __tablename__ = "access_package_items"
+    id: Mapped[UUID] = uuid_pk(); package_id: Mapped[UUID] = mapped_column(ForeignKey("access_packages.id"), nullable=False); resource_type: Mapped[str] = mapped_column(String(50), nullable=False); resource_id: Mapped[UUID] = mapped_column(Uuid, nullable=False); app_role_external_id: Mapped[Optional[str]] = mapped_column(String(100)); created_at: Mapped[datetime] = created_at(); __table_args__ = (Index("ix_access_package_items_package", "package_id"),)
+
+
+class AccessPackageAssignment(Base):
+    __tablename__ = "access_package_assignments"
+    id: Mapped[UUID] = uuid_pk(); package_id: Mapped[UUID] = mapped_column(ForeignKey("access_packages.id"), nullable=False); package_assignment_id: Mapped[UUID] = mapped_column(Uuid, nullable=False); assignment_id: Mapped[UUID] = mapped_column(ForeignKey("access_assignments.id"), nullable=False, unique=True); user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False); created_at: Mapped[datetime] = created_at(); __table_args__ = (Index("ix_access_package_assignments_batch", "package_assignment_id"),)
