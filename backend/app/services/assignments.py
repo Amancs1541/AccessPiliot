@@ -23,6 +23,7 @@ def to_response(assignment: AccessAssignment, hydrated: dict) -> AssignmentRespo
         assignment_type=assignment.assignment_type, status=assignment.status, start_time=assignment.start_time, expiration_time=assignment.expiration_time,
         justification=assignment.justification, requested_by=assignment.requested_by, approved_by=assignment.approved_by,
         fallback_approver_id=assignment.fallback_approver_id, fallback_unlock_at=assignment.fallback_unlock_at,
+        bypass_activation=assignment.bypass_activation,
         activated_at=assignment.activated_at, revoked_at=assignment.revoked_at, created_at=assignment.created_at,
         package_name=hydrated.get("package_name"),
     )
@@ -185,12 +186,18 @@ async def create_assignment(session: AsyncSession, data, actor_subject: str, req
     now = datetime.now(timezone.utc)
     approval_required = data.approver_id is not None
     effective_start = data.start_time or now
+    bypass_activation = bool(getattr(data, "bypass_activation", False))
 
     # Real access is never granted at creation time — only an approver approving it, or the end user later
     # self-activating it (see activate_assignment), ever grants real Entra/Graph access. This applies uniformly
     # regardless of assignment_type (Permanent vs Temporary) and regardless of who created it (Admin, self-service
     # package request, etc.) — Permanent means "eligible indefinitely", not "granted forever with no activation".
-    status = "PENDING_APPROVAL" if approval_required else "ELIGIBLE"
+    # The one deliberate exception: bypass_activation (Admin-only, direct "Add assignment" form) — the schema
+    # already rejects combining it with an approver, so it only ever competes with the no-approver ELIGIBLE branch.
+    if bypass_activation:
+        status = "SCHEDULED" if _is_in_the_future(effective_start, now) else "ACTIVE"
+    else:
+        status = "PENDING_APPROVAL" if approval_required else "ELIGIBLE"
 
     fallback_approver_id = data.fallback_approver_id if approval_required else None
     # If a wait period is configured, the fallback approver can only act once it elapses without the primary
@@ -212,11 +219,25 @@ async def create_assignment(session: AsyncSession, data, actor_subject: str, req
         approved_by=data.approver_id,
         fallback_approver_id=fallback_approver_id,
         fallback_unlock_at=fallback_unlock_at,
-        activated_at=None,
+        bypass_activation=bypass_activation,
+        activated_at=now if status == "ACTIVE" else None,
     )
     session.add(assignment)
     await session.flush()
-    await record_audit(session, action="ASSIGNMENT_CREATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=provider_id, actor_user_id=requested_by, request_id=request_id, metadata={"status": status, "resource_type": data.resource_type})
+
+    if status == "ACTIVE":
+        # Bypassing straight to real access — this is the moment it becomes real, so supersede any existing
+        # real/eligible access to the exact same target now, exactly like activate_assignment/approve_assignment do.
+        await _supersede_existing_assignment(session, user_id=data.user_id, resource_type=data.resource_type, resource_id=data.resource_id, app_role_external_id=data.app_role_external_id, provider_id=provider_id, actor_id=requested_by, request_id=request_id, exclude_id=assignment.id)
+        _, _, target_external_id = await _resolve_target(session, data.resource_type, data.resource_id)
+        try:
+            await _grant_provider_access(session, provider_id, data.resource_type, target_external_id, target_user.external_id, data.app_role_external_id)
+        except AccessPilotError:
+            await session.rollback()
+            raise
+        await record_audit(session, action="ASSIGNMENT_ACTIVATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=provider_id, actor_user_id=requested_by, request_id=request_id, metadata={"decision": "ADMIN_BYPASS", "justification": data.justification})
+
+    await record_audit(session, action="ASSIGNMENT_CREATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=provider_id, actor_user_id=requested_by, request_id=request_id, metadata={"status": status, "resource_type": data.resource_type, "bypass_activation": bypass_activation})
     await session.commit()
     await session.refresh(assignment)
     return assignment, {"user_display_name": target_user.display_name, "resource_display_name": resource_name}
@@ -346,6 +367,8 @@ async def deactivate_assignment(session: AsyncSession, assignment_id: UUID, acto
     if assignment.status != "ACTIVE":
         raise AccessPilotError("REQUEST_ALREADY_PROCESSED", "Only active assignments can be deactivated.", 409)
     actor_id = await _authorize_activation(session, assignment, actor_subject, actor_roles)
+    if assignment.bypass_activation and "AccessPilot.Admin" not in actor_roles:
+        raise AccessPilotError("ACCESS_DENIED", "This assignment was granted directly by an administrator and cannot be deactivated by the end user.", 403)
 
     removed = await revoke_provider_access(session, assignment)
     if not removed:
@@ -356,7 +379,35 @@ async def deactivate_assignment(session: AsyncSession, assignment_id: UUID, acto
     assignment.status = "ELIGIBLE"
     assignment.activated_at = None
     assignment.expiration_time = None
+    assignment.bypass_activation = False
     await record_audit(session, action="ASSIGNMENT_DEACTIVATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, actor_user_id=actor_id, request_id=request_id, metadata={"decision": "SELF_DEACTIVATED"})
+    await session.commit()
+    await session.refresh(assignment)
+    return assignment, await hydrate_display_fields(session, assignment)
+
+
+async def revoke_assignment(session: AsyncSession, assignment_id: UUID, actor_subject: str, justification: str, request_id: str) -> tuple[AccessAssignment, dict]:
+    """Admin-only universal override: forcibly revokes an assignment regardless of its current status (ELIGIBLE,
+    PENDING_APPROVAL, SCHEDULED, or ACTIVE) — unlike deactivate_assignment (self-service, ACTIVE-only, returns the
+    user to ELIGIBLE so they can reactivate later), this always lands on the terminal REVOKED status and removes
+    the real Entra/Graph grant first if one was actually made. A justification is mandatory (enforced by the
+    schema) and recorded on the audit entry."""
+    assignment = await get_assignment(session, assignment_id)
+    if assignment.status in ("REJECTED", "REVOKED", "EXPIRED"):
+        raise AccessPilotError("REQUEST_ALREADY_PROCESSED", "This assignment has already reached a final state.", 409)
+    actor_id = await _resolve_internal_user_id(session, actor_subject)
+    previous_status = assignment.status
+
+    if assignment.status == "ACTIVE":
+        removed = await revoke_provider_access(session, assignment)
+        if not removed:
+            await record_audit(session, action="ASSIGNMENT_REVOKED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, actor_user_id=actor_id, request_id=request_id, result="FAILURE", metadata={"justification": justification})
+            await session.commit()
+            raise AccessPilotError("PROVIDER_UNAVAILABLE", "Could not remove the real access. Please try again.", 502)
+
+    assignment.status = "REVOKED"
+    assignment.revoked_at = datetime.now(timezone.utc)
+    await record_audit(session, action="ASSIGNMENT_REVOKED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, actor_user_id=actor_id, request_id=request_id, metadata={"reason": "ADMIN_REVOKED", "previous_status": previous_status, "justification": justification})
     await session.commit()
     await session.refresh(assignment)
     return assignment, await hydrate_display_fields(session, assignment)

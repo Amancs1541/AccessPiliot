@@ -26,6 +26,7 @@ class AssignmentCreate(BaseModel):
     approver_id: Optional[UUID] = None
     fallback_approver_id: Optional[UUID] = None
     fallback_unlock_hours: Optional[int] = Field(default=None, gt=0)
+    bypass_activation: bool = False
     justification: str = Field(min_length=3, max_length=2000)
 
     @field_validator("justification")
@@ -37,6 +38,12 @@ class AssignmentCreate(BaseModel):
     def _validate_fallback_unlock(self) -> "AssignmentCreate":
         if self.fallback_unlock_hours is not None and self.fallback_approver_id is None:
             raise ValueError("fallback_unlock_hours requires fallback_approver_id to be set")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_bypass_activation(self) -> "AssignmentCreate":
+        if self.bypass_activation and (self.approver_id is not None or self.fallback_approver_id is not None):
+            raise ValueError("bypass_activation cannot be combined with an approver or fallback approver — it grants access directly, with no approval step")
         return self
 
     @model_validator(mode="after")
@@ -78,6 +85,7 @@ class AssignmentResponse(BaseModel):
     approved_by: Optional[UUID]
     fallback_approver_id: Optional[UUID] = None
     fallback_unlock_at: Optional[datetime] = None
+    bypass_activation: bool = False
     activated_at: Optional[datetime]
     revoked_at: Optional[datetime]
     created_at: datetime
@@ -95,6 +103,15 @@ class AssignmentActivate(BaseModel):
 
 
 class AssignmentApprove(BaseModel):
+    justification: str = Field(min_length=3, max_length=2000)
+
+    @field_validator("justification")
+    @classmethod
+    def _validate_justification(cls, value: str) -> str:
+        return require_justification(value)
+
+
+class AssignmentRevoke(BaseModel):
     justification: str = Field(min_length=3, max_length=2000)
 
     @field_validator("justification")

@@ -13,7 +13,7 @@ from app.schemas.directory import ApplicationResponse, GroupCreate, GroupRespons
 from app.security.auth import AuthenticatedUser, require_permission
 from app.services import directory_read
 from app.services.audit import record_audit
-from app.services.dashboard import admin_dashboard
+from app.services.dashboard import admin_dashboard, get_privileged_role_activation_timeline, get_user_access_segment_members, get_user_access_segments
 from app.services.directory_sync import upsert_group, upsert_user
 from app.services.provider_configuration import _connector, list_providers
 
@@ -113,6 +113,21 @@ async def applications(q: str | None = Query(default=None), _: AuthenticatedUser
 @router.get("/dashboard/admin")
 async def dashboard_admin(_: AuthenticatedUser = Depends(dashboard_admin_read), db: AsyncSession = Depends(get_db)):
     return await admin_dashboard(db)
+
+
+@router.get("/dashboard/privileged-role-activations")
+async def dashboard_privileged_role_activations(days: int = Query(default=30), _: AuthenticatedUser = Depends(dashboard_admin_read), db: AsyncSession = Depends(get_db)):
+    return await get_privileged_role_activation_timeline(db, days)
+
+
+@router.get("/dashboard/user-access-segments")
+async def dashboard_user_access_segments(_: AuthenticatedUser = Depends(dashboard_admin_read), db: AsyncSession = Depends(get_db)):
+    return await get_user_access_segments(db)
+
+
+@router.get("/dashboard/user-access-segments/{segment}")
+async def dashboard_user_access_segment_members(segment: str, _: AuthenticatedUser = Depends(dashboard_admin_read), db: AsyncSession = Depends(get_db)):
+    return await get_user_access_segment_members(db, segment)
 
 
 @router.get("/dashboard/user")
