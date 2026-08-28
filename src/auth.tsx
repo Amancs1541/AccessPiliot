@@ -6,7 +6,7 @@ const tenantId = import.meta.env.VITE_ENTRA_TENANT_ID as string | undefined;
 const clientId = import.meta.env.VITE_ENTRA_CLIENT_ID as string | undefined;
 const redirectUri = import.meta.env.VITE_ENTRA_REDIRECT_URI as string | undefined;
 const apiScope = import.meta.env.VITE_ACCESSPILOT_API_SCOPE as string | undefined;
-const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined) || 'http://localhost:8000';
+export const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined) || 'http://localhost:8000';
 export const entraConfigured = Boolean(tenantId && clientId && redirectUri && apiScope);
 const msalConfig: Configuration = { auth: { clientId: clientId || 'unconfigured', authority: tenantId ? `https://login.microsoftonline.com/${tenantId}` : undefined, redirectUri: redirectUri || window.location.origin }, cache: { cacheLocation: 'sessionStorage' } };
 const msal = new PublicClientApplication(msalConfig);
@@ -62,7 +62,13 @@ function safeAccount(account: AccountInfo) {
 
 function AuthState({ children }: { children: ReactNode }) {
   const { instance, accounts, inProgress } = useMsal(); const authenticated = useIsAuthenticated();
-  const [role, setRole] = useState<AppRole>('user'); const [account, setAccount] = useState<AccountInfo | null>(accounts[0] || null); const [apiLoading, setApiLoading] = useState(false);
+  // apiLoading MUST default to true, not false: it starts false-to-true only inside the effect below, which runs
+  // AFTER the first render commits. With a false default, that first render already has `role` at its initial
+  // 'user' value AND `loading` already false (once MSAL's own inProgress has settled to 'none', which it already
+  // has by the time this component mounts) — so the app briefly (or, if the /me call is slow, not-so-briefly)
+  // renders the end-user panel for an Admin before the real role check catches up. Defaulting to true keeps the
+  // app on the loading screen until the effect has actually determined a role one way or the other.
+  const [role, setRole] = useState<AppRole>('user'); const [account, setAccount] = useState<AccountInfo | null>(accounts[0] || null); const [apiLoading, setApiLoading] = useState(true);
   useEffect(() => {
     const current = accounts[0] || null;
     setAccount(current);
@@ -77,9 +83,12 @@ function AuthState({ children }: { children: ReactNode }) {
     }
     if (!current || !apiScope) {
       authDebug('Profile/token loading skipped because account or API scope is unavailable.');
+      setApiLoading(false); // no account to check a role for — don't get stuck on the loading screen forever
       return;
     }
 
+    let ignore = false;
+    const controller = new AbortController();
     const loadProfile = async () => {
       setApiLoading(true);
       let tokenDebugGroupOpen = false;
@@ -113,7 +122,8 @@ function AuthState({ children }: { children: ReactNode }) {
           apiDebugGroupOpen = true;
         }
         authDebug('Calling API URL:', `${apiBaseUrl}/api/v1/me`);
-        const response = await fetch(`${apiBaseUrl}/api/v1/me`, { headers: { Authorization: `Bearer ${result.accessToken}` } });
+        const response = await fetch(`${apiBaseUrl}/api/v1/me`, { headers: { Authorization: `Bearer ${result.accessToken}` }, signal: controller.signal });
+        if (ignore) return;
         let profile: Record<string, unknown> | null = null;
         try { profile = await response.json() as Record<string, unknown>; } catch { /* Response is not JSON; status is logged below. */ }
         authDebug('API /me STATUS:', response.status);
@@ -131,6 +141,8 @@ function AuthState({ children }: { children: ReactNode }) {
         authDebug('Final authenticated state:', authenticated);
         if (authDebugEnabled) console.groupEnd();
       } catch (error) {
+        if (ignore) return;
+        if (error instanceof DOMException && error.name === 'AbortError') return;
         setRole('user');
         if (authDebugEnabled && apiDebugGroupOpen) console.groupEnd();
         if (authDebugEnabled && tokenDebugGroupOpen) console.groupEnd();
@@ -143,11 +155,12 @@ function AuthState({ children }: { children: ReactNode }) {
         authDebug('Final authenticated state:', authenticated);
         if (authDebugEnabled) console.groupEnd();
       } finally {
-        setApiLoading(false);
+        if (!ignore) setApiLoading(false);
       }
     };
 
     void loadProfile();
+    return () => { ignore = true; controller.abort(); };
   }, [accounts, apiScope, instance]);
   const signIn = async () => {
     if (authDebugEnabled) console.group('ACCESSPILOT LOGIN DEBUG — TEMPORARY DEVELOPMENT LOGGING');

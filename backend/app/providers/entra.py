@@ -337,7 +337,13 @@ class EntraProvider(IdentityProvider):
             if request.job_title:
                 body["jobTitle"] = request.job_title
             response = await client.request("POST", "/users", json=body)
-        return CreatedUser(user=self._user_from_graph(response.json()), temporary_password=password)
+        # Graph's POST /users response does NOT include `department`/`jobTitle` unless explicitly $select'd — they
+        # ARE saved on the real object (we just set them above), just not echoed back. Trust what we sent rather
+        # than what came back, or department-driven birthright policies would silently never match a freshly
+        # provisioned user despite the real Entra object being correct.
+        created = self._user_from_graph(response.json())
+        normalized = NormalizedUser(external_id=created.external_id, email=created.email, display_name=created.display_name, given_name=created.given_name, surname=created.surname, department=request.department or created.department, job_title=request.job_title or created.job_title, status=created.status)
+        return CreatedUser(user=normalized, temporary_password=password)
 
     async def create_group(self, request: NewGroupRequest) -> NormalizedGroup:
         async with self._client() as client:

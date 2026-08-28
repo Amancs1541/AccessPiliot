@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: UUID
+    provider_id: UUID
     external_id: str
     email: str
     display_name: str
@@ -18,6 +19,8 @@ class UserResponse(BaseModel):
     department: Optional[str]
     job_title: Optional[str]
     status: str
+    employee_id: Optional[str] = None
+    source: Optional[str] = None
     last_synced_at: Optional[datetime]
 
 

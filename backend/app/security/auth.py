@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -14,10 +15,28 @@ from app.core.errors import AccessPilotError
 
 logger = logging.getLogger("accesspilot.auth")
 
+_jwks_client: Optional[PyJWKClient] = None
+_jwks_client_url: Optional[str] = None
+
+
+def _get_jwks_client(jwks_url: str) -> PyJWKClient:
+    """A single, reused PyJWKClient — NOT a fresh one per request. PyJWKClient's key fetch is a SYNCHRONOUS,
+    blocking HTTP call (PyJWT has no async client); constructing a new one per request meant every authenticated
+    request re-fetched Microsoft's JWKS endpoint synchronously, freezing the entire single-threaded event loop —
+    including totally unrelated requests — for as long as that call took. Reusing one instance lets its own
+    internal cache absorb almost all requests; the remaining (rare) network call is additionally offloaded to a
+    thread in decode_access_token() via asyncio.to_thread so a slow/unresponsive JWKS fetch can never block the
+    loop, only the one request that triggered it."""
+    global _jwks_client, _jwks_client_url
+    if _jwks_client is None or _jwks_client_url != jwks_url:
+        _jwks_client = PyJWKClient(jwks_url)
+        _jwks_client_url = jwks_url
+    return _jwks_client
+
 VALID_ROLES = {"AccessPilot.User", "AccessPilot.Admin"}
 PERMISSIONS = {
     "AccessPilot.User": {"ME_READ", "DASHBOARD_USER_READ", "ACCESS_REQUEST_CREATE", "ACCESS_REQUEST_READ_SELF", "ACCESS_REQUEST_CANCEL_SELF", "ASSIGNMENT_READ_SELF", "ASSIGNMENT_ACTIVATE_SELF", "ASSIGNMENT_REVOKE_SELF"},
-    "AccessPilot.Admin": {"ME_READ", "DASHBOARD_ADMIN_READ", "USER_READ", "GROUP_READ", "GROUP_MANAGE", "ROLE_READ", "ROLE_MANAGE", "PROVIDER_READ", "PROVIDER_MANAGE", "PROVIDER_SYNC", "ACCESS_REQUEST_READ", "ACCESS_REQUEST_APPROVE", "ACCESS_REQUEST_REJECT", "ACCESS_REQUEST_CANCEL", "ASSIGNMENT_READ", "ASSIGNMENT_CREATE", "ASSIGNMENT_REVOKE", "ASSIGNMENT_EXTEND", "POLICY_READ", "POLICY_CREATE", "POLICY_UPDATE", "POLICY_DELETE", "AUDIT_READ", "SYNC_READ", "PACKAGE_READ", "PACKAGE_MANAGE"},
+    "AccessPilot.Admin": {"ME_READ", "DASHBOARD_ADMIN_READ", "USER_READ", "GROUP_READ", "GROUP_MANAGE", "ROLE_READ", "ROLE_MANAGE", "PROVIDER_READ", "PROVIDER_MANAGE", "PROVIDER_SYNC", "ACCESS_REQUEST_READ", "ACCESS_REQUEST_APPROVE", "ACCESS_REQUEST_REJECT", "ACCESS_REQUEST_CANCEL", "ASSIGNMENT_READ", "ASSIGNMENT_CREATE", "ASSIGNMENT_REVOKE", "ASSIGNMENT_EXTEND", "POLICY_READ", "POLICY_CREATE", "POLICY_UPDATE", "POLICY_DELETE", "AUDIT_READ", "SYNC_READ", "PACKAGE_READ", "PACKAGE_MANAGE", "ONBOARDING_READ", "ONBOARDING_MANAGE"},
 }
 
 @dataclass(frozen=True)
@@ -106,12 +125,16 @@ def _log_jwt_validation_failure(token: str, *, request_id: str, failure_code: st
     )
 
 
-def decode_access_token(token: str, *, request_id: str = "-") -> AuthenticatedUser:
+async def decode_access_token(token: str, *, request_id: str = "-") -> AuthenticatedUser:
     settings = get_settings()
     jwks_loaded = False
     try:
         issuer = _issuer()
-        signing_key = PyJWKClient(_jwks_url()).get_signing_key_from_jwt(token).key
+        jwks_client = _get_jwks_client(_jwks_url())
+        # Hard backstop: PyJWKClient's own `timeout` guards a single socket read, not the whole call (redirects,
+        # DNS, retries aren't covered) — wait_for guarantees this can NEVER hang the request indefinitely
+        # regardless of the underlying cause, so one bad request degrades to a clean 401, not a stuck connection.
+        signing_key = (await asyncio.wait_for(asyncio.to_thread(jwks_client.get_signing_key_from_jwt, token), timeout=10)).key
         jwks_loaded = True
         claims = jwt.decode(token, signing_key, algorithms=["RS256"], audience=_audience(), issuer=issuer, options={"require": ["exp", "iss", "aud", "tid", "sub"]})
     except jwt.ExpiredSignatureError as exc:
@@ -171,7 +194,7 @@ async def require_authenticated_user(request: Request, credentials: Optional[HTT
         )
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise _auth_error("AUTHENTICATION_REQUIRED", "Authentication is required.")
-    user = decode_access_token(credentials.credentials, request_id=getattr(request.state, "request_id", "-"))
+    user = await decode_access_token(credentials.credentials, request_id=getattr(request.state, "request_id", "-"))
     request.state.user = user
     if get_settings().environment == "development" and request.url.path == "/api/v1/me":
         claims = user.claims

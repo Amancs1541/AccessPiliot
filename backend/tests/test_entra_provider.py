@@ -117,6 +117,31 @@ async def test_create_user_success_returns_password_once(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_create_user_preserves_department_and_job_title_even_though_graph_omits_them_from_the_response(monkeypatch):
+    """Real bug found live: Microsoft Graph's POST /users response does NOT echo back `department`/`jobTitle`
+    without an explicit $select, even though they ARE saved on the real object — silently breaking any
+    department-driven birthright policy for a freshly provisioned user."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/oauth2/v2.0/token"):
+            return token_response()
+        if request.method == "GET":
+            return httpx.Response(200, json={"value": []})
+        assert request.method == "POST"
+        # Deliberately matches Graph's real default response shape: no `department`/`jobTitle` field at all,
+        # even though the request body (asserted below) did include them.
+        import json
+        body = json.loads(request.content)
+        assert body["department"] == "IT"
+        assert body["jobTitle"] == "IT Support Specialist"
+        return httpx.Response(201, json={"id": "new-id-2", "userPrincipalName": "new.user2@tenant.onmicrosoft.com", "mail": "new.user2@tenant.onmicrosoft.com", "displayName": "New User", "accountEnabled": True})
+
+    install_transport(monkeypatch, handler)
+    created = await EntraProvider(provider_row()).create_user(NewUserRequest(display_name="New User", user_principal_name="new.user2@tenant.onmicrosoft.com", mail_nickname="newuser2", department="IT", job_title="IT Support Specialist"))
+    assert created.user.department == "IT"
+    assert created.user.job_title == "IT Support Specialist"
+
+
+@pytest.mark.asyncio
 async def test_create_group_detects_duplicate(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/oauth2/v2.0/token"):

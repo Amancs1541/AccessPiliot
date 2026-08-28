@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Box, Check, ChevronRight, Clock3, Cloud, Copy, Database, FileCheck2, FolderKanban, Gauge, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldCheck, SlidersHorizontal, UserRound, Users, X } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Box, Check, ChevronRight, Clock3, Cloud, Copy, Database, ExternalLink, FileCheck2, FolderKanban, Gauge, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldCheck, SlidersHorizontal, UploadCloud, UserRound, Users, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { auditEvents, currentUser, policies, type RequestStatus, type Role } from './mock';
 import { mockService, useMockState } from './mockService';
-import { entraConfigured, useAuth } from './auth';
+import { apiBaseUrl, entraConfigured, useAuth } from './auth';
 import ProviderConfiguration from './ProviderConfiguration';
 
-interface ApiUser { id: string; external_id: string; email: string; display_name: string; given_name: string | null; surname: string | null; department: string | null; job_title: string | null; status: string; last_synced_at: string | null; }
+interface ApiUser { id: string; provider_id: string; external_id: string; email: string; display_name: string; given_name: string | null; surname: string | null; department: string | null; job_title: string | null; status: string; employee_id: string | null; source: string | null; last_synced_at: string | null; }
 interface ApiGroup { id: string; external_id: string; name: string; description: string | null; is_privileged: boolean; status: string; last_synced_at: string | null; }
 interface ApiRole { id: string; external_id: string; name: string; description: string | null; role_type: string; is_privileged: boolean; status: string; }
 interface ApiApplicationRole { id: string; name: string; description: string | null; }
@@ -23,6 +23,8 @@ interface DashboardAdmin { users: number; groups: number; roles: number; privile
 interface ApiActivationTimeline { days: number; series: { date: string; count: number }[]; }
 interface ApiUserAccessSegments { permanentActive: number; eligible: number; }
 interface ApiSegmentMember { id: string; display_name: string; email: string; }
+interface ApiOnboardingImport { id: string; filename: string; status: string; total_records: number; created_count: number; updated_count: number; disabled_count: number; no_change_count: number; failed_count: number; access_revoked_count: number; access_revoke_failed_count: number; real_accounts_provisioned_count: number; birthright_assignments_created_count: number; error_summary: Record<string, unknown> | null; created_at: string; completed_at: string | null; }
+interface ApiOnboardingImportRecord { row_number: number; employee_id: string; action: string; error_message: string | null; raw_data: Record<string, string> | null; }
 
 function useApiResource<T>(path: string, enabled = true) {
   const auth = useAuth();
@@ -71,6 +73,7 @@ const nav = [
   { label: 'Audit Logs', icon: BookOpen, to: '/admin/audit', roles: ['admin'] },
   { label: 'Providers', icon: Cloud, to: '/admin/providers', roles: ['admin'], section: 'SYSTEM' },
   { label: 'Sync', icon: RefreshCw, to: '/admin/sync', roles: ['admin'] },
+  { label: 'Onboarding', icon: UploadCloud, to: '/admin/onboarding', roles: ['admin'] },
 ];
 
 function App() {
@@ -80,7 +83,7 @@ function App() {
   if (entraConfigured && !auth.account) return <div className="empty"><h1>Sign in to AccessPilot</h1><p className="subtitle">Use your Microsoft Entra account to continue.</p><button className="btn btn-primary" onClick={auth.signIn} style={{marginTop:18}}>Sign in</button></div>;
   const role = entraConfigured ? auth.role : mockRole;
   const changeRole = (nextRole: Role) => { localStorage.setItem('accesspilot.mockRole', nextRole); setMockRole(nextRole); };
-  return <Shell role={role} setRole={changeRole}><Routes><Route path="/" element={<Navigate to="/dashboard" replace />} /><Route path="/dashboard" element={<Dashboard role={role} />} /><Route path="/my-access" element={<MyAccess />} /><Route path="/request-access" element={<RequestAccess />} /><Route path="/request-packages" element={<RequestPackagesPage />} /><Route path="/my-requests" element={<Requests mine />} /><Route path="/approvals" element={<MyApprovalsPage />} /><Route path="/profile" element={<Profile />} /><Route path="/admin/users" element={<AdminOnly role={role}><UsersPage /></AdminOnly>} /><Route path="/admin/users/:id" element={<AdminOnly role={role}><UserDetail /></AdminOnly>} /><Route path="/admin/groups" element={<AdminOnly role={role}><GroupsPage /></AdminOnly>} /><Route path="/admin/roles" element={<AdminOnly role={role}><RolesPage /></AdminOnly>} /><Route path="/admin/access-requests" element={<AdminOnly role={role}><Requests /></AdminOnly>} /><Route path="/admin/access-requests/:id" element={<AdminOnly role={role}><RequestDetailInteractive /></AdminOnly>} /><Route path="/admin/assignments" element={<AdminOnly role={role}><AssignmentsInteractive /></AdminOnly>} /><Route path="/admin/access-packages" element={<AdminOnly role={role}><AccessPackagesInteractive /></AdminOnly>} /><Route path="/admin/policies" element={<AdminOnly role={role}><PoliciesPage /></AdminOnly>} /><Route path="/admin/audit" element={<AdminOnly role={role}><AuditPage /></AdminOnly>} /><Route path="/admin/providers" element={<AdminOnly role={role}><ProvidersPage /></AdminOnly>} /><Route path="/admin/sync" element={<AdminOnly role={role}><SyncPage /></AdminOnly>} /><Route path="*" element={<Navigate to="/dashboard" replace />} /></Routes></Shell>;
+  return <Shell role={role} setRole={changeRole}><Routes><Route path="/" element={<Navigate to="/dashboard" replace />} /><Route path="/dashboard" element={<Dashboard role={role} />} /><Route path="/my-access" element={<MyAccess />} /><Route path="/request-access" element={<RequestAccess />} /><Route path="/request-packages" element={<RequestPackagesPage />} /><Route path="/my-requests" element={<Requests mine />} /><Route path="/approvals" element={<MyApprovalsPage />} /><Route path="/profile" element={<Profile />} /><Route path="/admin/users" element={<AdminOnly role={role}><UsersPage /></AdminOnly>} /><Route path="/admin/users/:id" element={<AdminOnly role={role}><UserDetail /></AdminOnly>} /><Route path="/admin/groups" element={<AdminOnly role={role}><GroupsPage /></AdminOnly>} /><Route path="/admin/roles" element={<AdminOnly role={role}><RolesPage /></AdminOnly>} /><Route path="/admin/access-requests" element={<AdminOnly role={role}><Requests /></AdminOnly>} /><Route path="/admin/access-requests/:id" element={<AdminOnly role={role}><RequestDetailInteractive /></AdminOnly>} /><Route path="/admin/assignments" element={<AdminOnly role={role}><AssignmentsInteractive /></AdminOnly>} /><Route path="/admin/access-packages" element={<AdminOnly role={role}><AccessPackagesInteractive /></AdminOnly>} /><Route path="/admin/policies" element={<AdminOnly role={role}><PoliciesPage /></AdminOnly>} /><Route path="/admin/audit" element={<AdminOnly role={role}><AuditPage /></AdminOnly>} /><Route path="/admin/providers" element={<AdminOnly role={role}><ProvidersPage /></AdminOnly>} /><Route path="/admin/sync" element={<AdminOnly role={role}><SyncPage /></AdminOnly>} /><Route path="/admin/onboarding" element={<AdminOnly role={role}><OnboardingPage /></AdminOnly>} /><Route path="*" element={<Navigate to="/dashboard" replace />} /></Routes></Shell>;
 }
 function AdminOnly({ role, children }: { role: Role; children: React.ReactNode }) { return role === 'admin' ? children : <Navigate to="/dashboard" replace />; }
 function Shell({ role, setRole, children }: { role: Role; setRole: (r: Role) => void; children: React.ReactNode }) {
@@ -209,9 +212,16 @@ function Toolbar({ placeholder = 'Search', searchValue, onSearchChange, filterLa
   return <><div className="toolbar-left">{onSearchChange && <div className="search-box"><Search size={15}/><input className="search" placeholder={placeholder} value={searchValue ?? ''} onChange={event => onSearchChange(event.target.value)}/></div>}{filterOptions && <select className="select" value={filterValue} onChange={event => onFilterChange?.(event.target.value)}><option value="">{filterLabel}</option>{filterOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select>}</div></>;
 }
 function initialsFor(name: string) { const parts = name.trim().split(/\s+/); return ((parts[0]?.[0] || '') + (parts[parts.length - 1]?.[0] || '')).toUpperCase() || '?'; }
+function sourceLabel(user: ApiUser, providers: ApiProvider[] | null): { label: string; detail: string } {
+  const provider = providers?.find(p => p.id === user.provider_id);
+  const connector = provider ? `${provider.provider_type === 'ENTRA' ? 'Microsoft Entra ID' : provider.provider_type === 'OKTA' ? 'Okta' : provider.name} · ${user.external_id}` : user.external_id;
+  if (user.source === 'CSV_ONBOARDING') return { label: 'CSV Onboarding', detail: `Employee ID ${user.employee_id} — ${connector}` };
+  return { label: provider?.provider_type === 'ENTRA' ? 'Microsoft Entra ID' : provider?.provider_type === 'OKTA' ? 'Okta' : provider?.name || 'Connector', detail: connector };
+}
 function UsersPage() {
   const auth = useAuth();
   const { data: users, error, loading, reload } = useApiResource<ApiUser[]>('/api/v1/users');
+  const { data: providers } = useApiResource<ApiProvider[]>('/api/v1/providers');
   const [searchParams, setSearchParams] = useSearchParams();
   const search = searchParams.get('q') || '';
   const statusFilter = searchParams.get('status') || '';
@@ -249,13 +259,14 @@ function UsersPage() {
   return <Page eyebrow="ADMINISTRATION" title="Users" subtitle="Directory identities and their AccessPilot entitlements." action={<button className="btn btn-primary" onClick={() => { setOpen(true); setFormMessage(''); }}><Plus size={14}/> Add user</button>}>
     {createdPassword && <div className="notice" style={{marginBottom:14}}>User created. Temporary password (shown once, share it securely): <strong>{createdPassword}</strong></div>}
     {open && <form role="dialog" aria-modal="true" className="panel" style={{maxWidth:640,marginBottom:18}} onSubmit={submit}><div className="panel-head"><h2>Add user</h2><button type="button" className="btn" aria-label="Close" onClick={() => setOpen(false)}><X size={14}/></button></div><div className="detail-section"><div className="key-grid">{([['display_name','Display name'],['user_principal_name','Email / UPN'],['department','Department'],['job_title','Job title']] as const).map(([key,label]) => <label className="key" key={key}><span>{label}</span><input className="select" value={form[key]} onChange={event => setForm({...form, [key]: event.target.value})}/></label>)}</div>{formMessage && <div className="notice" style={{marginTop:14}}>{formMessage}</div>}</div><div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setOpen(false)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Creating...' : 'Create user'}</button></div></form>}
-    <TablePanel toolbar={<Toolbar placeholder="Search users by name or email" searchValue={search} onSearchChange={setSearch} filterLabel="All statuses" filterValue={statusFilter} onFilterChange={setStatusFilter} filterOptions={statusOptions}/>}>{loading ? <div className="empty">Loading users...</div> : error ? <div className="empty">{error}</div> : !users || users.length === 0 ? <div className="empty">No users found.</div> : filteredUsers.length === 0 ? <div className="empty">No users match this filter.</div> : <table><thead><tr><th>User</th><th>Department</th><th>Job title</th><th>Status</th><th>Last synced</th><th></th></tr></thead><tbody>{filteredUsers.map(u => <tr key={u.id}><td><Link to={`/admin/users/${u.id}`} className="user-cell"><span className="avatar">{initialsFor(u.display_name)}</span><span><span className="user-name">{u.display_name}</span><span className="user-email">{u.email}</span></span></Link></td><td>{u.department || '—'}</td><td>{u.job_title || '—'}</td><td><StatusBadge status={u.status}/></td><td>{u.last_synced_at ? new Date(u.last_synced_at).toLocaleString() : 'Never'}</td><td><ChevronRight size={15} color="#829198"/></td></tr>)}</tbody></table>}</TablePanel>
+    <TablePanel toolbar={<Toolbar placeholder="Search users by name or email" searchValue={search} onSearchChange={setSearch} filterLabel="All statuses" filterValue={statusFilter} onFilterChange={setStatusFilter} filterOptions={statusOptions}/>}>{loading ? <div className="empty">Loading users...</div> : error ? <div className="empty">{error}</div> : !users || users.length === 0 ? <div className="empty">No users found.</div> : filteredUsers.length === 0 ? <div className="empty">No users match this filter.</div> : <table><thead><tr><th>User</th><th>Department</th><th>Job title</th><th>Source</th><th>Status</th><th>Last synced</th><th></th></tr></thead><tbody>{filteredUsers.map(u => { const source = sourceLabel(u, providers); return <tr key={u.id}><td><Link to={`/admin/users/${u.id}`} className="user-cell"><span className="avatar">{initialsFor(u.display_name)}</span><span><span className="user-name">{u.display_name}</span><span className="user-email">{u.email}</span></span></Link></td><td>{u.department || '—'}</td><td>{u.job_title || '—'}</td><td><span className="badge neutral" title={source.detail}>{source.label}</span></td><td><StatusBadge status={u.status}/></td><td>{u.last_synced_at ? new Date(u.last_synced_at).toLocaleString() : 'Never'}</td><td><ChevronRight size={15} color="#829198"/></td></tr>; })}</tbody></table>}</TablePanel>
     {users && users.length > 0 && <p className="footer-note">Showing {filteredUsers.length} of {users.length} users</p>}
   </Page>;
 }
 function UserDetail() {
   const { id } = useParams();
   const { data: user, error, loading } = useApiResource<ApiUser>(`/api/v1/users/${id}`);
+  const { data: providers } = useApiResource<ApiProvider[]>('/api/v1/providers');
   const { data: access, error: accessError, loading: accessLoading, reload: reloadAccess } = useApiResource<ApiUserAccessSummary>(`/api/v1/users/${id}/access-summary`);
   const groupItems = (access?.assignments || []).filter(item => item.resource_type === 'GROUP');
   const applicationItems = (access?.assignments || []).filter(item => item.resource_type === 'APPLICATION');
@@ -279,7 +290,15 @@ function UserDetail() {
   };
   if (loading) return <Page eyebrow="USER DIRECTORY" title="Loading..." subtitle=""><div className="empty">Loading user...</div></Page>;
   if (error || !user) return <Page eyebrow="USER DIRECTORY" title="User" subtitle=""><div className="empty">{error || 'User not found.'}</div></Page>;
-  return <Page eyebrow="USER DIRECTORY" title={user.display_name} subtitle={user.email} action={<button className="btn" aria-label="Refresh" onClick={() => reloadAccess()}><RefreshCw size={14}/></button>}><div className="detail-layout"><section className="panel"><div className="detail-section"><div className="user-cell"><span className="avatar" style={{width:45,height:45}}>{initialsFor(user.display_name)}</span><div><h2>{user.job_title || 'No job title on file'}</h2><p className="subtitle">{user.department || 'No department on file'} · {user.status}</p></div></div></div><div className="detail-section"><div className="detail-title"><h2>Overview</h2><StatusBadge status={user.status}/></div><div className="key-grid"><div className="key"><span>Email</span><strong style={{display:'flex',alignItems:'center',gap:8}}>{user.email}<button type="button" className="btn" aria-label="Copy email" onClick={() => void copyEmail()} style={{padding:'2px 7px'}}><Copy size={12}/></button>{copied && <span className="footer-note">Copied</span>}</strong></div><div className="key"><span>External ID</span><strong>{user.external_id}</strong></div><div className="key"><span>Given name</span><strong>{user.given_name || '—'}</strong></div><div className="key"><span>Surname</span><strong>{user.surname || '—'}</strong></div><div className="key"><span>Last synced</span><strong>{user.last_synced_at ? new Date(user.last_synced_at).toLocaleString() : 'Never'}</strong></div><div className="key"><span>Groups</span><strong>{accessLoading ? '…' : groupCount}</strong></div><div className="key"><span>Applications</span><strong>{accessLoading ? '…' : applicationCount}</strong></div></div></div></section><aside className="panel">
+  const provider = providers?.find(p => p.id === user.provider_id);
+  const connectorName = provider ? (provider.provider_type === 'ENTRA' ? 'Microsoft Entra ID' : provider.provider_type === 'OKTA' ? 'Okta' : provider.name) : 'Unknown connector';
+  const isCsvOnly = provider?.provider_type === 'CSV';
+  return <Page eyebrow="USER DIRECTORY" title={user.display_name} subtitle={user.email} action={<button className="btn" aria-label="Refresh" onClick={() => reloadAccess()}><RefreshCw size={14}/></button>}><div className="detail-layout"><section className="panel"><div className="detail-section"><div className="user-cell"><span className="avatar" style={{width:45,height:45}}>{initialsFor(user.display_name)}</span><div><h2>{user.job_title || 'No job title on file'}</h2><p className="subtitle">{user.department || 'No department on file'} · {user.status}</p></div></div></div><div className="detail-section"><div className="detail-title"><h2>Overview</h2><StatusBadge status={user.status}/></div><div className="key-grid"><div className="key"><span>Email</span><strong style={{display:'flex',alignItems:'center',gap:8}}>{user.email}<button type="button" className="btn" aria-label="Copy email" onClick={() => void copyEmail()} style={{padding:'2px 7px'}}><Copy size={12}/></button>{copied && <span className="footer-note">Copied</span>}</strong></div><div className="key"><span>Given name</span><strong>{user.given_name || '—'}</strong></div><div className="key"><span>Surname</span><strong>{user.surname || '—'}</strong></div><div className="key"><span>Last synced</span><strong>{user.last_synced_at ? new Date(user.last_synced_at).toLocaleString() : 'Never'}</strong></div><div className="key"><span>Groups</span><strong>{accessLoading ? '…' : groupCount}</strong></div><div className="key"><span>Applications</span><strong>{accessLoading ? '…' : applicationCount}</strong></div></div></div><div className="detail-section"><div className="detail-title"><h2>Identity source</h2>{isCsvOnly && <span className="badge warning">No real account yet</span>}</div><div className="key-grid">
+    <div className="key"><span>Onboarded via</span><strong>{user.source === 'CSV_ONBOARDING' ? 'CSV Onboarding' : 'Directory sync'}</strong></div>
+    {user.employee_id && <div className="key"><span>Employee ID (from CSV)</span><strong>{user.employee_id}</strong></div>}
+    <div className="key"><span>Connector</span><strong>{connectorName}</strong></div>
+    <div className="key"><span>Connector external ID</span><strong>{user.external_id}</strong></div>
+  </div>{isCsvOnly && <p className="subtitle" style={{marginTop:12}}>This identity has no real {providers?.some(p => p.provider_type === 'ENTRA') ? 'Entra' : providers?.some(p => p.provider_type === 'OKTA') ? 'Okta' : 'connector'} account yet — group/role membership shown below is AccessPilot-local (eligible) only. Re-uploading its CSV row after a real connector is available will provision one automatically.</p>}</div></section><aside className="panel">
     <div className="panel-head"><h2>Groups</h2></div>
     <div className="detail-section">{accessLoading ? <div className="empty">Loading groups...</div> : accessError ? <div className="notice">{accessError}</div> : groupItems.length === 0 ? <div className="notice">Not a member of any group.</div> : <div className="timeline" style={{padding:0}}>{groupItems.map(renderAccessItem)}</div>}</div>
     <div className="panel-head"><h2>Applications</h2></div>
@@ -1039,6 +1058,61 @@ function RolesPage() {
   const filteredRoles = (roles || []).filter(r => (!privilegedFilter || String(r.is_privileged) === privilegedFilter) && (!search || r.name.toLowerCase().includes(search.toLowerCase())));
   return <Page eyebrow="ADMINISTRATION" title="Directory roles" subtitle="Privileged and standard roles available through AccessPilot."><TablePanel toolbar={<Toolbar placeholder="Search roles" searchValue={search} onSearchChange={setSearch} filterLabel="All roles" filterValue={privilegedFilter} onFilterChange={setPrivilegedFilter} filterOptions={[{value:'true',label:'Privileged'},{value:'false',label:'Standard'}]}/>}>{loading ? <div className="empty">Loading roles...</div> : error ? <div className="empty">{error}</div> : !roles || roles.length === 0 ? <div className="empty">No roles found.</div> : filteredRoles.length === 0 ? <div className="empty">No roles match this filter.</div> : <table><thead><tr><th>Role</th><th>Description</th><th>Provider</th><th>Privileged</th><th>Status</th></tr></thead><tbody>{filteredRoles.map(r => <tr key={r.id}><td className="user-name">{r.name}</td><td>{r.description || '—'}</td><td>Microsoft Entra ID</td><td><span className={`risk ${r.is_privileged ? 'risk-high' : 'risk-low'}`}>{r.is_privileged ? 'Yes' : 'No'}</span></td><td><StatusBadge status={r.status}/></td></tr>)}</tbody></table>}</TablePanel></Page>;
 }
+interface ApiBirthrightPolicy { id: string; name: string; match_field: string; match_value: string; resource_type: string; resource_id: string; app_role_external_id: string | null; assignment_type: string; status: string; created_at: string; }
+function BirthrightPoliciesPanel() {
+  const auth = useAuth();
+  const { data: birthrightPolicies, error: birthrightError, loading: birthrightLoading, reload: reloadBirthright } = useApiResource<ApiBirthrightPolicy[]>('/api/v1/policies/birthright');
+  const { data: groups } = useApiResource<ApiGroup[]>('/api/v1/groups');
+  const { data: roles } = useApiResource<ApiRole[]>('/api/v1/roles');
+  const { data: applications } = useApiResource<ApiApplication[]>('/api/v1/applications');
+  const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  const emptyForm = { name: '', match_field: 'department', match_value: '', resource_type: 'GROUP', resource_id: '', assignment_type: 'PERMANENT' };
+  const [form, setForm] = useState(emptyForm);
+  const targets: Array<ApiGroup | ApiRole | ApiApplication> = form.resource_type === 'GROUP' ? (groups || []) : form.resource_type === 'ROLE' ? (roles || []) : (applications || []);
+  const resourceLabel = (p: ApiBirthrightPolicy) => (p.resource_type === 'GROUP' ? groups : p.resource_type === 'ROLE' ? roles : applications)?.find(t => t.id === p.resource_id)?.name || p.resource_id;
+
+  const create = async () => {
+    if (!form.name.trim() || !form.match_value.trim() || !form.resource_id) { setMessage('Complete every field.'); return; }
+    setSaving(true); setMessage('');
+    try {
+      const response = await auth.apiRequest('/api/v1/policies/birthright', { method: 'POST', body: JSON.stringify(form) });
+      const body = await response.json().catch(() => null);
+      if (response.ok) { setOpen(false); setForm(emptyForm); reloadBirthright(); }
+      else setMessage(body?.error?.message || 'Unable to create this policy.');
+    } catch { setMessage('Unable to create this policy.'); } finally { setSaving(false); }
+  };
+  const toggleStatus = async (policy: ApiBirthrightPolicy) => {
+    await auth.apiRequest(`/api/v1/policies/birthright/${policy.id}`, { method: 'PATCH', body: JSON.stringify({ status: policy.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE' }) });
+    reloadBirthright();
+  };
+  const remove = async (policy: ApiBirthrightPolicy) => {
+    if (!window.confirm(`Delete birthright policy "${policy.name}"? This does not remove access already granted.`)) return;
+    await auth.apiRequest(`/api/v1/policies/birthright/${policy.id}`, { method: 'DELETE' });
+    reloadBirthright();
+  };
+
+  return <section className="panel" style={{marginBottom:18}}>
+    <div className="panel-head"><h2>Birthright policies</h2><button className="btn btn-primary" onClick={() => { setOpen(true); setMessage(''); }}><Plus size={14}/> Add rule</button></div>
+    <div className="detail-section">
+      <p className="subtitle" style={{marginBottom:14}}>Attribute-driven auto-assignment: when a joiner or mover's <code>department</code> or <code>job title</code> matches a rule, they're automatically made <strong>eligible</strong> for that Group, Role, or Application — same as any other assignment, still activated by hand. Evaluated automatically whenever an Onboarding CSV import is committed.</p>
+      {open && <div className="notice" style={{marginBottom:14}}>
+        <div className="key-grid" style={{marginBottom:10}}>
+          <label className="key"><span>Rule name</span><input className="select" value={form.name} onChange={event => setForm({...form, name: event.target.value})} placeholder="e.g. Finance department access"/></label>
+          <label className="key"><span>Match on</span><select className="select" value={form.match_field} onChange={event => setForm({...form, match_field: event.target.value})}><option value="department">Department</option><option value="job_title">Job title</option></select></label>
+          <label className="key"><span>Equals</span><input className="select" value={form.match_value} onChange={event => setForm({...form, match_value: event.target.value})} placeholder="e.g. Finance"/></label>
+          <label className="key"><span>Grant</span><select className="select" value={form.resource_type} onChange={event => setForm({...form, resource_type: event.target.value, resource_id: ''})}><option value="GROUP">Group</option><option value="ROLE">Role</option><option value="APPLICATION">Application</option></select></label>
+          <label className="key"><span>Target</span><select className="select" value={form.resource_id} onChange={event => setForm({...form, resource_id: event.target.value})}><option value="">Select a target</option>{targets.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
+          <label className="key"><span>Assignment type</span><select className="select" value={form.assignment_type} onChange={event => setForm({...form, assignment_type: event.target.value})}><option value="PERMANENT">Permanent</option><option value="TEMPORARY">Temporary</option></select></label>
+        </div>
+        <div style={{display:'flex',gap:8}}><button className="btn btn-primary" disabled={saving} onClick={() => void create()}>{saving ? 'Saving...' : 'Create rule'}</button><button className="btn" onClick={() => { setOpen(false); setForm(emptyForm); }}>Cancel</button></div>
+      </div>}
+      {message && <div className="notice" style={{marginBottom:14}}>{message}</div>}
+      <div className="table-wrap">{birthrightLoading ? <div className="empty">Loading...</div> : birthrightError ? <div className="empty">{birthrightError}</div> : !birthrightPolicies || birthrightPolicies.length === 0 ? <div className="empty">No birthright policies yet.</div> : <table><thead><tr><th>Rule</th><th>Condition</th><th>Grants</th><th>Type</th><th>Status</th><th></th></tr></thead><tbody>{birthrightPolicies.map(p => <tr key={p.id}><td className="user-name">{p.name}</td><td>{p.match_field} = {p.match_value}</td><td>{p.resource_type.toLowerCase()}: {resourceLabel(p)}</td><td>{p.assignment_type}</td><td><StatusBadge status={p.status}/></td><td style={{display:'flex',gap:6}}><button className="btn" onClick={() => void toggleStatus(p)}>{p.status === 'ACTIVE' ? 'Disable' : 'Enable'}</button><button className="btn" onClick={() => void remove(p)}>Delete</button></td></tr>)}</tbody></table>}</div>
+    </div>
+  </section>;
+}
 function PoliciesPage() {
   const auth = useAuth();
   const { data: providers, reload: reloadProviders } = useApiResource<ApiProvider[]>('/api/v1/providers');
@@ -1057,6 +1131,7 @@ function PoliciesPage() {
   };
   return <Page eyebrow="GOVERNANCE" title="Policies" subtitle="Rules that govern access duration, approvals, and assurance." action={<button className="btn btn-primary"><Plus size={14}/> Create policy</button>}>
     {provider && <section className="panel" style={{marginBottom:18}}><div className="panel-head"><h2>Self-activation (PIM)</h2><span className="badge neutral">Up to {provider.max_self_activation_hours} hours</span></div><div className="detail-section"><p className="subtitle" style={{marginBottom:14}}>The single, universal maximum duration any end user may self-activate their own eligible access for — Group, Role, Application role, or Access Package alike — from their My Access dashboard, mirroring Entra PIM's activation cap. Raising this takes effect immediately for every eligible assignment across the whole tenant.</p><div style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap'}}><label className="key"><span>Maximum self-activation duration (hours)</span><input className="select" type="number" min={1} max={8760} placeholder={String(provider.max_self_activation_hours)} value={activationHoursValue} onChange={event => setActivationHoursValue(event.target.value)}/></label><button className="btn btn-primary" disabled={activationSaving || !activationHoursValue} onClick={() => void saveActivationCap(Number(activationHoursValue))}><Clock3 size={14}/> {activationSaving ? 'Saving...' : 'Save limit'}</button></div>{activationMessage && <div className="notice" style={{marginTop:12}}>{activationMessage}</div>}</div></section>}
+    <BirthrightPoliciesPanel/>
     <TablePanel toolbar={<Toolbar placeholder="Search policies"/>}><table><thead><tr><th>Policy name</th><th>Description</th><th>Scope</th><th>Max duration</th><th>Approval</th><th>MFA</th><th>Ticket</th><th>Status</th><th></th></tr></thead><tbody>{policies.map(p => <tr key={p.name}><td className="user-name">{p.name}</td><td>{p.description}</td><td>{p.scope}</td><td>{p.max}</td><td>{p.approval}</td><td>{p.mfa}</td><td>{p.ticket}</td><td><StatusBadge status={p.status}/></td><td><button className="btn">Edit</button></td></tr>)}</tbody></table></TablePanel>
   </Page>;
 }
@@ -1113,6 +1188,116 @@ function SyncPage() {
     {provider && <section className="panel" style={{marginBottom:18}}><div className="panel-head"><h2>Scheduled sync</h2><span className="badge neutral">{provider.sync_interval_minutes ? `Every ${provider.sync_interval_minutes} min` : 'Not scheduled'}</span></div><div className="detail-section"><div className="key-grid" style={{marginBottom:14}}><div className="key"><span>Current schedule</span><strong>{provider.sync_interval_minutes ? `Every ${provider.sync_interval_minutes} minutes` : 'Manual only'}</strong></div><div className="key"><span>Last sync</span><strong>{provider.last_sync_at ? new Date(provider.last_sync_at).toLocaleString() : 'Never'}</strong></div></div><div style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap'}}><label className="key"><span>Run every (minutes)</span><input className="select" type="number" min={1} max={10080} placeholder="e.g. 60" value={intervalValue} onChange={event => setIntervalValue(event.target.value)}/></label><button className="btn btn-primary" disabled={scheduleSaving || !intervalValue} onClick={() => void saveSchedule(Number(intervalValue))}><Clock3 size={14}/> {scheduleSaving ? 'Saving...' : 'Schedule sync'}</button>{provider.sync_interval_minutes && <button className="btn" disabled={scheduleSaving} onClick={() => void saveSchedule(null)}>Disable schedule</button>}</div>{scheduleMessage && <div className="notice" style={{marginTop:12}}>{scheduleMessage}</div>}</div></section>}
     <div className="notice" style={{marginBottom:18}}>Looking for the self-activation time limit (PIM)? That's now under <strong>Policies</strong> in the Governance section.</div>
     <TablePanel toolbar={<Toolbar placeholder="" filterLabel="All statuses" filterValue={statusFilter} onFilterChange={setStatusFilter} filterOptions={statusOptions}/>}>{providersLoading || loading ? <div className="empty">Loading sync history...</div> : !provider ? <div className="empty">No identity provider is configured.</div> : error ? <div className="empty">{error}</div> : !runs || runs.length === 0 ? <div className="empty">No sync runs yet.</div> : filteredRuns.length === 0 ? <div className="empty">No sync runs match this filter.</div> : <table><thead><tr><th>Started</th><th>Completed</th><th>Users</th><th>Groups</th><th>Roles</th><th>Errors</th><th>Status</th></tr></thead><tbody>{filteredRuns.map(run => <tr key={run.id}><td className="user-name">{new Date(run.started_at).toLocaleString()}</td><td>{run.completed_at ? new Date(run.completed_at).toLocaleString() : '—'}</td><td>{run.users_processed}</td><td>{run.groups_processed}</td><td>{run.roles_processed}</td><td>{run.errors_count}</td><td><StatusBadge status={run.status}/></td></tr>)}</tbody></table>}</TablePanel>
+  </Page>;
+}
+function actionBadgeClass(action: string): string { return action === 'CREATE' || action === 'UPDATE' ? 'success' : action === 'DISABLE' ? 'warning' : action === 'ERROR' ? 'danger' : 'neutral'; }
+function OnboardingPage() {
+  const auth = useAuth();
+  const { data: imports, loading: importsLoading, error: importsError, reload: reloadImports } = useApiResource<ApiOnboardingImport[]>('/api/v1/onboarding/imports');
+  const [fileName, setFileName] = useState('');
+  const [csvContent, setCsvContent] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [committing, setCommitting] = useState(false);
+  const [message, setMessage] = useState('');
+  const [currentImport, setCurrentImport] = useState<ApiOnboardingImport | null>(null);
+  const [previewRows, setPreviewRows] = useState<ApiOnboardingImportRecord[] | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  const onFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setFileName(file.name); setMessage(''); setCurrentImport(null); setPreviewRows(null);
+    const reader = new FileReader();
+    reader.onload = () => setCsvContent(String(reader.result || ''));
+    reader.readAsText(file);
+  };
+
+  const loadPreview = async (importId: string) => {
+    setPreviewLoading(true);
+    try { const response = await auth.apiRequest(`/api/v1/onboarding/imports/${importId}/preview`); if (response.ok) setPreviewRows(await response.json()); }
+    finally { setPreviewLoading(false); }
+  };
+
+  const upload = async () => {
+    if (!csvContent || !fileName) return;
+    setUploading(true); setMessage(''); setCurrentImport(null); setPreviewRows(null);
+    try {
+      const response = await auth.apiRequest('/api/v1/onboarding/csv', { method: 'POST', body: JSON.stringify({ filename: fileName, content: csvContent }) });
+      const body = await response.json().catch(() => null);
+      if (response.ok && body) {
+        setCurrentImport(body);
+        reloadImports();
+        if (body.status === 'VALIDATED') void loadPreview(body.id);
+        else setMessage(body.error_summary?.error ? String(body.error_summary.error) : 'Validation failed — see details below.');
+      } else setMessage(body?.error?.message || 'Unable to upload the CSV file.');
+    } catch { setMessage('Unable to upload the CSV file.'); } finally { setUploading(false); }
+  };
+
+  const commit = async () => {
+    if (!currentImport) return;
+    setCommitting(true); setMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/onboarding/imports/${currentImport.id}/commit`, { method: 'POST' });
+      const body = await response.json().catch(() => null);
+      if (response.ok && body) { setCurrentImport(body); setMessage('Import committed.'); reloadImports(); }
+      else setMessage(body?.error?.message || 'Unable to commit this import.');
+    } catch { setMessage('Unable to commit this import.'); } finally { setCommitting(false); }
+  };
+
+  const reset = () => { setFileName(''); setCsvContent(''); setCurrentImport(null); setPreviewRows(null); setMessage(''); };
+
+  return <Page eyebrow="SYSTEM" title="Onboarding" subtitle="Bring identities into AccessPilot from an HR export or a one-off CSV — separate from, and ahead of, any real Entra provisioning.">
+    <section className="panel" style={{marginBottom:18}}>
+      <div className="panel-head"><h2>Upload a CSV</h2></div>
+      <div className="detail-section">
+        <p className="subtitle" style={{marginBottom:14}}>Required columns: <code>employeeId, firstName, lastName, email, department, status</code> (status is <code>ACTIVE</code> or <code>TERMINATED</code>). Optional: <code>jobTitle</code>. On commit, a new/changed row also provisions a <strong>real account</strong> via your configured connector (Microsoft Graph, or the mock connector in dev) and immediately grants any matching <strong>birthright policy</strong> access for real — the <code>email</code> column's domain must be a verified domain on your Entra tenant for the real account to succeed; if it can't be provisioned, the identity still lands locally as before. A <code>TERMINATED</code> row disables the identity and automatically revokes any access it still holds.</p>
+        <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+          <label className="btn"><UploadCloud size={14}/> {fileName || 'Choose CSV file'}<input type="file" accept=".csv,text/csv" style={{display:'none'}} onChange={onFileChange}/></label>
+          <button className="btn btn-primary" disabled={!csvContent || uploading} onClick={() => void upload()}>{uploading ? 'Validating...' : 'Upload & validate'}</button>
+          {(fileName || currentImport) && <button className="btn" onClick={reset}>Start over</button>}
+        </div>
+        {message && <div className="notice" style={{marginTop:14}}>{message}</div>}
+      </div>
+    </section>
+
+    {currentImport && <section className="panel" style={{marginBottom:18}}>
+      <div className="panel-head"><h2>{currentImport.filename}</h2><StatusBadge status={currentImport.status}/></div>
+      <div className="detail-section">
+        <div className="key-grid" style={{marginBottom:14}}>
+          <div className="key"><span>Total rows</span><strong>{currentImport.total_records}</strong></div>
+          <div className="key"><span>Create</span><strong>{currentImport.created_count}</strong></div>
+          <div className="key"><span>Update</span><strong>{currentImport.updated_count}</strong></div>
+          <div className="key"><span>No change</span><strong>{currentImport.no_change_count}</strong></div>
+          <div className="key"><span>Disable (leavers)</span><strong>{currentImport.disabled_count}</strong></div>
+          <div className="key"><span>Row errors</span><strong>{currentImport.failed_count}</strong></div>
+          {currentImport.status === 'COMMITTED' && <><div className="key"><span>Real accounts provisioned</span><strong>{currentImport.real_accounts_provisioned_count}</strong></div><div className="key"><span>Birthright grants</span><strong>{currentImport.birthright_assignments_created_count}</strong></div><div className="key"><span>Access revoked</span><strong>{currentImport.access_revoked_count}</strong></div><div className="key"><span>Revoke failures</span><strong>{currentImport.access_revoke_failed_count}</strong></div></>}
+        </div>
+        {currentImport.error_summary && <div className="notice" style={{marginBottom:14}}>{String(currentImport.error_summary.error || 'Validation failed.')}{Array.isArray(currentImport.error_summary.missingColumns) && <> Missing: {(currentImport.error_summary.missingColumns as string[]).join(', ')}</>}</div>}
+        {currentImport.status === 'VALIDATED' && <button className="btn btn-primary" disabled={committing} onClick={() => void commit()}>{committing ? 'Committing...' : 'Commit import'}</button>}
+        {currentImport.status === 'COMMITTED' && <div className="notice">Committed — identities now appear under Users. {currentImport.real_accounts_provisioned_count > 0 && <>{currentImport.real_accounts_provisioned_count} real account{currentImport.real_accounts_provisioned_count === 1 ? '' : 's'} provisioned{currentImport.birthright_assignments_created_count > 0 ? ` with ${currentImport.birthright_assignments_created_count} birthright grant${currentImport.birthright_assignments_created_count === 1 ? '' : 's'} applied immediately. ` : '. '}</>}Any TERMINATED leavers had their access revoked automatically.</div>}
+      </div>
+      {previewLoading && <div className="empty">Loading preview...</div>}
+      {previewRows && <div className="table-wrap"><table><thead><tr><th>Row</th><th>Employee ID</th><th>Action</th><th>Detail</th></tr></thead><tbody>{previewRows.map(row => <tr key={row.row_number}><td>{row.row_number}</td><td className="user-name">{row.employee_id || '—'}</td><td><span className={`badge ${actionBadgeClass(row.action)}`}>{row.action}</span></td><td>{row.error_message || (row.raw_data ? `${row.raw_data.firstName || ''} ${row.raw_data.lastName || ''} · ${row.raw_data.department || ''}` : '—')}</td></tr>)}</tbody></table></div>}
+    </section>}
+
+    <section className="panel" style={{marginBottom:18}}>
+      <div className="panel-head"><h2>Past imports</h2></div>
+      <div className="table-wrap">{importsLoading ? <div className="empty">Loading...</div> : importsError ? <div className="empty">{importsError}</div> : !imports || imports.length === 0 ? <div className="empty">No imports yet.</div> : <table><thead><tr><th>Filename</th><th>Status</th><th>Rows</th><th>Created</th><th>Updated</th><th>Disabled</th><th>Errors</th><th>Uploaded</th></tr></thead><tbody>{imports.map(imp => <tr key={imp.id}><td className="user-name">{imp.filename}</td><td><StatusBadge status={imp.status}/></td><td>{imp.total_records}</td><td>{imp.created_count}</td><td>{imp.updated_count}</td><td>{imp.disabled_count}</td><td>{imp.failed_count}</td><td>{new Date(imp.created_at).toLocaleString()}</td></tr>)}</tbody></table>}</div>
+    </section>
+
+    <section className="panel">
+      <div className="panel-head"><h2>API reference — for a future HR system integration</h2></div>
+      <div className="detail-section">
+        <p className="subtitle" style={{marginBottom:12}}>A future HR system can call these endpoints directly instead of a manual upload — same validation, same leaver-revocation behavior. Full interactive schema (request/response bodies, try-it-out): <a href={`${apiBaseUrl}/docs`} target="_blank" rel="noreferrer" style={{color:'var(--teal)',fontWeight:700}}>{apiBaseUrl}/docs <ExternalLink size={12} style={{verticalAlign:'middle'}}/></a></p>
+        <table style={{width:'100%'}}><tbody>
+          <tr><td style={{fontWeight:700,paddingRight:16,paddingBottom:8}}><code>POST /api/v1/onboarding/csv</code></td><td style={{paddingBottom:8}}>Upload &amp; validate a CSV — JSON body <code>{'{ filename, content }'}</code></td></tr>
+          <tr><td style={{fontWeight:700,paddingRight:16,paddingBottom:8}}><code>GET /api/v1/onboarding/imports/{'{id}'}</code></td><td style={{paddingBottom:8}}>Check an import's status and counts</td></tr>
+          <tr><td style={{fontWeight:700,paddingRight:16,paddingBottom:8}}><code>GET /api/v1/onboarding/imports/{'{id}'}/preview</code></td><td style={{paddingBottom:8}}>Row-by-row planned action before committing</td></tr>
+          <tr><td style={{fontWeight:700,paddingRight:16}}><code>POST /api/v1/onboarding/imports/{'{id}'}/commit</code></td><td>Apply the import — creates/updates/disables identities, revokes leavers' access</td></tr>
+        </tbody></table>
+        <p className="subtitle" style={{marginTop:12}}>Requires an Admin bearer token from the same Entra app registration as the rest of AccessPilot's API.</p>
+      </div>
+    </section>
   </Page>;
 }
 function Profile() { return <Page eyebrow="SELF-SERVICE" title="Profile" subtitle="Your AccessPilot identity and application role."><div className="detail-layout"><section className="panel"><div className="detail-section"><div className="user-cell"><span className="avatar" style={{width:52,height:52}}>{currentUser.initials}</span><div><h2>{currentUser.name}</h2><p className="subtitle">{currentUser.title}</p></div></div></div><div className="detail-section"><div className="detail-title"><h2>Identity details</h2><StatusBadge status="Active"/></div><div className="key-grid"><div className="key"><span>Email</span><strong>{currentUser.email}</strong></div><div className="key"><span>Department</span><strong>{currentUser.department}</strong></div><div className="key"><span>Identity provider</span><strong>Microsoft Entra ID</strong></div><div className="key"><span>Last sign-in</span><strong>Today, 09:42 UTC</strong></div></div></div></section><aside className="panel"><div className="panel-head"><h2>Application role</h2></div><div className="detail-section"><div className="user-cell"><span className="stat-icon"><ShieldCheck size={16}/></span><div><strong>AccessPilot.Admin</strong><div className="user-email">Development role switcher active</div></div></div><p className="subtitle" style={{lineHeight:1.6,marginTop:18}}>Your role determines which console areas are visible. Authorization is enforced by the backend in production.</p></div></aside></div></Page>; }

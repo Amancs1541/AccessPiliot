@@ -32,21 +32,24 @@ def configure(monkeypatch):
     get_settings.cache_clear()
     monkeypatch.setattr(auth, "PyJWKClient", FakeJWKClient)
 
-def test_valid_user_token() -> None:
-    user = auth.decode_access_token(token())
+@pytest.mark.asyncio
+async def test_valid_user_token() -> None:
+    user = await auth.decode_access_token(token())
     assert user.subject == "user-1"
     assert user.roles == ("AccessPilot.User",)
 
-def test_invalid_signature() -> None:
+@pytest.mark.asyncio
+async def test_invalid_signature() -> None:
     other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     with pytest.raises(auth.AccessPilotError) as error:
-        auth.decode_access_token(jwt.encode({"sub":"user-1","tid":"tenant-test","aud":"api-test","iss":"https://sts.windows.net/tenant-test/","exp":datetime.now(timezone.utc)+timedelta(minutes=5),"roles":["AccessPilot.User"]}, other, algorithm="RS256"))
+        await auth.decode_access_token(jwt.encode({"sub":"user-1","tid":"tenant-test","aud":"api-test","iss":"https://sts.windows.net/tenant-test/","exp":datetime.now(timezone.utc)+timedelta(minutes=5),"roles":["AccessPilot.User"]}, other, algorithm="RS256"))
     assert error.value.code == "INVALID_TOKEN"
 
-def test_expired_wrong_audience_issuer_tenant_and_missing_role() -> None:
+@pytest.mark.asyncio
+async def test_expired_wrong_audience_issuer_tenant_and_missing_role() -> None:
     cases = [({"exp": datetime.now(timezone.utc) - timedelta(minutes=1)}, "TOKEN_EXPIRED"), ({"aud": "other"}, "INVALID_AUDIENCE"), ({"iss": "https://sts.windows.net/other/"}, "INVALID_ISSUER"), ({"tid": "other"}, "INVALID_TENANT"), ({"roles": []}, "INVALID_TOKEN")]
     for changes, expected in cases:
-        with pytest.raises(auth.AccessPilotError) as error: auth.decode_access_token(token(**changes))
+        with pytest.raises(auth.AccessPilotError) as error: await auth.decode_access_token(token(**changes))
         assert error.value.code == expected
 
 @pytest.mark.asyncio

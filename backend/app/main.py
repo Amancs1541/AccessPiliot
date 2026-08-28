@@ -5,9 +5,8 @@ import logging
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.api.v1.router import router as v1_router
 from app.core.config import get_settings
@@ -25,12 +24,33 @@ settings = get_settings()
 logger = logging.getLogger("accesspilot.api")
 
 
-class RequestIdMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        request.state.request_id = request.headers.get("X-Request-ID") or str(uuid4())
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = request.state.request_id
-        return response
+class RequestIdMiddleware:
+    """Plain ASGI middleware (not Starlette's BaseHTTPMiddleware) — BaseHTTPMiddleware has a well-known deadlock
+    class where a client disconnecting mid-request (a closed tab, an aborted fetch) can wedge its internal
+    send/receive bridge, freezing every subsequent request through it, including completely unrelated ones. Raw
+    ASGI has no such bridge to wedge."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request_id = None
+        for name, value in scope.get("headers", []):
+            if name == b"x-request-id":
+                request_id = value.decode()
+                break
+        request_id = request_id or str(uuid4())
+        scope.setdefault("state", {})["request_id"] = request_id
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                message.setdefault("headers", []).append((b"x-request-id", request_id.encode()))
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
 
 
 @asynccontextmanager
