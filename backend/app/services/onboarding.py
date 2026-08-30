@@ -192,7 +192,7 @@ async def _find_or_create_identity(session: AsyncSession, employee_id: str, norm
             await session.flush()
             return existing, True, False
 
-        real_user = await provision_real_account(session, display_name=normalized.display_name, email=normalized.email, department=normalized.department, job_title=normalized.job_title, request_id=request_id)
+        real_user = await provision_real_account(session, display_name=normalized.display_name, email=normalized.email, given_name=normalized.given_name, surname=normalized.surname, department=normalized.department, job_title=normalized.job_title, request_id=request_id)
         if real_user is None:
             await session.flush()
             return existing, False, False
@@ -212,7 +212,7 @@ async def _find_or_create_identity(session: AsyncSession, employee_id: str, norm
         await session.flush()
         return existing, True, True
 
-    real_user = await provision_real_account(session, display_name=normalized.display_name, email=normalized.email, department=normalized.department, job_title=normalized.job_title, request_id=request_id)
+    real_user = await provision_real_account(session, display_name=normalized.display_name, email=normalized.email, given_name=normalized.given_name, surname=normalized.surname, department=normalized.department, job_title=normalized.job_title, request_id=request_id)
     if real_user is not None:
         real_user.employee_id, real_user.source = employee_id, real_user.source or "CSV_ONBOARDING"
         await session.flush()
@@ -264,8 +264,12 @@ async def commit_import(session: AsyncSession, import_id: UUID, actor_subject: s
             job_title=(row.get("jobTitle") or "").strip() or None,
             status="ACTIVE",
         )
-        identity, is_real, newly_provisioned = await _find_or_create_identity(session, record.employee_id, normalized, request_id)
-        birthright_assignments_created += len(await evaluate_birthright_policies(session, identity.id, actor_subject, request_id, bypass_activation=is_real))
+        identity, _, newly_provisioned = await _find_or_create_identity(session, record.employee_id, normalized, request_id)
+        # Birthright grants always land ELIGIBLE, never bypassed straight to ACTIVE — even for a real, freshly
+        # provisioned account. This matches the rest of AccessPilot's custom PIM model consistently: birthright
+        # decides WHAT a joiner is entitled to, but the person (or an Admin on their behalf) still has to
+        # self-activate it via My Access, exactly like every other eligible grant in the app.
+        birthright_assignments_created += len(await evaluate_birthright_policies(session, identity.id, actor_subject, request_id))
         if newly_provisioned:
             real_accounts_provisioned += 1
 

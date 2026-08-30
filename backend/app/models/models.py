@@ -32,6 +32,7 @@ class IdentityProvider(Base):
     graph_client_id: Mapped[Optional[str]] = mapped_column(String(255)); graph_client_secret_encrypted: Mapped[Optional[str]] = mapped_column(Text)
     sync_interval_minutes: Mapped[Optional[int]] = mapped_column(Integer)
     max_self_activation_hours: Mapped[int] = mapped_column(Integer, nullable=False, server_default="8")
+    provisioning_domain: Mapped[Optional[str]] = mapped_column(String(255)); username_convention: Mapped[Optional[str]] = mapped_column(String(100))
     created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at()
 
     @property
@@ -175,3 +176,65 @@ class OnboardingImportRecord(Base):
     action: Mapped[str] = mapped_column(String(20), nullable=False); error_message: Mapped[Optional[str]] = mapped_column(Text); raw_data: Mapped[Optional[dict]] = mapped_column("raw_data", JSON)
     created_at: Mapped[datetime] = created_at()
     __table_args__ = (Index("ix_onboarding_import_records_import", "import_id"),)
+
+
+class BootstrapCredential(Base):
+    """First-run-only local login for the AccessPilot portal itself — deliberately separate from `identity_providers`
+    (the HR-sync/provisioning connector table). Exists only until a real portal login IDP is configured and
+    validated; the row is deleted the instant setup completes, which also makes every setup-session token issued
+    against its `session_secret` permanently unverifiable — no separate expiry/revocation bookkeeping needed."""
+    __tablename__ = "bootstrap_credentials"
+    id: Mapped[UUID] = uuid_pk(); username: Mapped[str] = mapped_column(String(100), nullable=False); password_hash: Mapped[str] = mapped_column(String(255), nullable=False); session_secret: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = created_at()
+
+
+class PortalAuthConfig(Base):
+    """The IDP used to log into the AccessPilot portal itself — separate from `identity_providers` (the HR-sync/
+    provisioning connector), even when both happen to point at the same real tenant. Only one row should ever be
+    `is_active`; a pending (inactive) row is used during setup while its real-login test is in flight."""
+    __tablename__ = "portal_auth_configs"
+    id: Mapped[UUID] = uuid_pk(); idp_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    tenant_id: Mapped[Optional[str]] = mapped_column(String(200)); client_id: Mapped[Optional[str]] = mapped_column(String(255)); authority: Mapped[Optional[str]] = mapped_column(String(500))
+    issuer: Mapped[Optional[str]] = mapped_column(String(500)); audience: Mapped[Optional[str]] = mapped_column(String(500)); scope: Mapped[Optional[str]] = mapped_column(String(500)); redirect_uri: Mapped[Optional[str]] = mapped_column(String(500))
+    is_active: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="false")
+    created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at()
+
+
+class BreakGlassAccount(Base):
+    """Local username/password emergency recovery account for the AccessPilot portal — created during setup,
+    dormant (`is_active=False`) until the real portal IDP is validated and setup completes. Not a normal login
+    path: meant only for recovering portal access if the configured IDP itself later breaks."""
+    __tablename__ = "breakglass_accounts"
+    id: Mapped[UUID] = uuid_pk(); username: Mapped[str] = mapped_column(String(100), nullable=False, unique=True); password_hash: Mapped[str] = mapped_column(String(255), nullable=False); session_secret: Mapped[Optional[str]] = mapped_column(String(255))
+    emergency_path_token: Mapped[Optional[str]] = mapped_column(String(64), unique=True)
+    is_active: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="false")
+    created_at: Mapped[datetime] = created_at(); last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+
+class SecuritySettings(Base):
+    """Singleton row (there is only ever one) governing idle-session behavior for every signed-in user, admin and
+    end-user alike — blur the screen after `blur_after_minutes` of inactivity, and/or show a click-to-resume lock
+    screen after `lock_after_minutes`. Both are independent on/off toggles with their own threshold; the lock
+    never signs the user out — it only requires an explicit click to dismiss, the underlying session is untouched."""
+    __tablename__ = "security_settings"
+    id: Mapped[UUID] = uuid_pk()
+    blur_enabled: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="false")
+    blur_after_minutes: Mapped[int] = mapped_column(nullable=False, default=1, server_default="1")
+    lock_enabled: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="false")
+    lock_after_minutes: Mapped[int] = mapped_column(nullable=False, default=5, server_default="5")
+    updated_at: Mapped[datetime] = updated_at()
+
+
+class BrandingSettings(Base):
+    """Singleton row governing white-label branding: the big centered logo on the public sign-in screen, the
+    small sidebar logo inside the authenticated app, and the "Powered by" attribution text shown on both. Logos
+    are stored as base64 data URIs directly in the row (this app's established convention for small binary
+    uploads without adding python-multipart as a dependency — see the CSV onboarding upload). NULL fields mean
+    "use the bundled default" — every deployment renders identically to before this feature existed until an
+    Admin deliberately uploads something via the Branding settings page."""
+    __tablename__ = "branding_settings"
+    id: Mapped[UUID] = uuid_pk()
+    sign_in_logo: Mapped[Optional[str]] = mapped_column(Text)
+    internal_logo: Mapped[Optional[str]] = mapped_column(Text)
+    powered_by_text: Mapped[Optional[str]] = mapped_column(String(100))
+    updated_at: Mapped[datetime] = updated_at()

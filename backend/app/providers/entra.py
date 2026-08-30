@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 
 from app.core.config import get_settings
-from app.providers.base import CreatedUser, IdentityProvider, NewGroupRequest, NewUserRequest, NormalizedApplication, NormalizedApplicationRole, NormalizedGroup, NormalizedRole, NormalizedUser, ProviderConflictError
+from app.providers.base import CreatedUser, IdentityProvider, NewGroupRequest, NewUserRequest, NormalizedApplication, NormalizedApplicationRole, NormalizedDomain, NormalizedGroup, NormalizedRole, NormalizedUser, ProviderConflictError
 from app.providers.graph_client import GraphClient, GraphCredentials, GraphError
 from app.security.credential_encryption import CredentialEncryptionError, decrypt_credential
 from app.security.secrets import SecretReferenceStore
@@ -356,5 +356,10 @@ class EntraProvider(IdentityProvider):
                 body["description"] = request.description
             response = await client.request("POST", "/groups", json=body)
         return self._group_from_graph(response.json())
+
+    async def get_domains(self) -> list[NormalizedDomain]:
+        async with self._client() as client:
+            items = await client.get_all("/domains")
+        return [NormalizedDomain(name=item["id"], is_verified=bool(item.get("isVerified")), is_default=bool(item.get("isDefault"))) for item in items]
 
     async def _not_implemented(self): raise NotImplementedError("This Entra IAM operation is deferred to a later phase")

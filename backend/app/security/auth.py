@@ -9,9 +9,11 @@ import jwt
 from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.errors import AccessPilotError
+from app.db.session import get_db
 
 logger = logging.getLogger("accesspilot.auth")
 
@@ -33,10 +35,14 @@ def _get_jwks_client(jwks_url: str) -> PyJWKClient:
         _jwks_client_url = jwks_url
     return _jwks_client
 
-VALID_ROLES = {"AccessPilot.User", "AccessPilot.Admin"}
+VALID_ROLES = {"AccessPilot.User", "AccessPilot.Admin", "AccessPilot.BreakGlassAdmin"}
 PERMISSIONS = {
     "AccessPilot.User": {"ME_READ", "DASHBOARD_USER_READ", "ACCESS_REQUEST_CREATE", "ACCESS_REQUEST_READ_SELF", "ACCESS_REQUEST_CANCEL_SELF", "ASSIGNMENT_READ_SELF", "ASSIGNMENT_ACTIVATE_SELF", "ASSIGNMENT_REVOKE_SELF"},
-    "AccessPilot.Admin": {"ME_READ", "DASHBOARD_ADMIN_READ", "USER_READ", "GROUP_READ", "GROUP_MANAGE", "ROLE_READ", "ROLE_MANAGE", "PROVIDER_READ", "PROVIDER_MANAGE", "PROVIDER_SYNC", "ACCESS_REQUEST_READ", "ACCESS_REQUEST_APPROVE", "ACCESS_REQUEST_REJECT", "ACCESS_REQUEST_CANCEL", "ASSIGNMENT_READ", "ASSIGNMENT_CREATE", "ASSIGNMENT_REVOKE", "ASSIGNMENT_EXTEND", "POLICY_READ", "POLICY_CREATE", "POLICY_UPDATE", "POLICY_DELETE", "AUDIT_READ", "SYNC_READ", "PACKAGE_READ", "PACKAGE_MANAGE", "ONBOARDING_READ", "ONBOARDING_MANAGE"},
+    "AccessPilot.Admin": {"ME_READ", "DASHBOARD_ADMIN_READ", "USER_READ", "GROUP_READ", "GROUP_MANAGE", "ROLE_READ", "ROLE_MANAGE", "PROVIDER_READ", "PROVIDER_MANAGE", "PROVIDER_SYNC", "ACCESS_REQUEST_READ", "ACCESS_REQUEST_APPROVE", "ACCESS_REQUEST_REJECT", "ACCESS_REQUEST_CANCEL", "ASSIGNMENT_READ", "ASSIGNMENT_CREATE", "ASSIGNMENT_REVOKE", "ASSIGNMENT_EXTEND", "POLICY_READ", "POLICY_CREATE", "POLICY_UPDATE", "POLICY_DELETE", "AUDIT_READ", "SYNC_READ", "PACKAGE_READ", "PACKAGE_MANAGE", "ONBOARDING_READ", "ONBOARDING_MANAGE", "SECURITY_SETTINGS_MANAGE", "BRANDING_MANAGE"},
+    # Deliberately narrow: the default landing role for the hidden /emergency-access/:token flow. Can see NOTHING
+    # else in the app — no users/groups/roles/assignments/etc. — until the holder explicitly elevates to full
+    # AccessPilot.Admin via POST /auth/breakglass-elevate (see _authenticate_via_portal_config_or_breakglass below).
+    "AccessPilot.BreakGlassAdmin": {"ME_READ", "PORTAL_AUTH_MANAGE", "BREAKGLASS_CREDENTIAL_MANAGE"},
 }
 
 @dataclass(frozen=True)
@@ -183,7 +189,36 @@ async def decode_access_token(token: str, *, request_id: str = "-") -> Authentic
     return AuthenticatedUser(str(claims["sub"]), claims.get("name", claims["sub"]), claims.get("preferred_username") or claims.get("email"), str(claims["tid"]), roles, claims)
 
 
-async def require_authenticated_user(request: Request, credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer)) -> AuthenticatedUser:
+async def _authenticate_via_portal_config_or_breakglass(db: AsyncSession, token: str) -> Optional[AuthenticatedUser]:
+    """Called only after the primary env-var Entra path has already failed. Returns None (never raises) if
+    neither fallback accepts the token, so the caller can re-raise the ORIGINAL primary-path error — keeping
+    error messages/codes unchanged for a deployment where this new setup flow was never used."""
+    from app.services.portal_auth import decode_breakglass_token, get_active_portal_auth_config, validate_token_against_config
+
+    active_config = await get_active_portal_auth_config(db)
+    if active_config is not None:
+        try:
+            claims = await validate_token_against_config(token, active_config)
+        except AccessPilotError:
+            claims = None
+        if claims is not None:
+            # NOTE: this "roles" claim shape is what Entra provides today; an actual Okta login flow (not yet
+            # built — see project memory's Phase 12 "next steps") may need its own role-extraction logic here
+            # once that connector type is real, rather than assuming Entra's exact claim shape generalizes.
+            roles = tuple(role for role in claims.get("roles", []) if role in VALID_ROLES)
+            if roles:
+                tenant = str(claims.get("tid") or active_config.tenant_id or "")
+                return AuthenticatedUser(str(claims["sub"]), claims.get("name", claims["sub"]), claims.get("preferred_username") or claims.get("email"), tenant, roles, claims)
+
+    result = await decode_breakglass_token(db, token)
+    if result is not None:
+        account, elevated = result
+        role = "AccessPilot.Admin" if elevated else "AccessPilot.BreakGlassAdmin"
+        return AuthenticatedUser(f"breakglass:{account.id}", f"Break-Glass ({account.username})", None, "breakglass", (role,), {"elevated": elevated})
+    return None
+
+
+async def require_authenticated_user(request: Request, credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer), db: AsyncSession = Depends(get_db)) -> AuthenticatedUser:
     if get_settings().environment == "development" and request.url.path == "/api/v1/me":
         authorization = request.headers.get("authorization")
         logger.info(
@@ -194,7 +229,18 @@ async def require_authenticated_user(request: Request, credentials: Optional[HTT
         )
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise _auth_error("AUTHENTICATION_REQUIRED", "Authentication is required.")
-    user = await decode_access_token(credentials.credentials, request_id=getattr(request.state, "request_id", "-"))
+    try:
+        user = await decode_access_token(credentials.credentials, request_id=getattr(request.state, "request_id", "-"))
+    except AccessPilotError as primary_error:
+        # Additive fallbacks ONLY — the env-var Entra path above is completely unchanged and always tried first,
+        # and its error is what gets raised if every fallback below also fails (preserving today's exact error
+        # behavior for a deployment where none of this new setup flow is in play). Tried in order: (1) an active
+        # PortalAuthConfig — a deployment that has completed the new setup wizard with its own IDP, which may or
+        # may not be the same tenant as the env-var config; (2) a break-glass session — dormant until setup
+        # activates it, meant purely for recovering portal access if the configured IDP itself is what's broken.
+        user = await _authenticate_via_portal_config_or_breakglass(db, credentials.credentials)
+        if user is None:
+            raise primary_error
     request.state.user = user
     if get_settings().environment == "development" and request.url.path == "/api/v1/me":
         claims = user.claims

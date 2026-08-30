@@ -89,10 +89,11 @@ async def test_policy_referencing_a_nonexistent_group_is_rejected(db_override):
 
 
 @pytest.mark.asyncio
-async def test_a_joiner_matching_a_birthright_policy_gets_a_real_immediate_grant(db_override):
-    """Core Phase 8+9 behavior: committing a CSV joiner provisions a REAL account (the MOCK connector here) and
-    grants birthright-matched access for real immediately (bypass_activation) — birthright is day-one, automatic
-    access, distinct from JIT/PIM access which still requires self-activation."""
+async def test_a_joiner_matching_a_birthright_policy_gets_an_eligible_grant_to_self_activate(db_override):
+    """Committing a CSV joiner provisions a REAL account (the MOCK connector here) and creates a birthright-matched
+    assignment — but it always lands ELIGIBLE, never bypassed straight to ACTIVE, even for a real account. This
+    matches the rest of AccessPilot's custom PIM model: birthright decides WHAT a joiner is entitled to, but they
+    (or an Admin on their behalf) still have to self-activate it via My Access, same as any other eligible grant."""
     group_id = await _seed_group(db_override.factory)
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -108,8 +109,8 @@ async def test_a_joiner_matching_a_birthright_policy_gets_a_real_immediate_grant
     async with db_override.factory() as session:
         assignments = (await session.execute(select(AccessAssignment).where(AccessAssignment.user_id == real_user.id))).scalars().all()
     assert len(assignments) == 1
-    assert assignments[0].status == "ACTIVE"  # real, immediate grant — birthright bypasses eligible/activate
-    assert assignments[0].bypass_activation is True
+    assert assignments[0].status == "ELIGIBLE"  # not auto-granted — the joiner activates it themselves
+    assert assignments[0].bypass_activation is False
     assert assignments[0].resource_type == "GROUP"
     assert str(assignments[0].resource_id) == group_id
     assert "Birthright policy" in assignments[0].justification
@@ -190,9 +191,8 @@ async def test_deleting_a_policy_removes_it_from_the_list(db_override):
 @pytest.mark.asyncio
 async def test_manual_evaluate_endpoint_applies_policies_to_an_already_synced_identity(db_override):
     """The manual endpoint is for identities that never went through CSV onboarding at all (e.g. a regular Entra
-    directory sync) — it grants ELIGIBLE only (bypass_activation=False), not an immediate real grant, since the
-    caller hasn't necessarily confirmed the target should get instant access the way a freshly provisioned
-    onboarding joiner does."""
+    directory sync) — it grants ELIGIBLE only (bypass_activation=False), same as every birthright grant now,
+    whether the target came from onboarding or an already-synced identity."""
     group_id = await _seed_group(db_override.factory)
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:

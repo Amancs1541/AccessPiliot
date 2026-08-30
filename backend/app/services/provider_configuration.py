@@ -9,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AccessPilotError
 from app.models import AuditLog, IdentityProvider, SyncError, SyncRun
+from app.providers.base import NormalizedDomain
 from app.providers.entra import EntraProvider
+from app.providers.graph_client import GraphError
 from app.providers.mock import MockProvider
 from app.schemas.providers import ProviderCreate, ProviderUpdate
 from app.security.credential_encryption import CredentialEncryptionError, encrypt_credential
@@ -89,3 +91,13 @@ async def test_provider(session: AsyncSession, provider_id: UUID, request_id: st
         raise AccessPilotError("PROVIDER_AUTHENTICATION_FAILED", "Provider credentials are not configured or could not be verified.", 502) from exc
     provider.status = "CONNECTED" if connected else "ERROR"
     await _audit(session, provider, "PROVIDER_CONNECTION_TESTED", request_id, "SUCCESS" if connected else "FAILURE"); await session.commit(); await session.refresh(provider); return provider
+
+async def list_domains(session: AsyncSession, provider_id: UUID) -> list[NormalizedDomain]:
+    """Live-fetches the connector's registered domains — the mapping engine's "fetch their fields and domain"
+    step — so an Admin can pick a KNOWN VERIFIED one for provisioning instead of trusting an arbitrary email
+    domain from a CSV row (which the target IdP would otherwise silently reject at account-creation time)."""
+    provider = await get_provider(session, provider_id)
+    try:
+        return await _connector(provider).get_domains()
+    except GraphError as exc:
+        raise AccessPilotError(exc.code, exc.message, exc.status_code) from exc

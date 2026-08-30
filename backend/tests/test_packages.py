@@ -492,6 +492,25 @@ async def test_set_eligibility_by_individual_user_makes_package_requestable(db_o
 
 
 @pytest.mark.asyncio
+async def test_set_eligibility_deduplicates_a_repeated_principal_instead_of_erroring(db_override):
+    """Real bug: access_package_eligibility has a unique (package_id, principal_type, principal_id) constraint —
+    submitting the same principal twice (trivial from the UI: add a row, its picker still shows an already-used
+    option) used to hit that constraint as an unhandled IntegrityError, silently rolling back the whole update.
+    The count staying at 1 no matter how many times "add" was clicked was the visible symptom."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/packages", json=_package_payload(ids))
+        package_id = created.json()["id"]
+        set_eligibility = await client.put(f"/api/v1/packages/{package_id}/eligibility", json={"principals": [
+            {"principal_type": "USER", "principal_id": str(ids["user_id"])},
+            {"principal_type": "USER", "principal_id": str(ids["user_id"])},
+        ]})
+    assert set_eligibility.status_code == 200
+    assert len(set_eligibility.json()["eligible_principals"]) == 1
+
+
+@pytest.mark.asyncio
 async def test_set_eligibility_by_group_includes_its_members(db_override):
     ids = await _seed_directory(db_override.factory)
     async with db_override.factory() as session:

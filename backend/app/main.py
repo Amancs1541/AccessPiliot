@@ -13,6 +13,7 @@ from app.core.config import get_settings
 from app.core.errors import AccessPilotError, access_pilot_error_handler, http_error_handler, unhandled_error_handler, validation_error_handler
 from app.core.logging import configure_logging
 from app.db.session import AsyncSessionLocal
+from app.services.bootstrap import ensure_bootstrap_credential
 from app.workers.activation import activation_worker_loop
 from app.workers.expiration import expiration_worker_loop
 from app.workers.scheduler import sync_scheduler_loop
@@ -53,10 +54,25 @@ class RequestIdMiddleware:
         await self.app(scope, receive, send_wrapper)
 
 
+async def _log_bootstrap_credential_if_needed() -> None:
+    """Only ever prints/does anything on a genuinely fresh install with no portal login IDP configured anywhere
+    (env-var Entra or an active PortalAuthConfig) — a no-op, one-query check for every existing deployment,
+    this one included."""
+    async with AsyncSessionLocal() as session:
+        password = await ensure_bootstrap_credential(session)
+    if password:
+        logger.warning("=" * 70)
+        logger.warning("ACCESSPILOT FIRST-TIME SETUP REQUIRED — no portal login IDP is configured yet.")
+        logger.warning("Bootstrap login — username: admin   password: %s", password)
+        logger.warning("This password is shown ONLY ONCE. Use it to sign in and complete setup.")
+        logger.warning("=" * 70)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     background_tasks: list[asyncio.Task] = []
     if settings.environment != "test":
+        await _log_bootstrap_credential_if_needed()
         background_tasks.append(asyncio.create_task(sync_scheduler_loop(AsyncSessionLocal)))
         background_tasks.append(asyncio.create_task(expiration_worker_loop(AsyncSessionLocal)))
         background_tasks.append(asyncio.create_task(activation_worker_loop(AsyncSessionLocal)))

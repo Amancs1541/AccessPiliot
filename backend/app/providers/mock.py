@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.providers.base import CreatedUser, IdentityProvider, NewGroupRequest, NewUserRequest, NormalizedApplication, NormalizedApplicationRole, NormalizedGroup, NormalizedRole, NormalizedUser, ProviderConflictError
+from app.providers.base import CreatedUser, IdentityProvider, NewGroupRequest, NewUserRequest, NormalizedApplication, NormalizedApplicationRole, NormalizedDomain, NormalizedGroup, NormalizedRole, NormalizedUser, ProviderConflictError
 
 
 class MockProvider(IdentityProvider):
@@ -14,6 +14,7 @@ class MockProvider(IdentityProvider):
         self.memberships: dict[str, set[str]] = {"group-001": {"user-001"}, "group-002": {"user-002"}}
         self.app_role_assignments: set[tuple[str, str, str]] = set()
         self.assignments: dict[str, str] = {}
+        self.domains = [NormalizedDomain("northstar.io", is_verified=True, is_default=True), NormalizedDomain("northstar.onmicrosoft.com", is_verified=True)]
 
     async def test_connection(self) -> bool: return True
     async def get_users(self, query: str | None = None) -> list[NormalizedUser]: return self._filter(self.users, query, lambda item: f"{item.display_name} {item.email}")
@@ -61,6 +62,9 @@ class MockProvider(IdentityProvider):
         self.groups.append(group)
         self.memberships.setdefault(group.external_id, set())
         return group
+
+    async def get_domains(self) -> list[NormalizedDomain]:
+        return list(self.domains)
 
     @staticmethod
     def _filter(items: list[Any], query: str | None, text: Any) -> list[Any]:

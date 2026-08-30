@@ -2,7 +2,19 @@ from datetime import datetime
 from typing import Any, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
+
+ALLOWED_USERNAME_TOKENS = {"first", "last", "f", "l"}
+
+
+def _validate_username_convention(value: Optional[str]) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    try:
+        value.format(first="a", last="b", f="a", l="b")
+    except (KeyError, IndexError, ValueError) as exc:
+        raise ValueError(f"Invalid naming convention — only {{first}}, {{last}}, {{f}}, {{l}} tokens are allowed.") from exc
+    return value
 
 
 class ProviderCreate(BaseModel):
@@ -29,6 +41,13 @@ class ProviderUpdate(BaseModel):
     configuration_ref: Optional[str] = None
     sync_interval_minutes: Optional[int] = Field(default=None, ge=1, le=10080)
     max_self_activation_hours: Optional[int] = Field(default=None, ge=1, le=8760)
+    provisioning_domain: Optional[str] = Field(default=None, max_length=255)
+    username_convention: Optional[str] = Field(default=None, max_length=100)
+
+    @field_validator("username_convention")
+    @classmethod
+    def _check_username_convention(cls, value: Optional[str]) -> Optional[str]:
+        return _validate_username_convention(value)
 
 
 class ProviderCredentialUpdate(BaseModel):
@@ -54,4 +73,12 @@ class ProviderResponse(BaseModel):
     credential_configured: bool
     sync_interval_minutes: Optional[int]
     max_self_activation_hours: int
+    provisioning_domain: Optional[str] = None
+    username_convention: Optional[str] = None
     last_sync_at: Optional[datetime]
+
+
+class DomainResponse(BaseModel):
+    name: str
+    is_verified: bool
+    is_default: bool

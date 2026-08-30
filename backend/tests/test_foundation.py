@@ -32,7 +32,7 @@ async def test_database_metadata_creates_all_documented_tables() -> None:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         names = await connection.run_sync(lambda conn: set(conn.dialect.get_table_names(conn)))
-    assert names == {"identity_providers", "users", "groups", "roles", "applications", "user_groups", "role_assignments", "access_assignments", "access_requests", "approval_steps", "policies", "policy_targets", "audit_logs", "sync_runs", "sync_errors", "provider_resources", "access_packages", "access_package_items", "access_package_assignments", "access_package_eligibility", "onboarding_imports", "onboarding_import_records", "birthright_policies"}
+    assert names == {"identity_providers", "users", "groups", "roles", "applications", "user_groups", "role_assignments", "access_assignments", "access_requests", "approval_steps", "policies", "policy_targets", "audit_logs", "sync_runs", "sync_errors", "provider_resources", "access_packages", "access_package_items", "access_package_assignments", "access_package_eligibility", "onboarding_imports", "onboarding_import_records", "birthright_policies", "bootstrap_credentials", "portal_auth_configs", "breakglass_accounts", "security_settings", "branding_settings"}
     await engine.dispose()
 
 

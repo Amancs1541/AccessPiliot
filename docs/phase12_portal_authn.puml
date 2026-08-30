@@ -1,0 +1,198 @@
+' ============================================================================
+' Diagram A — Where this fits: Portal AuthN vs the existing Identity Provider
+' connector. These are two genuinely separate systems that happen to both
+' talk to Entra/Okta — this was the user's explicit design requirement.
+' ============================================================================
+@startuml A_context
+title AccessPilot — Portal AuthN vs Identity Provider Connector (separate systems)
+
+package "Existing (untouched this phase)" {
+  [identity_providers table] as IDP
+  [EntraProvider / OktaProvider connectors] as Connector
+  [directory_sync.py\n(HR/user/group/role sync)] as Sync
+  [provisioning.py\n(real account creation, birthright)] as Provisioning
+  IDP --> Connector
+  Connector --> Sync
+  Connector --> Provisioning
+}
+
+package "New — Phase 12: Portal AuthN (who can log into AccessPilot itself)" {
+  [bootstrap_credentials table] as BootstrapTbl
+  [portal_auth_configs table] as PortalCfgTbl
+  [breakglass_accounts table] as BreakglassTbl
+  [bootstrap.py] as BootstrapSvc
+  [portal_auth.py] as PortalAuthSvc
+  BootstrapSvc --> BootstrapTbl
+  PortalAuthSvc --> PortalCfgTbl
+  PortalAuthSvc --> BreakglassTbl
+}
+
+[require_authenticated_user()\n(backend/app/security/auth.py)] as Gatekeeper
+[SetupWizard.tsx / SetupGate] as WizardUI
+[Rest of AccessPilot UI\n(App.tsx, unmodified)] as MainUI
+
+Gatekeeper --> Connector : "1st try — env-var Entra\n(decode_access_token, unchanged)"
+Gatekeeper --> PortalAuthSvc : "2nd try — active PortalAuthConfig"
+Gatekeeper --> PortalAuthSvc : "3rd try — Break-Glass"
+
+WizardUI --> BootstrapSvc : bootstrap-login
+WizardUI --> PortalAuthSvc : configure / activate
+MainUI --> Gatekeeper : every API call
+
+note right of IDP
+  This is the CSV/Entra/Okta connector
+  used for HR onboarding, provisioning,
+  birthright policy (Phases 6-11).
+  It answers: "what access does a
+  USER OF THE COMPANY have?"
+end note
+
+note right of PortalCfgTbl
+  This answers a different question:
+  "who is allowed to log INTO
+  AccessPilot's own admin/user portal?"
+  Deliberately separate per the user's
+  own requirement.
+end note
+
+@enduml
+
+
+' ============================================================================
+' Diagram B — First-time setup wizard flow (what SetupWizard.tsx drives)
+' ============================================================================
+@startuml B_setup_flow
+title Phase 12 — First-time Portal Setup Flow
+
+actor Admin
+participant "SetupWizard.tsx\n(frontend)" as UI
+participant "FastAPI backend" as API
+database "Postgres" as DB
+participant "Entra / Okta" as IDP
+
+Admin -> UI : opens AccessPilot
+UI -> API : GET /api/v1/setup/status
+API -> DB : portal_setup_is_needed()\n(env-var Entra configured? OR\nan active PortalAuthConfig exists?)
+API --> UI : {needs_setup: true}
+note right : Only true on a genuinely\nfresh install. False here\nkeeps the WHOLE existing\napp rendering unchanged.
+
+UI -> Admin : Step 1 — show bootstrap login form
+note left of Admin : password was printed\nONCE to the backend's\nstartup log at boot
+
+Admin -> UI : submits admin / <bootstrap password>
+UI -> API : POST /setup/bootstrap-login\n{username, password}
+API -> DB : verify_bootstrap_login()\n(PBKDF2-HMAC-SHA256 verify)
+API --> UI : {setup_token}\n(HS256 JWT signed with THIS\ncredential row's own session_secret)
+
+UI -> Admin : Step 2 — configure IDP + Break-Glass form
+Admin -> UI : idp_type, tenant/client id,\nauthority, break-glass user+pass
+UI -> API : POST /setup/configure\nBearer setup_token
+API -> DB : create_pending_setup()\n- delete any abandoned pending rows\n- insert PortalAuthConfig (is_active=false)\n- insert BreakGlassAccount (is_active=false,\n  password PBKDF2-hashed)
+API --> UI : pending config {id, idp_type, ...}
+
+UI -> Admin : Step 3 — "Test sign-in with Microsoft"
+UI -> IDP : loginPopup() via a temporary\nMSAL PublicClientApplication\nbuilt from the PENDING config values
+Admin -> IDP : real interactive login
+IDP --> UI : real id_token / access_token
+
+UI -> API : POST /setup/activate\nBearer setup_token\n{config_id, test_token}
+API -> IDP : fetch JWKS (cached PyJWKClient,\nasyncio.to_thread + 10s timeout —\nsame pattern as the event-loop-freeze fix)
+API -> API : validate_token_against_config()\n- verify signature via JWKS\n- check issuer / audience\n- check tenant match
+alt token valid
+  API -> DB : activate_portal_auth_config()\n- deactivate any other config (defensive)\n- config.is_active = true\n- activate every pending BreakGlassAccount\n- DELETE FROM bootstrap_credentials\n  (self-destruct — its session_secret\n  is gone, so old setup_tokens die too)\n- record_audit(PORTAL_AUTH_CONFIG_ACTIVATED)
+  API --> UI : {activated: true}
+  UI -> Admin : Step 4 — Done screen
+else token invalid / expired setup_token
+  API --> UI : 400/401 with error detail
+  UI -> Admin : show error, allow retry
+end
+
+@enduml
+
+
+' ============================================================================
+' Diagram C — Runtime request authentication: the 3-tier fallback chain
+' ============================================================================
+@startuml C_auth_fallback
+title Every authenticated API call — require_authenticated_user() fallback chain
+
+participant "Browser / API client" as Client
+participant "require_authenticated_user()" as Gate
+participant "decode_access_token()\n(ORIGINAL, byte-for-byte unchanged)" as Primary
+participant "_authenticate_via_portal_config_or_breakglass()" as Fallback
+database "Postgres" as DB
+
+Client -> Gate : Authorization: Bearer <token>
+
+Gate -> Primary : try: decode via env-var\nENTRA_TENANT_ID/AUTHORITY
+alt env-var Entra validates the token
+  Primary --> Gate : AuthenticatedUser
+  Gate --> Client : 200 (request proceeds)
+else raises AccessPilotError\n(e.g. env-var Entra not configured,\nor token doesn't match it)
+  Gate -> Fallback : try fallback(token)
+  Fallback -> DB : get_active_portal_auth_config()
+  alt an ACTIVE PortalAuthConfig exists
+    Fallback -> Fallback : validate_token_against_config()\n(JWKS per idp_type, same\nasyncio.wait_for/to_thread safety)
+    alt token valid AND has a VALID_ROLES entry
+      Fallback --> Gate : AuthenticatedUser\n(real role from token claims)
+      Gate --> Client : 200
+    else invalid or no recognized role
+      Fallback -> DB : decode_breakglass_token()\n(HS256 verify vs account.session_secret)
+    end
+  else no active config yet
+    Fallback -> DB : decode_breakglass_token()
+  end
+  alt break-glass token valid
+    Fallback --> Gate : AuthenticatedUser\n(subject="breakglass:<id>",\nrole=AccessPilot.Admin)
+    Gate --> Client : 200
+  else nothing matched
+    Fallback --> Gate : None
+    Gate --> Client : 401 (the ORIGINAL primary_error,\nunchanged error message)
+  end
+end
+
+note over Primary, Fallback
+  On THIS deployment today: env-var Entra is
+  configured and no PortalAuthConfig/BreakGlass
+  row exists — every request succeeds at the
+  very first "Primary" step, exactly as before
+  this phase existed. Steps 2-3 are dead code
+  paths for you unless you deliberately run
+  the Phase 12 setup flow.
+end note
+
+@enduml
+
+
+' ============================================================================
+' Diagram D — Lifecycle of the three new tables
+' ============================================================================
+@startuml D_lifecycle
+title Phase 12 — Credential/Config lifecycle
+
+state "No setup yet" as NoSetup
+state "Bootstrap credential exists\n(bootstrap_credentials: 1 row)" as BootstrapActive
+state "Setup in progress\n(PortalAuthConfig + BreakGlassAccount\nboth is_active=false)" as Pending
+state "Activated\n(PortalAuthConfig.is_active=true,\nBreakGlassAccount.is_active=true,\nbootstrap_credentials: 0 rows — deleted)" as Activated
+
+[*] --> NoSetup
+NoSetup --> BootstrapActive : ensure_bootstrap_credential()\ncalled at startup when\nportal_setup_is_needed()==true
+BootstrapActive --> BootstrapActive : restart backend\n(idempotent — same\ncredential reused)
+BootstrapActive --> Pending : POST /setup/configure\n(create_pending_setup)
+Pending --> Pending : POST /setup/configure again\n(old pending rows deleted,\nnew ones inserted)
+Pending --> Activated : POST /setup/activate\nsucceeds (real token validated)
+Activated --> Activated : normal AccessPilot usage\n(env-var Entra still tried FIRST;\nthis config + break-glass are\nthe fallback safety net)
+
+note right of Activated
+  Self-destruct mechanics:
+  - bootstrap credential row is gone,
+    so any old setup_token JWT (signed
+    with ITS session_secret) can never
+    verify again — no revocation list needed.
+  - Same trick protects break-glass tokens:
+    delete the BreakGlassAccount row and
+    every token ever signed with its
+    session_secret instantly dies too.
+end note
+
+@enduml

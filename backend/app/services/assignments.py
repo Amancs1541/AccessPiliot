@@ -8,7 +8,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AccessPilotError
-from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, Application, Group, IdentityProvider, Role, User
+from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, Application, Group, IdentityProvider, Role, User, UserGroup
 from app.providers.graph_client import GraphError
 from app.schemas.assignments import AssignmentResponse
 from app.services.audit import record_audit
@@ -92,6 +92,28 @@ async def _grant_provider_access(session: AsyncSession, provider_id: UUID, resou
         raise AccessPilotError("PROVIDER_UNAVAILABLE", "The provider did not confirm the access grant.", 502)
 
 
+async def _record_local_group_membership(session: AsyncSession, user_id: UUID, group_id: UUID) -> None:
+    """Real Entra/Graph group grants only reached the local user_groups table via the next periodic directory
+    sync — which can lag by a full sync interval, or never run at all if scheduling was never configured (a real
+    gap already hit once this session). Anything checking user_groups for something AccessPilot itself JUST
+    granted (e.g. group-based Access Package eligibility, checked in list_requestable_packages) would otherwise
+    wrongly see no membership until that next sync — confirmed live: several ACTIVE group assignments, some days
+    old, still had zero corresponding user_groups rows. Insert the row immediately on a successful real grant
+    instead; the sync worker's own upsert-if-missing logic is unaffected by a row already being there."""
+    existing = (await session.execute(select(UserGroup).where(UserGroup.user_id == user_id, UserGroup.group_id == group_id))).scalars().first()
+    if existing is None:
+        session.add(UserGroup(user_id=user_id, group_id=group_id, source="ASSIGNMENT"))
+
+
+async def _remove_local_group_membership(session: AsyncSession, user_id: UUID, group_id: UUID) -> None:
+    """Mirror of _record_local_group_membership for the revoke path — otherwise a revoked group assignment would
+    leave the user still locally recorded as a member (and still group-eligible for packages) until the next sync
+    reconciles it away."""
+    existing = (await session.execute(select(UserGroup).where(UserGroup.user_id == user_id, UserGroup.group_id == group_id))).scalars().first()
+    if existing is not None:
+        await session.delete(existing)
+
+
 async def revoke_provider_access(session: AsyncSession, assignment: AccessAssignment) -> bool:
     """Performs the real Entra/Graph removal for an assignment. Returns True on success, False on failure (caller decides retry policy)."""
     provider = await session.get(IdentityProvider, assignment.provider_id)
@@ -106,9 +128,12 @@ async def revoke_provider_access(session: AsyncSession, assignment: AccessAssign
     if assignment.app_role_external_id:
         request["app_role_external_id"] = assignment.app_role_external_id
     try:
-        return bool(await connector.revoke_assignment(request))
+        revoked = bool(await connector.revoke_assignment(request))
     except (GraphError, NotImplementedError, ValueError):
         return False
+    if revoked and assignment.resource_type == "GROUP":
+        await _remove_local_group_membership(session, assignment.user_id, assignment.resource_id)
+    return revoked
 
 
 async def grant_provider_access_for_assignment(session: AsyncSession, assignment: AccessAssignment) -> bool:
@@ -119,9 +144,11 @@ async def grant_provider_access_for_assignment(session: AsyncSession, assignment
         return False
     try:
         await _grant_provider_access(session, assignment.provider_id, assignment.resource_type, target_external_id, user.external_id, assignment.app_role_external_id)
-        return True
     except AccessPilotError:
         return False
+    if assignment.resource_type == "GROUP":
+        await _record_local_group_membership(session, assignment.user_id, assignment.resource_id)
+    return True
 
 
 def _is_in_the_future(moment: Optional[datetime], now: datetime) -> bool:
@@ -235,6 +262,8 @@ async def create_assignment(session: AsyncSession, data, actor_subject: str, req
         except AccessPilotError:
             await session.rollback()
             raise
+        if data.resource_type == "GROUP":
+            await _record_local_group_membership(session, data.user_id, data.resource_id)
         await record_audit(session, action="ASSIGNMENT_ACTIVATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=provider_id, actor_user_id=requested_by, request_id=request_id, metadata={"decision": "ADMIN_BYPASS", "justification": data.justification})
 
     await record_audit(session, action="ASSIGNMENT_CREATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=provider_id, actor_user_id=requested_by, request_id=request_id, metadata={"status": status, "resource_type": data.resource_type, "bypass_activation": bypass_activation})
@@ -348,6 +377,8 @@ async def activate_assignment(session: AsyncSession, assignment_id: UUID, actor_
         await record_audit(session, action="ASSIGNMENT_ACTIVATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, actor_user_id=actor_id, request_id=request_id, result="FAILURE", metadata={"decision": "SELF_ACTIVATED", "error_code": exc.code, "justification": justification})
         await session.commit()
         raise
+    if assignment.resource_type == "GROUP":
+        await _record_local_group_membership(session, assignment.user_id, assignment.resource_id)
 
     assignment.status = "ACTIVE"
     assignment.activated_at = now

@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Box, Check, ChevronRight, Clock3, Cloud, Copy, Database, ExternalLink, FileCheck2, FolderKanban, Gauge, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldCheck, SlidersHorizontal, UploadCloud, UserRound, Users, X } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Box, Check, ChevronRight, Clock3, Cloud, Copy, Database, ExternalLink, FileCheck2, FolderKanban, Gauge, Image, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Lock, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldCheck, SlidersHorizontal, UploadCloud, UserRound, Users, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { auditEvents, currentUser, policies, type RequestStatus, type Role } from './mock';
 import { mockService, useMockState } from './mockService';
-import { apiBaseUrl, entraConfigured, useAuth } from './auth';
+import { apiBaseUrl, useAuth } from './auth';
 import ProviderConfiguration from './ProviderConfiguration';
+import { BreakGlassDashboard } from './BreakGlassDashboard';
+import { IdleGuard, useRefreshSecuritySettings } from './IdleGuard';
+import logo from './assets/logo.png';
 
 interface ApiUser { id: string; provider_id: string; external_id: string; email: string; display_name: string; given_name: string | null; surname: string | null; department: string | null; job_title: string | null; status: string; employee_id: string | null; source: string | null; last_synced_at: string | null; }
 interface ApiGroup { id: string; external_id: string; name: string; description: string | null; is_privileged: boolean; status: string; last_synced_at: string | null; }
@@ -25,6 +28,7 @@ interface ApiUserAccessSegments { permanentActive: number; eligible: number; }
 interface ApiSegmentMember { id: string; display_name: string; email: string; }
 interface ApiOnboardingImport { id: string; filename: string; status: string; total_records: number; created_count: number; updated_count: number; disabled_count: number; no_change_count: number; failed_count: number; access_revoked_count: number; access_revoke_failed_count: number; real_accounts_provisioned_count: number; birthright_assignments_created_count: number; error_summary: Record<string, unknown> | null; created_at: string; completed_at: string | null; }
 interface ApiOnboardingImportRecord { row_number: number; employee_id: string; action: string; error_message: string | null; raw_data: Record<string, string> | null; }
+interface ApiSecuritySettings { blur_enabled: boolean; blur_after_minutes: number; lock_enabled: boolean; lock_after_minutes: number; }
 
 function useApiResource<T>(path: string, enabled = true) {
   const auth = useAuth();
@@ -55,6 +59,19 @@ function useApiResource<T>(path: string, enabled = true) {
   return { data, error, loading, reload: () => setReloadToken(token => token + 1) };
 }
 
+interface ApiBranding { sign_in_logo: string | null; internal_logo: string | null; powered_by_text: string | null; }
+function useBranding() {
+  // Deliberately a raw, unauthenticated fetch — GET /branding is public (the sign-in screen needs it before
+  // anyone has logged in), so this must never go through apiRequest()'s "requires an account" logic.
+  const [branding, setBranding] = useState<ApiBranding | null>(null);
+  useEffect(() => {
+    let ignore = false;
+    fetch(`${apiBaseUrl}/api/v1/branding`).then(response => response.ok ? response.json() : null).then(data => { if (!ignore && data) setBranding(data); }).catch(() => {});
+    return () => { ignore = true; };
+  }, []);
+  return branding;
+}
+
 const nav = [
   { label: 'Dashboard', icon: LayoutDashboard, to: '/dashboard', roles: ['user','admin'] },
   { label: 'My Access', icon: KeyRound, to: '/my-access', roles: ['user'] },
@@ -74,24 +91,129 @@ const nav = [
   { label: 'Providers', icon: Cloud, to: '/admin/providers', roles: ['admin'], section: 'SYSTEM' },
   { label: 'Sync', icon: RefreshCw, to: '/admin/sync', roles: ['admin'] },
   { label: 'Onboarding', icon: UploadCloud, to: '/admin/onboarding', roles: ['admin'] },
+  { label: 'Security', icon: Lock, to: '/admin/security', roles: ['admin'] },
+  { label: 'Branding', icon: Image, to: '/admin/branding', roles: ['admin'] },
 ];
 
 function App() {
   const auth = useAuth();
   const [mockRole, setMockRole] = useState<Role>(() => (localStorage.getItem('accesspilot.mockRole') as Role) || 'admin');
-  if (entraConfigured && auth.loading) return <div className="empty">Loading AccessPilot authentication...</div>;
-  if (entraConfigured && !auth.account) return <div className="empty"><h1>Sign in to AccessPilot</h1><p className="subtitle">Use your Microsoft Entra account to continue.</p><button className="btn btn-primary" onClick={auth.signIn} style={{marginTop:18}}>Sign in</button></div>;
-  const role = entraConfigured ? auth.role : mockRole;
+  if (auth.authConfigured && auth.loading) return <div className="empty">Loading AccessPilot authentication...</div>;
+  if (auth.authConfigured && !auth.account && !auth.breakglassActive) return <SignInScreen />;
+  if (auth.breakglassActive && !auth.breakglassElevated) return <BreakGlassDashboard />;
+  const role = auth.authConfigured ? auth.role : mockRole;
   const changeRole = (nextRole: Role) => { localStorage.setItem('accesspilot.mockRole', nextRole); setMockRole(nextRole); };
-  return <Shell role={role} setRole={changeRole}><Routes><Route path="/" element={<Navigate to="/dashboard" replace />} /><Route path="/dashboard" element={<Dashboard role={role} />} /><Route path="/my-access" element={<MyAccess />} /><Route path="/request-access" element={<RequestAccess />} /><Route path="/request-packages" element={<RequestPackagesPage />} /><Route path="/my-requests" element={<Requests mine />} /><Route path="/approvals" element={<MyApprovalsPage />} /><Route path="/profile" element={<Profile />} /><Route path="/admin/users" element={<AdminOnly role={role}><UsersPage /></AdminOnly>} /><Route path="/admin/users/:id" element={<AdminOnly role={role}><UserDetail /></AdminOnly>} /><Route path="/admin/groups" element={<AdminOnly role={role}><GroupsPage /></AdminOnly>} /><Route path="/admin/roles" element={<AdminOnly role={role}><RolesPage /></AdminOnly>} /><Route path="/admin/access-requests" element={<AdminOnly role={role}><Requests /></AdminOnly>} /><Route path="/admin/access-requests/:id" element={<AdminOnly role={role}><RequestDetailInteractive /></AdminOnly>} /><Route path="/admin/assignments" element={<AdminOnly role={role}><AssignmentsInteractive /></AdminOnly>} /><Route path="/admin/access-packages" element={<AdminOnly role={role}><AccessPackagesInteractive /></AdminOnly>} /><Route path="/admin/policies" element={<AdminOnly role={role}><PoliciesPage /></AdminOnly>} /><Route path="/admin/audit" element={<AdminOnly role={role}><AuditPage /></AdminOnly>} /><Route path="/admin/providers" element={<AdminOnly role={role}><ProvidersPage /></AdminOnly>} /><Route path="/admin/sync" element={<AdminOnly role={role}><SyncPage /></AdminOnly>} /><Route path="/admin/onboarding" element={<AdminOnly role={role}><OnboardingPage /></AdminOnly>} /><Route path="*" element={<Navigate to="/dashboard" replace />} /></Routes></Shell>;
+  return <IdleGuard><Shell role={role} setRole={changeRole}><Routes><Route path="/" element={<Navigate to="/dashboard" replace />} /><Route path="/dashboard" element={<Dashboard role={role} />} /><Route path="/my-access" element={<MyAccess />} /><Route path="/request-access" element={<RequestAccess />} /><Route path="/request-packages" element={<RequestPackagesPage />} /><Route path="/my-requests" element={<Requests mine />} /><Route path="/approvals" element={<MyApprovalsPage />} /><Route path="/profile" element={<Profile />} /><Route path="/admin/users" element={<AdminOnly role={role}><UsersPage /></AdminOnly>} /><Route path="/admin/users/:id" element={<AdminOnly role={role}><UserDetail /></AdminOnly>} /><Route path="/admin/groups" element={<AdminOnly role={role}><GroupsPage /></AdminOnly>} /><Route path="/admin/roles" element={<AdminOnly role={role}><RolesPage /></AdminOnly>} /><Route path="/admin/access-requests" element={<AdminOnly role={role}><Requests /></AdminOnly>} /><Route path="/admin/access-requests/:id" element={<AdminOnly role={role}><RequestDetailInteractive /></AdminOnly>} /><Route path="/admin/assignments" element={<AdminOnly role={role}><AssignmentsInteractive /></AdminOnly>} /><Route path="/admin/access-packages" element={<AdminOnly role={role}><AccessPackagesInteractive /></AdminOnly>} /><Route path="/admin/policies" element={<AdminOnly role={role}><PoliciesPage /></AdminOnly>} /><Route path="/admin/audit" element={<AdminOnly role={role}><AuditPage /></AdminOnly>} /><Route path="/admin/providers" element={<AdminOnly role={role}><ProvidersPage /></AdminOnly>} /><Route path="/admin/sync" element={<AdminOnly role={role}><SyncPage /></AdminOnly>} /><Route path="/admin/onboarding" element={<AdminOnly role={role}><OnboardingPage /></AdminOnly>} /><Route path="/admin/security" element={<AdminOnly role={role}><SecurityPage /></AdminOnly>} /><Route path="/admin/branding" element={<AdminOnly role={role}><BrandingPage /></AdminOnly>} /><Route path="*" element={<Navigate to="/dashboard" replace />} /></Routes></Shell></IdleGuard>;
+}
+function SignInScreen() {
+  const auth = useAuth();
+  const branding = useBranding();
+  // Deliberately no mention of Break-Glass anywhere on this screen, for any user — it's reachable only via the
+  // hidden /emergency-access/:token URL (src/EmergencyAccess.tsx), generated solely by a console command
+  // (backend/app/cli.py). An IDP outage shows a generic notice here, never an actionable recovery hint.
+  return (
+    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: '#f4f7f9', padding: 24 }}>
+      <img src={branding?.sign_in_logo || logo} alt="AccessPilot" style={{ width: 140, height: 140, objectFit: 'contain', marginBottom: 26 }} />
+      <h1>Sign in to AccessPilot</h1>
+      <p className="subtitle">Use your Microsoft Entra account to continue.</p>
+      {auth.idpUnreachable && <div className="notice" style={{ background: '#fdecea', color: '#8c2b21', marginTop: 14, maxWidth: 380 }}>The identity provider is currently unavailable. Please contact your administrator.</div>}
+      <button className="btn btn-primary" onClick={auth.signIn} style={{ marginTop: 18 }}>Sign in</button>
+      <div style={{ position: 'fixed', right: 24, bottom: 20, fontSize: 11, color: '#8a9296' }}>Powered by <strong style={{ color: '#52656d' }}>{branding?.powered_by_text || 'Clover-X'}</strong></div>
+    </div>
+  );
+}
+function SecurityPage() {
+  const auth = useAuth();
+  const { data, loading, reload } = useApiResource<ApiSecuritySettings>('/api/v1/security-settings');
+  const [form, setForm] = useState<ApiSecuritySettings | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  const refreshIdleGuard = useRefreshSecuritySettings();
+  useEffect(() => { if (data) setForm(data); }, [data]);
+  const save = async () => {
+    if (!form) return;
+    setSaving(true); setMessage('');
+    try {
+      const response = await auth.apiRequest('/api/v1/security-settings', { method: 'PATCH', body: JSON.stringify(form) });
+      if (response.ok) { setMessage('Saved.'); reload(); void refreshIdleGuard?.(); }
+      else { const body = await response.json().catch(() => null); setMessage(body?.error?.message || 'Unable to save.'); }
+    } catch {
+      setMessage('Unable to reach the backend.');
+    } finally { setSaving(false); }
+  };
+  return <Page eyebrow="SYSTEM" title="Security" subtitle="Idle-session behavior applied to every signed-in user, admin and end-user alike.">
+    {loading || !form ? <div className="empty">Loading...</div> : <div className="panel"><div className="detail-section">
+      <label style={{display:'flex',alignItems:'center',gap:10,marginBottom:12}}><input type="checkbox" checked={form.blur_enabled} onChange={event => setForm({...form, blur_enabled: event.target.checked})}/><span>Blur the screen after inactivity</span></label>
+      <label className="key" style={{display:'block',marginBottom:22,maxWidth:220}}><span>Blur after (minutes)</span><input className="select" style={{width:'100%'}} type="number" min={1} max={120} disabled={!form.blur_enabled} value={form.blur_after_minutes} onChange={event => setForm({...form, blur_after_minutes: Number(event.target.value)})}/></label>
+      <label style={{display:'flex',alignItems:'center',gap:10,marginBottom:12}}><input type="checkbox" checked={form.lock_enabled} onChange={event => setForm({...form, lock_enabled: event.target.checked})}/><span>Lock the screen after inactivity — requires clicking "Continue" to resume; never signs the user out</span></label>
+      <label className="key" style={{display:'block',marginBottom:22,maxWidth:220}}><span>Lock after (minutes)</span><input className="select" style={{width:'100%'}} type="number" min={1} max={120} disabled={!form.lock_enabled} value={form.lock_after_minutes} onChange={event => setForm({...form, lock_after_minutes: Number(event.target.value)})}/></label>
+      {message && <div className="notice" style={{marginBottom:14}}>{message}</div>}
+      <button className="btn btn-primary" disabled={saving} onClick={save}>{saving ? 'Saving...' : 'Save'}</button>
+    </div></div>}
+  </Page>;
+}
+function BrandingPage() {
+  const auth = useAuth();
+  const { data, loading } = useApiResource<ApiBranding>('/api/v1/branding');
+  const [form, setForm] = useState<{ sign_in_logo: string | null; internal_logo: string | null; powered_by_text: string }>({ sign_in_logo: null, internal_logo: null, powered_by_text: '' });
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  useEffect(() => { if (data) setForm({ sign_in_logo: data.sign_in_logo, internal_logo: data.internal_logo, powered_by_text: data.powered_by_text || '' }); }, [data]);
+
+  const readFile = (file: File, key: 'sign_in_logo' | 'internal_logo') => {
+    setMessage('');
+    if (file.size > 2_000_000) { setMessage('Image must be under 2MB.'); return; }
+    if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.type)) { setMessage('Only PNG, JPEG, GIF, or WEBP images are supported.'); return; }
+    const reader = new FileReader();
+    reader.onload = () => setForm(current => ({ ...current, [key]: reader.result as string }));
+    reader.readAsDataURL(file);
+  };
+
+  const save = async () => {
+    setSaving(true); setMessage('');
+    try {
+      const response = await auth.apiRequest('/api/v1/branding', { method: 'PATCH', body: JSON.stringify({ sign_in_logo: form.sign_in_logo, internal_logo: form.internal_logo, powered_by_text: form.powered_by_text.trim() || null }) });
+      if (response.ok) {
+        // A full reload picks up the new branding everywhere at once (sidebar, sign-in screen) rather than
+        // wiring a live-refresh channel for something admins change rarely.
+        window.location.reload();
+      } else {
+        const body = await response.json().catch(() => null);
+        setMessage(body?.error?.message || 'Unable to save.');
+      }
+    } catch {
+      setMessage('Unable to reach the backend.');
+    } finally { setSaving(false); }
+  };
+
+  return <Page eyebrow="SYSTEM" title="Branding" subtitle="Customize the logo shown on the public sign-in screen, the logo inside the app, and the attribution text.">
+    {loading ? <div className="empty">Loading...</div> : <div className="panel"><div className="detail-section">
+      <div className="key" style={{marginBottom:10}}><span>Sign-in page logo</span></div>
+      <div style={{display:'flex',alignItems:'center',gap:16,marginBottom:26}}>
+        <img src={form.sign_in_logo || logo} alt="Sign-in logo preview" style={{width:64,height:64,objectFit:'contain',background:'#f4f7f9',borderRadius:8,padding:6}}/>
+        <input type="file" accept="image/png,image/jpeg,image/gif,image/webp" onChange={event => event.target.files?.[0] && readFile(event.target.files[0], 'sign_in_logo')}/>
+        {form.sign_in_logo && <button type="button" className="btn" onClick={() => setForm(current => ({...current, sign_in_logo: null}))}>Reset to default</button>}
+      </div>
+      <div className="key" style={{marginBottom:10}}><span>Internal (sidebar) logo</span></div>
+      <div style={{display:'flex',alignItems:'center',gap:16,marginBottom:26}}>
+        <img src={form.internal_logo || logo} alt="Internal logo preview" style={{width:64,height:64,objectFit:'contain',background:'#123944',borderRadius:8,padding:6}}/>
+        <input type="file" accept="image/png,image/jpeg,image/gif,image/webp" onChange={event => event.target.files?.[0] && readFile(event.target.files[0], 'internal_logo')}/>
+        {form.internal_logo && <button type="button" className="btn" onClick={() => setForm(current => ({...current, internal_logo: null}))}>Reset to default</button>}
+      </div>
+      <label className="key" style={{display:'block',marginBottom:24,maxWidth:280}}><span>Powered by text</span><input className="select" style={{width:'100%'}} value={form.powered_by_text} onChange={event => setForm(current => ({...current, powered_by_text: event.target.value}))} placeholder="Clover-X"/></label>
+      {message && <div className="notice" style={{marginBottom:14}}>{message}</div>}
+      <button className="btn btn-primary" disabled={saving} onClick={save}>{saving ? 'Saving...' : 'Save'}</button>
+    </div></div>}
+  </Page>;
 }
 function AdminOnly({ role, children }: { role: Role; children: React.ReactNode }) { return role === 'admin' ? children : <Navigate to="/dashboard" replace />; }
 function Shell({ role, setRole, children }: { role: Role; setRole: (r: Role) => void; children: React.ReactNode }) {
   const location = useLocation(); const navigate = useNavigate();
   const auth = useAuth();
+  const branding = useBranding();
   const visible = nav.filter(item => item.roles.includes(role));
   const path = location.pathname;
-  return <div className="app"><aside className="sidebar"><Link to="/dashboard" className="brand"><span className="brand-mark">A</span> AccessPilot</Link>{visible.map((item, index) => { const I = item.icon; const previous = visible[index - 1]; return <div key={item.to}>{item.section && item.section !== previous?.section && <div className="nav-label">{item.section}</div>}<Link className={`nav-item ${path === item.to || (item.to !== '/dashboard' && path.startsWith(item.to)) ? 'active' : ''}`} to={item.to}><I />{item.label}</Link></div> })}<div className="sidebar-foot"><div>ACCESSPILOT CONSOLE</div><div style={{marginTop:5}}>v0.1.0 · Mock environment</div></div></aside><main className="main"><header className="topbar"><button className="mobile-menu" aria-label="Open navigation"><Menu size={20}/></button><div className="crumb">Workspace / <strong>{role === 'admin' ? 'Administration' : 'Self-service'}</strong></div><div className="top-actions">{entraConfigured ? <button className="btn" onClick={() => auth.account ? auth.signOut() : auth.signIn()}>{auth.account ? 'Sign out' : 'Sign in'}</button> : <div className="role-switch" aria-label="Development role switcher"><button className={role === 'user' ? 'active' : ''} onClick={() => { setRole('user'); navigate('/dashboard'); }}>User</button><button className={role === 'admin' ? 'active' : ''} onClick={() => { setRole('admin'); navigate('/dashboard'); }}>Admin</button></div>}<Bell size={17} color="#718088"/><div className="profile"><span>{auth.account?.name || currentUser.name}</span><span className="avatar">{currentUser.initials}</span></div></div></header>{children}</main></div>;
+  return <div className="app"><aside className="sidebar"><Link to="/dashboard" className="brand"><span className="brand-mark"><img src={branding?.internal_logo || logo} alt="AccessPilot" /></span> AccessPilot</Link>{visible.map((item, index) => { const I = item.icon; const previous = visible[index - 1]; return <div key={item.to}>{item.section && item.section !== previous?.section && <div className="nav-label">{item.section}</div>}<Link className={`nav-item ${path === item.to || (item.to !== '/dashboard' && path.startsWith(item.to)) ? 'active' : ''}`} to={item.to}><I />{item.label}</Link></div> })}<div className="sidebar-foot"><div>ACCESSPILOT CONSOLE</div><div style={{marginTop:5}}>v0.1.0 · Mock environment</div><div className="sidebar-credit">by <span>{branding?.powered_by_text || 'Clover‑X'}</span></div></div></aside><main className="main"><header className="topbar"><button className="mobile-menu" aria-label="Open navigation"><Menu size={20}/></button><div className="crumb">Workspace / <strong>{role === 'admin' ? 'Administration' : 'Self-service'}</strong></div><div className="top-actions">{auth.authConfigured ? <button className="btn" onClick={() => (auth.account || auth.breakglassActive) ? auth.signOut() : auth.signIn()}>{(auth.account || auth.breakglassActive) ? 'Sign out' : 'Sign in'}</button> : <div className="role-switch" aria-label="Development role switcher"><button className={role === 'user' ? 'active' : ''} onClick={() => { setRole('user'); navigate('/dashboard'); }}>User</button><button className={role === 'admin' ? 'active' : ''} onClick={() => { setRole('admin'); navigate('/dashboard'); }}>Admin</button></div>}<Bell size={17} color="#718088"/><div className="profile"><span>{auth.account?.name || (auth.breakglassActive ? `Break-Glass (${auth.breakglassUsername})` : currentUser.name)}</span><span className="avatar">{currentUser.initials}</span></div></div></header>{children}</main></div>;
 }
 function Page({ eyebrow, title, subtitle, action, children }: { eyebrow?: string; title: string; subtitle?: string; action?: React.ReactNode; children: React.ReactNode }) { return <div className="content"><div className="page-head"><div>{eyebrow && <div className="eyebrow">{eyebrow}</div>}<h1>{title}</h1>{subtitle && <p className="subtitle">{subtitle}</p>}</div>{action}</div>{children}</div>; }
 function StatCards({ admin = false, dashboard }: { admin?: boolean; dashboard?: DashboardAdmin | null }) { const na = '—'; const stats: Array<[string, string, string, LucideIcon, string?]> = admin ? [['Total users', dashboard ? String(dashboard.users) : na, 'Synced from Microsoft Entra ID', Users, '/admin/users'],['Groups', dashboard ? String(dashboard.groups) : na, 'Synced from Microsoft Entra ID', Network, '/admin/groups'],['Privileged roles', dashboard ? String(dashboard.privilegedRoles) : na, `${dashboard ? dashboard.roles : na} directory roles total`, ShieldCheck, '/admin/roles?privileged=true'],['Active JIT sessions', dashboard ? String(dashboard.activeSessions) : na, 'Currently active, real access grants', Clock3, '/admin/assignments?status=ACTIVE'],['Pending requests', dashboard ? String(dashboard.pendingRequests) : na, 'Awaiting approver decision', FolderKanban, '/admin/assignments?status=PENDING_APPROVAL'],['Expiring access', dashboard ? String(dashboard.expiringAccess) : na, 'Active access expiring within 24 hours', AlertTriangle, '/admin/assignments?status=ACTIVE&expiring=24h'],['Provider health', dashboard?.provider?.status || na, dashboard?.provider ? dashboard.provider.name : 'No provider configured', Cloud, '/admin/providers'],['Policy coverage', na, 'Not available in this release', FileCheck2, '/admin/policies']] : [['Active access','—','Not available in this release',KeyRound],['Eligible access','—','Not available in this release',Shield],['Pending requests','—','Not available in this release',Clock3],['Expiring soon','—','Not available in this release',AlertTriangle]]; return <div className={`stats ${admin ? 'admin-stats' : ''}`}>{stats.map(([label,value,foot,I,to]) => { const body = <><div className="stat-top"><span>{label}</span><span className="stat-icon"><I size={15}/></span></div><div className="stat-value">{value}</div><div className="stat-foot">{foot}</div></>; return to ? <Link to={to} className="stat stat-link" key={String(label)}>{body}</Link> : <div className="stat" key={String(label)}>{body}</div>; })}</div>; }
@@ -183,7 +305,7 @@ function Dashboard({ role }: { role: Role }) {
   const [selectedSegment, setSelectedSegment] = useState<string | null>(null);
   const { data: segmentMembers, loading: membersLoading } = useApiResource<ApiSegmentMember[]>(`/api/v1/dashboard/user-access-segments/${selectedSegment}`, Boolean(selectedSegment));
   const segmentTitle = selectedSegment === 'permanent-active' ? 'Permanent & Active' : selectedSegment === 'eligible' ? 'Eligible (not yet activated)' : '';
-  const greetingName = auth.account?.name || (entraConfigured ? '' : currentUser.name);
+  const greetingName = auth.account?.name || (auth.authConfigured ? '' : currentUser.name);
   const lastSyncLabel = dashboard?.lastSync?.completedAt ? new Date(dashboard.lastSync.completedAt).toLocaleString() : dashboard?.lastSync ? 'In progress' : 'Never synced';
 
   useEffect(() => {
@@ -729,6 +851,7 @@ function AccessPackagesInteractive() {
   const [assignMessage, setAssignMessage] = useState('');
   const [archivingId, setArchivingId] = useState<string | null>(null);
   const [eligibilityPackage, setEligibilityPackage] = useState<ApiPackage | null>(null);
+  const [viewingEligibility, setViewingEligibility] = useState<ApiPackage | null>(null);
   const [eligibilityForm, setEligibilityForm] = useState<{ principals: { principal_type: string; principal_id: string }[]; default_approver_id: string; default_fallback_approver_id: string }>({ principals: [], default_approver_id: '', default_fallback_approver_id: '' });
   const [eligibilitySaving, setEligibilitySaving] = useState(false);
   const [eligibilityMessage, setEligibilityMessage] = useState('');
@@ -853,7 +976,7 @@ function AccessPackagesInteractive() {
           </div>
           <div className="key" style={{marginTop:18,marginBottom:8}}><span>Who can request this package</span></div>
           {form.principals.map((principal, index) => {
-            const options = principal.principal_type === 'USER' ? (users || []) : (groups || []);
+            const options = (principal.principal_type === 'USER' ? (users || []) : (groups || [])).filter(o => o.id === principal.principal_id || !form.principals.some((p, i) => i !== index && p.principal_type === principal.principal_type && p.principal_id === o.id));
             return <div key={index} style={{display:'flex',gap:10,alignItems:'flex-end',marginBottom:10}}>
               <label className="key" style={{flex:1}}><span>Type</span><select className="select" style={{width:'100%'}} value={principal.principal_type} onChange={event => updateFormPrincipal(index, { principal_type: event.target.value, principal_id: '' })}><option value="USER">Individual user</option><option value="GROUP">Group</option></select></label>
               <label className="key" style={{flex:1}}><span>{principal.principal_type === 'USER' ? 'User' : 'Group'}</span><select className="select" style={{width:'100%'}} value={principal.principal_id} onChange={event => updateFormPrincipal(index, { principal_id: event.target.value })}><option value="">Select...</option>{options.map((o: ApiUser | ApiGroup) => <option key={o.id} value={o.id}>{principal.principal_type === 'USER' ? (o as ApiUser).display_name : (o as ApiGroup).name}</option>)}</select></label>
@@ -914,7 +1037,7 @@ function AccessPackagesInteractive() {
         </div>
         <div className="key" style={{marginBottom:8}}><span>Eligible users / groups</span></div>
         {eligibilityForm.principals.map((principal, index) => {
-          const options = principal.principal_type === 'USER' ? (users || []) : (groups || []);
+          const options = (principal.principal_type === 'USER' ? (users || []) : (groups || [])).filter(o => o.id === principal.principal_id || !eligibilityForm.principals.some((p, i) => i !== index && p.principal_type === principal.principal_type && p.principal_id === o.id));
           return <div key={index} style={{display:'flex',gap:10,alignItems:'flex-end',marginBottom:10}}>
             <label className="key" style={{flex:1}}><span>Type</span><select className="select" style={{width:'100%'}} value={principal.principal_type} onChange={event => updatePrincipal(index, { principal_type: event.target.value, principal_id: '' })}><option value="USER">Individual user</option><option value="GROUP">Group</option></select></label>
             <label className="key" style={{flex:1}}><span>{principal.principal_type === 'USER' ? 'User' : 'Group'}</span><select className="select" style={{width:'100%'}} value={principal.principal_id} onChange={event => updatePrincipal(index, { principal_id: event.target.value })}><option value="">Select...</option>{options.map((o: ApiUser | ApiGroup) => <option key={o.id} value={o.id}>{principal.principal_type === 'USER' ? (o as ApiUser).display_name : (o as ApiGroup).name}</option>)}</select></label>
@@ -927,7 +1050,29 @@ function AccessPackagesInteractive() {
       </div>
       <div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setEligibilityPackage(null)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={eligibilitySaving}>{eligibilitySaving ? 'Saving...' : 'Save eligibility'}</button></div>
     </form>}
-    <TablePanel toolbar={<Toolbar placeholder="Search packages" searchValue={search} onSearchChange={setSearch} filterLabel="All statuses" filterValue={statusFilter} onFilterChange={setStatusFilter} filterOptions={[{value:'ACTIVE',label:'Active'},{value:'ARCHIVED',label:'Archived'}]}/>}>{loading ? <div className="empty">Loading packages...</div> : error ? <div className="empty">{error}</div> : !packageList || packageList.length === 0 ? <div className="empty">No packages found.</div> : filteredPackages.length === 0 ? <div className="empty">No packages match this filter.</div> : <table><thead><tr><th>Name</th><th>Description</th><th>Items</th><th>Status</th><th>Requestable by</th><th></th></tr></thead><tbody>{filteredPackages.map(p => <tr key={p.id}><td className="user-name">{p.name}</td><td>{p.description || '—'}</td><td>{p.items.map(i => i.resource_display_name || i.resource_id).join(', ')}</td><td><StatusBadge status={p.status}/></td><td>{p.eligible_principals.length === 0 ? '—' : `${p.eligible_principals.length} ${p.eligible_principals.length === 1 ? 'entry' : 'entries'}`}</td><td><span style={{display:'flex',gap:5}}>{p.status === 'ACTIVE' && <button className="btn btn-primary" onClick={() => { setAssigningPackage(p); setAssignForm(emptyPackageAssignForm); setAssignMessage(''); }}>Assign</button>}<button className="btn" onClick={() => openEdit(p)}>Edit</button>{p.status === 'ACTIVE' && <button className="btn" onClick={() => openEligibility(p)}>Eligibility</button>}{p.status === 'ACTIVE' && <button className="btn" disabled={archivingId === p.id} onClick={() => void deletePackage(p.id)}>Delete</button>}</span></td></tr>)}</tbody></table>}</TablePanel>
+    <TablePanel toolbar={<Toolbar placeholder="Search packages" searchValue={search} onSearchChange={setSearch} filterLabel="All statuses" filterValue={statusFilter} onFilterChange={setStatusFilter} filterOptions={[{value:'ACTIVE',label:'Active'},{value:'ARCHIVED',label:'Archived'}]}/>}>{loading ? <div className="empty">Loading packages...</div> : error ? <div className="empty">{error}</div> : !packageList || packageList.length === 0 ? <div className="empty">No packages found.</div> : filteredPackages.length === 0 ? <div className="empty">No packages match this filter.</div> : <table><thead><tr><th>Name</th><th>Description</th><th>Items</th><th>Status</th><th>Requestable by</th><th></th></tr></thead><tbody>{filteredPackages.map(p => <tr key={p.id}><td className="user-name">{p.name}</td><td>{p.description || '—'}</td><td>{p.items.map(i => i.resource_display_name || i.resource_id).join(', ')}</td><td><StatusBadge status={p.status}/></td><td>{p.eligible_principals.length === 0 ? '—' : <button type="button" className="btn" style={{padding:'4px 9px',fontSize:11,fontWeight:700,color:'var(--teal-dark)',borderColor:'#c7e3e3',background:'var(--mint)'}} onClick={() => setViewingEligibility(p)} title="Click to see who">{p.eligible_principals.length}</button>}</td><td><span style={{display:'flex',gap:5}}>{p.status === 'ACTIVE' && <button className="btn btn-primary" onClick={() => { setAssigningPackage(p); setAssignForm(emptyPackageAssignForm); setAssignMessage(''); }}>Assign</button>}<button className="btn" onClick={() => openEdit(p)}>Edit</button>{p.status === 'ACTIVE' && <button className="btn" onClick={() => openEligibility(p)}>Eligibility</button>}{p.status === 'ACTIVE' && <button className="btn" disabled={archivingId === p.id} onClick={() => void deletePackage(p.id)}>Delete</button>}</span></td></tr>)}</tbody></table>}</TablePanel>
+    {viewingEligibility && <div className="overlay-backdrop" onClick={() => setViewingEligibility(null)}>
+      <div className="overlay-card" onClick={event => event.stopPropagation()}>
+        <div className="panel-head">
+          <div>
+            <h2>Who can request this</h2>
+            <p className="subtitle" style={{marginTop:3}}>{viewingEligibility.name}</p>
+          </div>
+          <button type="button" className="btn" aria-label="Close" onClick={() => setViewingEligibility(null)}><X size={14}/></button>
+        </div>
+        <div className="table-wrap">
+          <table><thead><tr><th>Type</th><th>Name</th></tr></thead><tbody>
+            {viewingEligibility.eligible_principals.map((principal, index) => <tr key={`${principal.principal_type}-${principal.principal_id}-${index}`}>
+              <td><span className={`badge ${principal.principal_type === 'USER' ? 'info' : 'neutral'}`}>{principal.principal_type === 'USER' ? 'User' : 'Group'}</span></td>
+              <td className="user-name">{principal.display_name || principal.principal_id}</td>
+            </tr>)}
+          </tbody></table>
+        </div>
+        <div className="detail-section" style={{display:'flex',justifyContent:'flex-end'}}>
+          <button type="button" className="btn" onClick={() => { setViewingEligibility(null); openEligibility(viewingEligibility); }}>Edit eligibility</button>
+        </div>
+      </div>
+    </div>}
   </Page>;
 }
 function MyApprovalsPage() {

@@ -63,6 +63,20 @@ async def _apply_package_eligibility(session: AsyncSession, package: AccessPacka
     """Shared by create_package() and set_package_eligibility(): validates and writes who may self-request the
     package plus its approver/fallback-approver/escalation-window setup. Setup can happen either during creation
     (one combined flow) or afterward via the dedicated eligibility endpoint — both paths behave identically."""
+    # Dedupe by (type, id) before anything else — access_package_eligibility has a real unique constraint on this
+    # pair, and submitting the same principal twice (trivially easy from the UI: add a row, its picker still
+    # shows an already-used option) previously hit that constraint as an unhandled IntegrityError, silently
+    # rolling back the whole update — the visible symptom was "I added someone but the count never changed."
+    seen: set[tuple[str, object]] = set()
+    deduped_principals = []
+    for principal in principals:
+        key = (principal.principal_type, principal.principal_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped_principals.append(principal)
+    principals = deduped_principals
+
     for principal in principals:
         if principal.principal_type == "USER":
             if not await session.get(User, principal.principal_id):

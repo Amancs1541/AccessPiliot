@@ -11,6 +11,11 @@ from app.api.v1.audit import router as audit_router
 from app.api.v1.packages import router as packages_router
 from app.api.v1.onboarding import router as onboarding_router
 from app.api.v1.policies import router as policies_router
+from app.api.v1.setup import router as setup_router
+from app.api.v1.auth import router as auth_router
+from app.api.v1.breakglass_console import router as breakglass_console_router
+from app.api.v1.security_settings import router as security_settings_router
+from app.api.v1.branding import router as branding_router
 
 logger = logging.getLogger("accesspilot.api.v1")
 router = APIRouter(prefix="/api/v1")
@@ -20,6 +25,11 @@ router.include_router(audit_router)
 router.include_router(packages_router)
 router.include_router(onboarding_router)
 router.include_router(policies_router)
+router.include_router(setup_router)
+router.include_router(auth_router)
+router.include_router(breakglass_console_router)
+router.include_router(security_settings_router)
+router.include_router(branding_router)
 router.include_router(placeholder_router)
 router.include_router(providers_router)
 

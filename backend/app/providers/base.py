@@ -51,6 +51,13 @@ class NormalizedApplication:
     app_roles: tuple[NormalizedApplicationRole, ...] = ()
 
 
+@dataclass(frozen=True)
+class NormalizedDomain:
+    name: str
+    is_verified: bool = False
+    is_default: bool = False
+
+
 class ProviderConflictError(Exception):
     """Raised by a connector when a create operation targets a resource that already exists."""
 
@@ -131,3 +138,9 @@ class IdentityProvider(ABC):
 
     @abstractmethod
     async def create_group(self, request: NewGroupRequest) -> NormalizedGroup: ...
+
+    @abstractmethod
+    async def get_domains(self) -> list[NormalizedDomain]:
+        """The tenant's registered domains, so an Admin can pick a KNOWN VERIFIED one to provision new accounts
+        into instead of trusting an arbitrary email domain from a CSV row (which the target IdP may reject)."""
+        ...

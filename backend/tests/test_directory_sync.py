@@ -39,6 +39,7 @@ class FakeConnector(IdentityProviderProtocol):
     async def sync(self): return {}
     async def create_user(self, request): raise NotImplementedError
     async def create_group(self, request): raise NotImplementedError
+    async def get_domains(self): return []
 
 
 @pytest_asyncio.fixture

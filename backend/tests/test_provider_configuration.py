@@ -70,6 +70,44 @@ async def test_user_provider_access_is_denied():
 
 
 @pytest.mark.asyncio
+async def test_admin_can_fetch_the_connectors_domains(db_override):
+    app.dependency_overrides[provider_manage] = user("AccessPilot.Admin")
+    app.dependency_overrides[provider_read] = user("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/providers", json={"name": "Local Mock", "provider_type": "MOCK", "tenant_id": "tenant-1"})
+        provider_id = created.json()["id"]
+        domains = await client.get(f"/api/v1/providers/{provider_id}/domains")
+    assert domains.status_code == 200
+    names = [d["name"] for d in domains.json()]
+    assert "northstar.io" in names
+    assert all("is_verified" in d for d in domains.json())
+
+
+@pytest.mark.asyncio
+async def test_admin_can_set_provisioning_domain_and_username_convention(db_override):
+    app.dependency_overrides[provider_manage] = user("AccessPilot.Admin")
+    app.dependency_overrides[provider_read] = user("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/providers", json={"name": "Local Mock", "provider_type": "MOCK", "tenant_id": "tenant-1"})
+        provider_id = created.json()["id"]
+        updated = await client.patch(f"/api/v1/providers/{provider_id}", json={"provisioning_domain": "northstar.io", "username_convention": "{first}.{last}"})
+    assert updated.status_code == 200
+    assert updated.json()["provisioning_domain"] == "northstar.io"
+    assert updated.json()["username_convention"] == "{first}.{last}"
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_username_convention_template_is_rejected(db_override):
+    app.dependency_overrides[provider_manage] = user("AccessPilot.Admin")
+    app.dependency_overrides[provider_read] = user("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/providers", json={"name": "Local Mock", "provider_type": "MOCK", "tenant_id": "tenant-1"})
+        provider_id = created.json()["id"]
+        rejected = await client.patch(f"/api/v1/providers/{provider_id}", json={"username_convention": "{unknownToken}"})
+    assert rejected.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_provider_sync_persists_run_and_is_listed(db_override, monkeypatch):
     from app.providers.base import NormalizedGroup, NormalizedRole, NormalizedUser
     from app.api.v1.providers import provider_manage, provider_read, provider_sync, sync_read

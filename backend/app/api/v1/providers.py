@@ -5,10 +5,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.schemas.directory import SyncRunResponse
-from app.schemas.providers import ProviderCreate, ProviderCredentialUpdate, ProviderResponse, ProviderUpdate
+from app.schemas.providers import DomainResponse, ProviderCreate, ProviderCredentialUpdate, ProviderResponse, ProviderUpdate
 from app.security.auth import AuthenticatedUser, require_permission
 from app.services.directory_sync import run_sync
-from app.services.provider_configuration import create_provider, delete_provider, get_provider, list_providers, list_sync_runs, set_provider_credentials, test_provider, update_provider
+from app.services.provider_configuration import create_provider, delete_provider, get_provider, list_domains, list_providers, list_sync_runs, set_provider_credentials, test_provider, update_provider
 
 router = APIRouter(prefix="/providers", tags=["providers"])
 provider_read = require_permission("PROVIDER_READ")
@@ -47,3 +47,7 @@ async def sync_provider(provider_id: UUID, request: Request, _: AuthenticatedUse
 async def provider_sync_runs(provider_id: UUID, _: AuthenticatedUser = Depends(sync_read), db: AsyncSession = Depends(get_db)):
     await get_provider(db, provider_id)
     return await list_sync_runs(db, provider_id)
+
+@router.get("/{provider_id}/domains", response_model=list[DomainResponse])
+async def provider_domains(provider_id: UUID, _: AuthenticatedUser = Depends(provider_read), db: AsyncSession = Depends(get_db)):
+    return await list_domains(db, provider_id)

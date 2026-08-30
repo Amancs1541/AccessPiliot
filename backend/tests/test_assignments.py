@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
-from app.models import AccessAssignment, AuditLog, Group, IdentityProvider, Role, User
+from app.models import AccessAssignment, AuditLog, Group, IdentityProvider, Role, User, UserGroup
 from app.security.auth import AuthenticatedUser, require_authenticated_user
 from app.workers.expiration import expire_due_assignments
 
@@ -465,6 +465,35 @@ async def test_activate_eligible_assignment_grants_real_access_for_chosen_durati
     activated_at = datetime.fromisoformat(body["activated_at"].replace("Z", "+00:00"))
     expiration_time = datetime.fromisoformat(body["expiration_time"].replace("Z", "+00:00"))
     assert abs((expiration_time - activated_at) - timedelta(hours=3)) < timedelta(seconds=5)
+
+
+@pytest.mark.asyncio
+async def test_activating_a_group_assignment_immediately_records_local_membership(db_override):
+    """Real bug: a real Entra/Graph group grant never touched the local user_groups table at all — only the
+    periodic directory sync did, which can lag or (as found live) simply never catch up. Anything checking
+    user_groups right after AccessPilot itself grants membership (e.g. group-based Access Package eligibility)
+    would wrongly see no membership until that next sync. Confirms the row now appears immediately, and confirms
+    deactivating removes it again rather than leaving a stale phantom membership."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_id"]), "assignment_type": "PERMANENT", "justification": "Test justification."})
+        assignment_id = created.json()["id"]
+        activated = await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 3, "justification": "Test justification."})
+    assert activated.status_code == 200
+
+    async with db_override.factory() as session:
+        membership = (await session.execute(select(UserGroup).where(UserGroup.user_id == ids["user_id"], UserGroup.group_id == ids["group_id"]))).scalars().first()
+    assert membership is not None
+    assert membership.source == "ASSIGNMENT"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        deactivated = await client.post(f"/api/v1/assignments/{assignment_id}/deactivate")
+    assert deactivated.status_code == 200
+
+    async with db_override.factory() as session:
+        membership_after = (await session.execute(select(UserGroup).where(UserGroup.user_id == ids["user_id"], UserGroup.group_id == ids["group_id"]))).scalars().first()
+    assert membership_after is None
 
 
 @pytest.mark.asyncio
