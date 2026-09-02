@@ -42,14 +42,14 @@ async def test_defaults_are_both_disabled_and_readable_by_a_normal_user(db_overr
         response = await client.get("/api/v1/security-settings")
     assert response.status_code == 200
     body = response.json()
-    assert body == {"blur_enabled": False, "blur_after_minutes": 1, "lock_enabled": False, "lock_after_minutes": 5}
+    assert body == {"blur_enabled": False, "blur_after_minutes": 1, "lock_enabled": False, "lock_after_minutes": 5, "logout_enabled": False, "logout_after_minutes": 15}
 
 
 @pytest.mark.asyncio
 async def test_a_normal_user_cannot_update_settings(db_override):
     authenticate_as("AccessPilot.User")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.patch("/api/v1/security-settings", json={"blur_enabled": True, "blur_after_minutes": 2, "lock_enabled": True, "lock_after_minutes": 10})
+        response = await client.patch("/api/v1/security-settings", json={"blur_enabled": True, "blur_after_minutes": 2, "lock_enabled": True, "lock_after_minutes": 10, "logout_enabled": True, "logout_after_minutes": 20})
     assert response.status_code == 403
 
 
@@ -57,17 +57,25 @@ async def test_a_normal_user_cannot_update_settings(db_override):
 async def test_admin_can_update_settings_and_it_persists(db_override):
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        updated = await client.patch("/api/v1/security-settings", json={"blur_enabled": True, "blur_after_minutes": 2, "lock_enabled": True, "lock_after_minutes": 10})
+        updated = await client.patch("/api/v1/security-settings", json={"blur_enabled": True, "blur_after_minutes": 2, "lock_enabled": True, "lock_after_minutes": 10, "logout_enabled": True, "logout_after_minutes": 20})
         assert updated.status_code == 200
-        assert updated.json() == {"blur_enabled": True, "blur_after_minutes": 2, "lock_enabled": True, "lock_after_minutes": 10}
+        assert updated.json() == {"blur_enabled": True, "blur_after_minutes": 2, "lock_enabled": True, "lock_after_minutes": 10, "logout_enabled": True, "logout_after_minutes": 20}
 
         refetched = await client.get("/api/v1/security-settings")
-    assert refetched.json() == {"blur_enabled": True, "blur_after_minutes": 2, "lock_enabled": True, "lock_after_minutes": 10}
+    assert refetched.json() == {"blur_enabled": True, "blur_after_minutes": 2, "lock_enabled": True, "lock_after_minutes": 10, "logout_enabled": True, "logout_after_minutes": 20}
 
 
 @pytest.mark.asyncio
 async def test_out_of_range_minutes_are_rejected(db_override):
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.patch("/api/v1/security-settings", json={"blur_enabled": True, "blur_after_minutes": 0, "lock_enabled": False, "lock_after_minutes": 5})
+        response = await client.patch("/api/v1/security-settings", json={"blur_enabled": True, "blur_after_minutes": 0, "lock_enabled": False, "lock_after_minutes": 5, "logout_enabled": False, "logout_after_minutes": 15})
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_out_of_range_logout_minutes_are_rejected(db_override):
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.patch("/api/v1/security-settings", json={"blur_enabled": False, "blur_after_minutes": 1, "lock_enabled": False, "lock_after_minutes": 5, "logout_enabled": True, "logout_after_minutes": 0})
     assert response.status_code == 422

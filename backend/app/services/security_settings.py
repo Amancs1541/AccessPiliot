@@ -25,6 +25,8 @@ async def update_security_settings(session: AsyncSession, data: SecuritySettings
     settings.blur_after_minutes = data.blur_after_minutes
     settings.lock_enabled = data.lock_enabled
     settings.lock_after_minutes = data.lock_after_minutes
+    settings.logout_enabled = data.logout_enabled
+    settings.logout_after_minutes = data.logout_after_minutes
     await session.commit()
     await session.refresh(settings)
     return settings

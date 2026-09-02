@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.models import AccessAssignment
 from app.services.assignments import grant_provider_access_for_assignment
 from app.services.audit import record_audit
+from app.services.sod import check_sod_conflicts
 
 logger = logging.getLogger("accesspilot.activation")
 
@@ -39,6 +40,15 @@ async def activate_due_assignments(session_factory: async_sessionmaker[AsyncSess
         async with session_factory() as session:
             assignment = await session.get(AccessAssignment, candidate.id)
             if assignment is None or not _is_due(assignment, now):
+                continue
+            # No interactive user is present to justify an override here — a conflict just leaves the assignment
+            # SCHEDULED (same as a provider-grant failure below) and retries on the next poll, rather than
+            # silently granting or crashing the loop.
+            sod_conflicts = await check_sod_conflicts(session, assignment.user_id, assignment.resource_type, assignment.resource_id, assignment.app_role_external_id)
+            if sod_conflicts:
+                await record_audit(session, action="ASSIGNMENT_ACTIVATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, request_id=f"activation-worker-{assignment.id}", result="FAILURE", metadata={"reason": "SOD_CONFLICT", "conflicting_policies": [p.name for p in sod_conflicts]})
+                await session.commit()
+                logger.warning("SoD conflict blocked scheduled activation for assignment %s; will retry", candidate.id)
                 continue
             granted = await grant_provider_access_for_assignment(session, assignment)
             if not granted:

@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Box, Check, ChevronRight, Clock3, Cloud, Copy, Database, ExternalLink, FileCheck2, FolderKanban, Gauge, Image, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Lock, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldCheck, SlidersHorizontal, UploadCloud, UserRound, Users, X } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Box, Check, ChevronRight, Clock3, Cloud, Copy, Database, ExternalLink, FileCheck2, FolderKanban, Gauge, Image, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Lock, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldAlert, ShieldCheck, SlidersHorizontal, UploadCloud, UserRound, Users, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import { auditEvents, currentUser, policies, type RequestStatus, type Role } from './mock';
+import { currentUser, policies, type RequestStatus, type Role } from './mock';
 import { mockService, useMockState } from './mockService';
 import { apiBaseUrl, useAuth } from './auth';
 import ProviderConfiguration from './ProviderConfiguration';
@@ -28,7 +28,26 @@ interface ApiUserAccessSegments { permanentActive: number; eligible: number; }
 interface ApiSegmentMember { id: string; display_name: string; email: string; }
 interface ApiOnboardingImport { id: string; filename: string; status: string; total_records: number; created_count: number; updated_count: number; disabled_count: number; no_change_count: number; failed_count: number; access_revoked_count: number; access_revoke_failed_count: number; real_accounts_provisioned_count: number; birthright_assignments_created_count: number; error_summary: Record<string, unknown> | null; created_at: string; completed_at: string | null; }
 interface ApiOnboardingImportRecord { row_number: number; employee_id: string; action: string; error_message: string | null; raw_data: Record<string, string> | null; }
-interface ApiSecuritySettings { blur_enabled: boolean; blur_after_minutes: number; lock_enabled: boolean; lock_after_minutes: number; }
+interface ApiSecuritySettings { blur_enabled: boolean; blur_after_minutes: number; lock_enabled: boolean; lock_after_minutes: number; logout_enabled: boolean; logout_after_minutes: number; }
+interface ApiCurrentUser { id: string; displayName: string; email: string | null; tenantId: string; roles: string[]; department: string | null; jobTitle: string | null; employeeId: string | null; }
+interface ApiSodEntity { id: string; conflict_side: string; entity_type: string; entity_id: string; entity_display_name: string | null; app_role_external_id: string | null; entity_resolved: boolean; }
+interface ApiSodPolicy { id: string; name: string; description: string | null; severity: string; status: string; entities: ApiSodEntity[]; created_at: string; updated_at: string; }
+interface ApiSodViolationHolding { assignment_id: string | null; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; source: string; }
+interface ApiSodViolation { policy_id: string; policy_name: string; severity: string; user_id: string; user_display_name: string | null; side_a_holdings: ApiSodViolationHolding[]; side_b_holdings: ApiSodViolationHolding[]; exception_active: boolean; exception_expires_at: string | null; }
+interface ApiSodAdmin { id: string; user_id: string; user_display_name: string | null; user_email: string | null; granted_by: string | null; granted_by_display_name: string | null; created_at: string; }
+interface ApiSodException { id: string; sod_policy_id: string; policy_name: string | null; user_id: string; user_display_name: string | null; user_email: string | null; justification: string; granted_by: string | null; granted_by_display_name: string | null; expires_at: string; revoked_at: string | null; is_active: boolean; created_at: string; }
+interface ApiSodNotificationSettings { notify_on_new_violation: boolean; notify_on_exception_expiring: boolean; exception_expiring_warning_days: number; }
+interface ApiSodNotification { id: string; notification_type: string; sod_policy_id: string | null; policy_name: string | null; user_id: string | null; user_display_name: string | null; message: string; read_at: string | null; resolved_at: string | null; created_at: string; }
+interface ApiSodActivityEntry { id: string; timestamp: string; actor_display_name: string | null; action: string; target_user_display_name: string | null; result: string; metadata: Record<string, unknown> | null; }
+function summarizeSodActivity(entry: ApiSodActivityEntry): string {
+  const m = entry.metadata || {};
+  const parts: string[] = [];
+  if (typeof m.name === 'string') parts.push(`"${m.name}"`);
+  if (typeof m.severity === 'string') parts.push(String(m.severity));
+  if (Array.isArray(m.conflicting_policies) && m.conflicting_policies.length > 0) parts.push(`conflicts: ${(m.conflicting_policies as string[]).join(', ')}`);
+  if (m.sod_override) parts.push('overridden by admin');
+  return parts.join(' · ') || '—';
+}
 
 function useApiResource<T>(path: string, enabled = true) {
   const auth = useAuth();
@@ -79,7 +98,7 @@ const nav = [
   { label: 'Request Packages', icon: Box, to: '/request-packages', roles: ['user'] },
   { label: 'My Requests', icon: ListChecks, to: '/my-requests', roles: ['user'] },
   { label: 'Approvals', icon: Check, to: '/approvals', roles: ['user','admin'] },
-  { label: 'Profile', icon: UserRound, to: '/profile', roles: ['user'] },
+  { label: 'Profile', icon: UserRound, to: '/profile', roles: ['user','admin'] },
   { label: 'Users', icon: Users, to: '/admin/users', roles: ['admin'], section: 'ADMINISTRATION' },
   { label: 'Groups', icon: Network, to: '/admin/groups', roles: ['admin'] },
   { label: 'Roles', icon: Shield, to: '/admin/roles', roles: ['admin'] },
@@ -88,6 +107,11 @@ const nav = [
   { label: 'Access Packages', icon: Box, to: '/admin/access-packages', roles: ['admin'] },
   { label: 'Policies', icon: SlidersHorizontal, to: '/admin/policies', roles: ['admin'], section: 'GOVERNANCE' },
   { label: 'Audit Logs', icon: BookOpen, to: '/admin/audit', roles: ['admin'] },
+  // Its own sidebar section, not folded into GOVERNANCE — also visible to a plain end-user who holds the
+  // DB-driven AccessPilot.SoDAdmin flag (see Shell's nav filter, which additionally checks auth.isSodAdmin for
+  // items marked extra: 'sod') — 'admin' alone is neither sufficient nor necessary for these two.
+  { label: 'Separation of Duties', icon: ShieldAlert, to: '/admin/sod', roles: ['admin'], extra: 'sod', section: 'SEPARATION OF DUTIES' },
+  { label: 'SoD Configuration', icon: Settings2, to: '/admin/sod/configuration', roles: ['admin'], extra: 'sod' },
   { label: 'Providers', icon: Cloud, to: '/admin/providers', roles: ['admin'], section: 'SYSTEM' },
   { label: 'Sync', icon: RefreshCw, to: '/admin/sync', roles: ['admin'] },
   { label: 'Onboarding', icon: UploadCloud, to: '/admin/onboarding', roles: ['admin'] },
@@ -103,7 +127,7 @@ function App() {
   if (auth.breakglassActive && !auth.breakglassElevated) return <BreakGlassDashboard />;
   const role = auth.authConfigured ? auth.role : mockRole;
   const changeRole = (nextRole: Role) => { localStorage.setItem('accesspilot.mockRole', nextRole); setMockRole(nextRole); };
-  return <IdleGuard><Shell role={role} setRole={changeRole}><Routes><Route path="/" element={<Navigate to="/dashboard" replace />} /><Route path="/dashboard" element={<Dashboard role={role} />} /><Route path="/my-access" element={<MyAccess />} /><Route path="/request-access" element={<RequestAccess />} /><Route path="/request-packages" element={<RequestPackagesPage />} /><Route path="/my-requests" element={<Requests mine />} /><Route path="/approvals" element={<MyApprovalsPage />} /><Route path="/profile" element={<Profile />} /><Route path="/admin/users" element={<AdminOnly role={role}><UsersPage /></AdminOnly>} /><Route path="/admin/users/:id" element={<AdminOnly role={role}><UserDetail /></AdminOnly>} /><Route path="/admin/groups" element={<AdminOnly role={role}><GroupsPage /></AdminOnly>} /><Route path="/admin/roles" element={<AdminOnly role={role}><RolesPage /></AdminOnly>} /><Route path="/admin/access-requests" element={<AdminOnly role={role}><Requests /></AdminOnly>} /><Route path="/admin/access-requests/:id" element={<AdminOnly role={role}><RequestDetailInteractive /></AdminOnly>} /><Route path="/admin/assignments" element={<AdminOnly role={role}><AssignmentsInteractive /></AdminOnly>} /><Route path="/admin/access-packages" element={<AdminOnly role={role}><AccessPackagesInteractive /></AdminOnly>} /><Route path="/admin/policies" element={<AdminOnly role={role}><PoliciesPage /></AdminOnly>} /><Route path="/admin/audit" element={<AdminOnly role={role}><AuditPage /></AdminOnly>} /><Route path="/admin/providers" element={<AdminOnly role={role}><ProvidersPage /></AdminOnly>} /><Route path="/admin/sync" element={<AdminOnly role={role}><SyncPage /></AdminOnly>} /><Route path="/admin/onboarding" element={<AdminOnly role={role}><OnboardingPage /></AdminOnly>} /><Route path="/admin/security" element={<AdminOnly role={role}><SecurityPage /></AdminOnly>} /><Route path="/admin/branding" element={<AdminOnly role={role}><BrandingPage /></AdminOnly>} /><Route path="*" element={<Navigate to="/dashboard" replace />} /></Routes></Shell></IdleGuard>;
+  return <IdleGuard><Shell role={role} setRole={changeRole}><Routes><Route path="/" element={<Navigate to="/dashboard" replace />} /><Route path="/dashboard" element={<Dashboard role={role} />} /><Route path="/my-access" element={<MyAccess />} /><Route path="/request-access" element={<RequestAccess />} /><Route path="/request-packages" element={<RequestPackagesPage />} /><Route path="/my-requests" element={<Requests mine />} /><Route path="/approvals" element={<MyApprovalsPage />} /><Route path="/profile" element={<Profile />} /><Route path="/admin/users" element={<AdminOnly role={role}><UsersPage /></AdminOnly>} /><Route path="/admin/users/:id" element={<AdminOnly role={role}><UserDetail /></AdminOnly>} /><Route path="/admin/groups" element={<AdminOnly role={role}><GroupsPage /></AdminOnly>} /><Route path="/admin/roles" element={<AdminOnly role={role}><RolesPage /></AdminOnly>} /><Route path="/admin/access-requests" element={<AdminOnly role={role}><Requests /></AdminOnly>} /><Route path="/admin/access-requests/:id" element={<AdminOnly role={role}><RequestDetailInteractive /></AdminOnly>} /><Route path="/admin/assignments" element={<AdminOnly role={role}><AssignmentsInteractive /></AdminOnly>} /><Route path="/admin/access-packages" element={<AdminOnly role={role}><AccessPackagesInteractive /></AdminOnly>} /><Route path="/admin/policies" element={<AdminOnly role={role}><PoliciesPage /></AdminOnly>} /><Route path="/admin/audit" element={<AdminOnly role={role}><AuditPage /></AdminOnly>} /><Route path="/admin/providers" element={<AdminOnly role={role}><ProvidersPage /></AdminOnly>} /><Route path="/admin/sync" element={<AdminOnly role={role}><SyncPage /></AdminOnly>} /><Route path="/admin/onboarding" element={<AdminOnly role={role}><OnboardingPage /></AdminOnly>} /><Route path="/admin/security" element={<AdminOnly role={role}><SecurityPage /></AdminOnly>} /><Route path="/admin/branding" element={<AdminOnly role={role}><BrandingPage /></AdminOnly>} /><Route path="/admin/sod" element={role === 'admin' || auth.isSodAdmin ? <SodPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/sod/configuration" element={role === 'admin' || auth.isSodAdmin ? <SodConfigurationPage /> : <Navigate to="/dashboard" replace />} /><Route path="*" element={<Navigate to="/dashboard" replace />} /></Routes></Shell></IdleGuard>;
 }
 function SignInScreen() {
   const auth = useAuth();
@@ -147,6 +171,8 @@ function SecurityPage() {
       <label className="key" style={{display:'block',marginBottom:22,maxWidth:220}}><span>Blur after (minutes)</span><input className="select" style={{width:'100%'}} type="number" min={1} max={120} disabled={!form.blur_enabled} value={form.blur_after_minutes} onChange={event => setForm({...form, blur_after_minutes: Number(event.target.value)})}/></label>
       <label style={{display:'flex',alignItems:'center',gap:10,marginBottom:12}}><input type="checkbox" checked={form.lock_enabled} onChange={event => setForm({...form, lock_enabled: event.target.checked})}/><span>Lock the screen after inactivity — requires clicking "Continue" to resume; never signs the user out</span></label>
       <label className="key" style={{display:'block',marginBottom:22,maxWidth:220}}><span>Lock after (minutes)</span><input className="select" style={{width:'100%'}} type="number" min={1} max={120} disabled={!form.lock_enabled} value={form.lock_after_minutes} onChange={event => setForm({...form, lock_after_minutes: Number(event.target.value)})}/></label>
+      <label style={{display:'flex',alignItems:'center',gap:10,marginBottom:12}}><input type="checkbox" checked={form.logout_enabled} onChange={event => setForm({...form, logout_enabled: event.target.checked})}/><span>Automatically sign out after inactivity — ends the session; the user must sign in again</span></label>
+      <label className="key" style={{display:'block',marginBottom:22,maxWidth:220}}><span>Sign out after (minutes)</span><input className="select" style={{width:'100%'}} type="number" min={1} max={480} disabled={!form.logout_enabled} value={form.logout_after_minutes} onChange={event => setForm({...form, logout_after_minutes: Number(event.target.value)})}/></label>
       {message && <div className="notice" style={{marginBottom:14}}>{message}</div>}
       <button className="btn btn-primary" disabled={saving} onClick={save}>{saving ? 'Saving...' : 'Save'}</button>
     </div></div>}
@@ -206,17 +232,310 @@ function BrandingPage() {
     </div></div>}
   </Page>;
 }
+interface SodEntityRow { entity_type: string; entity_id: string; app_role_external_id: string }
+const emptySodEntity: SodEntityRow = { entity_type: 'GROUP', entity_id: '', app_role_external_id: '' };
+function SodEntityPicker({ rows, groups, roles, applications, packages, onAdd, onRemove, onUpdate }: {
+  rows: SodEntityRow[]; groups: ApiGroup[] | null; roles: ApiRole[] | null; applications: ApiApplication[] | null; packages: ApiPackage[] | null;
+  onAdd: () => void; onRemove: (index: number) => void; onUpdate: (index: number, patch: Partial<SodEntityRow>) => void;
+}) {
+  return <div>
+    {rows.map((row, index) => {
+      const options: { id: string; name: string }[] = row.entity_type === 'GROUP' ? (groups || []) : row.entity_type === 'ROLE' ? (roles || []) : row.entity_type === 'APPLICATION' ? (applications || []) : (packages || []);
+      const selectedApplication = row.entity_type === 'APPLICATION' ? (applications || []).find(a => a.id === row.entity_id) : null;
+      return <div key={index} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
+        <select className="select" value={row.entity_type} onChange={event => onUpdate(index, { entity_type: event.target.value, entity_id: '', app_role_external_id: '' })}>
+          <option value="GROUP">Group</option><option value="ROLE">Role</option><option value="APPLICATION">Application</option><option value="PACKAGE">Access Package</option>
+        </select>
+        <select className="select" value={row.entity_id} onChange={event => onUpdate(index, { entity_id: event.target.value })}>
+          <option value="">Select...</option>
+          {options.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+        </select>
+        {row.entity_type === 'APPLICATION' && <select className="select" value={row.app_role_external_id} onChange={event => onUpdate(index, { app_role_external_id: event.target.value })} disabled={!selectedApplication}>
+          <option value="">Select a role</option>
+          {(selectedApplication?.app_roles || []).map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+        </select>}
+        <button type="button" className="btn" onClick={() => onRemove(index)}>Remove</button>
+      </div>;
+    })}
+    <button type="button" className="btn" onClick={onAdd}>+ Add entity</button>
+  </div>;
+}
+const emptySodForm = { name: '', description: '', severity: 'MEDIUM', sideA: [] as SodEntityRow[], sideB: [] as SodEntityRow[] };
+function SodPage() {
+  const auth = useAuth();
+  const canManageRules = auth.isSodAdmin;
+  const canManageRoster = auth.role === 'admin';
+  const { data: policies, loading, reload } = useApiResource<ApiSodPolicy[]>('/api/v1/sod/policies');
+  const { data: violations, reload: reloadViolations } = useApiResource<ApiSodViolation[]>('/api/v1/sod/violations');
+  const { data: groups } = useApiResource<ApiGroup[]>('/api/v1/groups');
+  const { data: roles } = useApiResource<ApiRole[]>('/api/v1/roles');
+  const { data: applications } = useApiResource<ApiApplication[]>('/api/v1/applications');
+  const { data: packages } = useApiResource<ApiPackage[]>('/api/v1/packages');
+  const { data: admins, reload: reloadAdmins } = useApiResource<ApiSodAdmin[]>('/api/v1/sod/admins', canManageRoster);
+  const { data: directoryUsers } = useApiResource<ApiUser[]>('/api/v1/users', canManageRoster);
+  const { data: activity } = useApiResource<ApiSodActivityEntry[]>('/api/v1/sod/activity');
+  const { data: exceptions, reload: reloadExceptions } = useApiResource<ApiSodException[]>('/api/v1/sod/exceptions');
+  const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState(emptySodForm);
+  const [message, setMessage] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [newAdminUserId, setNewAdminUserId] = useState('');
+  const [exceptionForm, setExceptionForm] = useState<{ policyId: string; policyName: string; userId: string; userLabel: string; justification: string; expiresAt: string } | null>(null);
+  const [exceptionSaving, setExceptionSaving] = useState(false);
+  const [exceptionMessage, setExceptionMessage] = useState('');
+  const defaultExpiry = () => { const d = new Date(); d.setDate(d.getDate() + 30); return d.toISOString().slice(0, 16); };
+  const openExceptionForm = (policyId: string, policyName: string, userId: string, userLabel: string) => { setExceptionForm({ policyId, policyName, userId, userLabel, justification: '', expiresAt: defaultExpiry() }); setExceptionMessage(''); };
+  const submitException = async () => {
+    if (!exceptionForm) return;
+    if (exceptionForm.justification.trim().length < 3) { setExceptionMessage('A justification (at least 3 characters) is required.'); return; }
+    if (!exceptionForm.expiresAt) { setExceptionMessage('Pick an expiry date.'); return; }
+    setExceptionSaving(true); setExceptionMessage('');
+    try {
+      const response = await auth.apiRequest('/api/v1/sod/exceptions', { method: 'POST', body: JSON.stringify({ sod_policy_id: exceptionForm.policyId, user_id: exceptionForm.userId, justification: exceptionForm.justification.trim(), expires_at: new Date(exceptionForm.expiresAt).toISOString() }) });
+      if (response.ok) { setExceptionForm(null); reloadExceptions(); reloadViolations(); }
+      else { const body = await response.json().catch(() => null); setExceptionMessage(body?.error?.message || 'Unable to grant this exception.'); }
+    } catch { setExceptionMessage('Unable to reach the backend.'); }
+    finally { setExceptionSaving(false); }
+  };
+  const revokeException = async (id: string) => {
+    if (!window.confirm('Revoke this exception now? The conflict will be blocked again immediately for any new grant.')) return;
+    const response = await auth.apiRequest(`/api/v1/sod/exceptions/${id}`, { method: 'DELETE' });
+    if (response.ok) { reloadExceptions(); reloadViolations(); }
+  };
+
+  const startCreate = () => { setForm(emptySodForm); setEditingId(null); setShowForm(true); setMessage(''); };
+  const startEdit = (policy: ApiSodPolicy) => {
+    setForm({
+      name: policy.name, description: policy.description || '', severity: policy.severity,
+      sideA: policy.entities.filter(e => e.conflict_side === 'A').map(e => ({ entity_type: e.entity_type, entity_id: e.entity_id, app_role_external_id: e.app_role_external_id || '' })),
+      sideB: policy.entities.filter(e => e.conflict_side === 'B').map(e => ({ entity_type: e.entity_type, entity_id: e.entity_id, app_role_external_id: e.app_role_external_id || '' })),
+    });
+    setEditingId(policy.id); setShowForm(true); setMessage('');
+  };
+  const addEntity = (side: 'sideA' | 'sideB') => setForm({ ...form, [side]: [...form[side], { ...emptySodEntity }] });
+  const removeEntity = (side: 'sideA' | 'sideB', index: number) => setForm({ ...form, [side]: form[side].filter((_, i) => i !== index) });
+  const updateEntity = (side: 'sideA' | 'sideB', index: number, patch: Partial<SodEntityRow>) => setForm({ ...form, [side]: form[side].map((row, i) => i === index ? { ...row, ...patch } : row) });
+
+  const submit = async () => {
+    setMessage('');
+    if (!form.name.trim()) { setMessage('Name is required.'); return; }
+    if (form.sideA.length === 0 || form.sideB.length === 0) { setMessage('A policy needs at least one entity on each side.'); return; }
+    if ([...form.sideA, ...form.sideB].some(e => !e.entity_id || (e.entity_type === 'APPLICATION' && !e.app_role_external_id))) { setMessage('Complete every entity (select a target, and an application role where needed).'); return; }
+    setSaving(true);
+    try {
+      const entities = [
+        ...form.sideA.map(e => ({ conflict_side: 'A', entity_type: e.entity_type, entity_id: e.entity_id, app_role_external_id: e.entity_type === 'APPLICATION' ? e.app_role_external_id : undefined })),
+        ...form.sideB.map(e => ({ conflict_side: 'B', entity_type: e.entity_type, entity_id: e.entity_id, app_role_external_id: e.entity_type === 'APPLICATION' ? e.app_role_external_id : undefined })),
+      ];
+      const payload: Record<string, unknown> = { name: form.name.trim(), description: form.description.trim() || undefined, severity: form.severity, entities };
+      if (editingId) payload.status = 'ACTIVE';
+      const response = await auth.apiRequest(editingId ? `/api/v1/sod/policies/${editingId}` : '/api/v1/sod/policies', { method: editingId ? 'PATCH' : 'POST', body: JSON.stringify(payload) });
+      if (response.ok) { setShowForm(false); reload(); reloadViolations(); }
+      else { const body = await response.json().catch(() => null); setMessage(body?.error?.message || 'Unable to save this policy.'); }
+    } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
+  };
+
+  const toggleStatus = async (policy: ApiSodPolicy) => {
+    const payload = { name: policy.name, description: policy.description || undefined, severity: policy.severity, status: policy.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE', entities: policy.entities.map(e => ({ conflict_side: e.conflict_side, entity_type: e.entity_type, entity_id: e.entity_id, app_role_external_id: e.app_role_external_id || undefined })) };
+    const response = await auth.apiRequest(`/api/v1/sod/policies/${policy.id}`, { method: 'PATCH', body: JSON.stringify(payload) });
+    if (response.ok) { reload(); reloadViolations(); }
+  };
+
+  const remove = async (policy: ApiSodPolicy) => {
+    if (!window.confirm(`Delete the SoD policy "${policy.name}"? This cannot be undone.`)) return;
+    const response = await auth.apiRequest(`/api/v1/sod/policies/${policy.id}`, { method: 'DELETE' });
+    if (response.ok) { reload(); reloadViolations(); }
+  };
+
+  const addAdmin = async () => {
+    if (!newAdminUserId) return;
+    const response = await auth.apiRequest('/api/v1/sod/admins', { method: 'POST', body: JSON.stringify({ user_id: newAdminUserId }) });
+    if (response.ok) { setNewAdminUserId(''); reloadAdmins(); }
+  };
+  const removeAdmin = async (userId: string) => {
+    const response = await auth.apiRequest(`/api/v1/sod/admins/${userId}`, { method: 'DELETE' });
+    if (response.ok) reloadAdmins();
+  };
+
+  const summarize = (policy: ApiSodPolicy, side: string) => policy.entities.filter(e => e.conflict_side === side).map(e => e.entity_display_name || 'Unresolved').join(', ') || '—';
+
+  return <Page eyebrow="GOVERNANCE" title="Separation of Duties" subtitle="Admin-configurable rules preventing any user from holding two conflicting entitlements at once — enforced live, at the moment access actually becomes real." action={canManageRules && <button className="btn btn-primary" onClick={startCreate}>+ Add SoD policy</button>}>
+    {!canManageRules && <div className="notice" style={{ marginBottom: 18 }}>You can view rules and violations. Only an AccessPilot.SoDAdmin can create, edit, or disable rules — ask an Admin to grant that if you need it.</div>}
+    {showForm && canManageRules && <div className="panel" style={{ marginBottom: 24 }}><div className="detail-section">
+      <div className="detail-title"><h2>{editingId ? 'Edit SoD policy' : 'New SoD policy'}</h2></div>
+      <label className="key" style={{ display: 'block', marginBottom: 14, maxWidth: 420 }}><span>Name</span><input className="select" style={{ width: '100%' }} value={form.name} onChange={event => setForm({ ...form, name: event.target.value })} /></label>
+      <label className="key" style={{ display: 'block', marginBottom: 14, maxWidth: 420 }}><span>Description</span><input className="select" style={{ width: '100%' }} value={form.description} onChange={event => setForm({ ...form, description: event.target.value })} /></label>
+      <label className="key" style={{ display: 'block', marginBottom: 20, maxWidth: 220 }}><span>Severity</span><select className="select" style={{ width: '100%' }} value={form.severity} onChange={event => setForm({ ...form, severity: event.target.value })}><option value="LOW">Low</option><option value="MEDIUM">Medium</option><option value="HIGH">High</option><option value="CRITICAL">Critical</option></select></label>
+      <div className="key" style={{ marginBottom: 8 }}><span>Side A — holding anything here...</span></div>
+      <SodEntityPicker rows={form.sideA} groups={groups} roles={roles} applications={applications} packages={packages} onAdd={() => addEntity('sideA')} onRemove={i => removeEntity('sideA', i)} onUpdate={(i, patch) => updateEntity('sideA', i, patch)} />
+      <div className="key" style={{ margin: '18px 0 8px' }}><span>...conflicts with holding anything here (Side B)</span></div>
+      <SodEntityPicker rows={form.sideB} groups={groups} roles={roles} applications={applications} packages={packages} onAdd={() => addEntity('sideB')} onRemove={i => removeEntity('sideB', i)} onUpdate={(i, patch) => updateEntity('sideB', i, patch)} />
+      {message && <div className="notice" style={{ margin: '14px 0' }}>{message}</div>}
+      <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
+        <button className="btn btn-primary" disabled={saving} onClick={submit}>{saving ? 'Saving...' : 'Save policy'}</button>
+        <button className="btn" onClick={() => setShowForm(false)}>Cancel</button>
+      </div>
+    </div></div>}
+
+    <div className="panel" style={{ marginBottom: 24 }}>
+      <div className="panel-head"><h2>Policies</h2></div>
+      {loading ? <div className="empty">Loading...</div> : !policies || policies.length === 0 ? <div className="empty">No SoD policies defined yet.</div> : <table className="table"><thead><tr><th>Name</th><th>Severity</th><th>Status</th><th>Side A</th><th>Side B</th>{canManageRules && <th>Actions</th>}</tr></thead><tbody>
+        {policies.map(policy => <tr key={policy.id}>
+          <td>{policy.name}</td><td>{policy.severity}</td><td><StatusBadge status={policy.status} /></td>
+          <td>{summarize(policy, 'A')}</td><td>{summarize(policy, 'B')}</td>
+          {canManageRules && <td style={{ display: 'flex', gap: 8 }}>
+            <button className="btn" onClick={() => startEdit(policy)}>Edit</button>
+            <button className="btn" onClick={() => toggleStatus(policy)}>{policy.status === 'ACTIVE' ? 'Disable' : 'Enable'}</button>
+            <button className="btn" onClick={() => remove(policy)}>Delete</button>
+          </td>}
+        </tr>)}
+      </tbody></table>}
+    </div>
+
+    {exceptionForm && <form role="dialog" aria-modal="true" className="panel" style={{ maxWidth: 480, marginBottom: 24 }} onSubmit={event => { event.preventDefault(); void submitException(); }}>
+      <div className="panel-head"><h2>Grant an exception</h2><button type="button" className="btn" aria-label="Close" onClick={() => setExceptionForm(null)}><X size={14} /></button></div>
+      <div className="detail-section">
+        <p className="subtitle" style={{ marginTop: 0 }}>Formally accept this specific conflict for <strong>{exceptionForm.userLabel}</strong> on policy <strong>{exceptionForm.policyName}</strong>, for a bounded period. New grants for this user on this rule won't be blocked while the exception is active — it can be revoked early at any time.</p>
+        <label className="key" style={{ display: 'block', marginBottom: 14 }}><span>Justification — why is this risk acceptable? (required)</span><input className="select" style={{ width: '100%' }} required value={exceptionForm.justification} onChange={event => setExceptionForm({ ...exceptionForm, justification: event.target.value })} /></label>
+        <label className="key" style={{ display: 'block' }}><span>Expires</span><input className="select" style={{ width: '100%' }} type="datetime-local" required value={exceptionForm.expiresAt} onChange={event => setExceptionForm({ ...exceptionForm, expiresAt: event.target.value })} /></label>
+        {exceptionMessage && <div className="notice" style={{ marginTop: 14 }}>{exceptionMessage}</div>}
+      </div>
+      <div className="detail-section" style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}><button type="button" className="btn" onClick={() => setExceptionForm(null)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={exceptionSaving}>{exceptionSaving ? 'Granting...' : 'Grant exception'}</button></div>
+    </form>}
+
+    <div className="panel" style={{ marginBottom: 24 }}>
+      <div className="panel-head"><h2>Violations</h2></div>
+      {!violations ? <div className="empty">Loading...</div> : violations.length === 0 ? <div className="empty">No current violations — nobody holds both sides of an active rule.</div> : <table className="table"><thead><tr><th>User</th><th>Policy</th><th>Severity</th><th>Side A holdings</th><th>Side B holdings</th><th>Risk status</th></tr></thead><tbody>
+        {violations.map((v, i) => <tr key={i}>
+          <td>{v.user_display_name || v.user_id}</td><td>{v.policy_name}</td><td>{v.severity}</td>
+          <td>{v.side_a_holdings.map(h => `${h.resource_display_name || h.resource_type}${h.source === 'DIRECT_IN_ENTRA' ? ' (direct in Entra)' : ''}`).join(', ')}</td>
+          <td>{v.side_b_holdings.map(h => `${h.resource_display_name || h.resource_type}${h.source === 'DIRECT_IN_ENTRA' ? ' (direct in Entra)' : ''}`).join(', ')}</td>
+          <td>{v.exception_active
+            ? <span className="badge success">Accepted until {v.exception_expires_at ? new Date(v.exception_expires_at).toLocaleDateString() : '—'}</span>
+            : canManageRules ? <button className="btn" onClick={() => openExceptionForm(v.policy_id, v.policy_name, v.user_id, v.user_display_name || v.user_id)}>Grant exception</button> : <span className="badge danger">Open</span>}
+          </td>
+        </tr>)}
+      </tbody></table>}
+    </div>
+
+    <div className="panel" style={{ marginBottom: 24 }}>
+      <div className="panel-head"><h2>Active Exceptions</h2></div>
+      <div className="detail-section">
+        <p className="subtitle" style={{ marginTop: 0, marginBottom: 16 }}>Time-boxed risk acceptances — while one is active, new grants for that user on that rule aren't blocked. Every grant, revoke, and expiry is on the record in SoD Activity below.</p>
+        {!exceptions || exceptions.length === 0 ? <div className="empty">No exceptions have ever been granted.</div> : <table className="table"><thead><tr><th>User</th><th>Policy</th><th>Justification</th><th>Granted by</th><th>Status</th><th>Actions</th></tr></thead><tbody>
+          {exceptions.map(exception => <tr key={exception.id}>
+            <td>{exception.user_display_name || exception.user_id}</td>
+            <td>{exception.policy_name || '—'}</td>
+            <td>{exception.justification}</td>
+            <td>{exception.granted_by_display_name || '—'}</td>
+            <td>{exception.revoked_at ? <span className="badge neutral">Revoked</span> : exception.is_active ? <span className="badge success">Active until {new Date(exception.expires_at).toLocaleString()}</span> : <span className="badge neutral">Expired</span>}</td>
+            <td>{canManageRules && exception.is_active && <button className="btn" onClick={() => revokeException(exception.id)}>Revoke</button>}</td>
+          </tr>)}
+        </tbody></table>}
+      </div>
+    </div>
+
+    <div className="panel" style={{ marginBottom: canManageRoster ? 24 : 0 }}>
+      <div className="panel-head"><h2>SoD Activity</h2></div>
+      {!activity ? <div className="empty">Loading...</div> : activity.length === 0 ? <div className="empty">No SoD activity yet — rule changes, roster changes, and any blocked or overridden grant will show up here.</div> : <table className="table"><thead><tr><th>When</th><th>Action</th><th>Actor</th><th>Target user</th><th>Result</th><th>Details</th></tr></thead><tbody>
+        {activity.map(entry => <tr key={entry.id}>
+          <td>{new Date(entry.timestamp).toLocaleString()}</td>
+          <td>{entry.action.replace(/_/g, ' ')}</td>
+          <td>{entry.actor_display_name || 'System'}</td>
+          <td>{entry.target_user_display_name || '—'}</td>
+          <td><StatusBadge status={entry.result} /></td>
+          <td>{summarizeSodActivity(entry)}</td>
+        </tr>)}
+      </tbody></table>}
+    </div>
+
+    {canManageRoster && <div className="panel"><div className="detail-section">
+      <div className="detail-title"><h2>SoD Administrators</h2></div>
+      <p className="subtitle" style={{ marginBottom: 16 }}>Only these directory users (plus you, as an Admin, for oversight and roster management) can create or edit SoD rules — a genuine separation between managing access and governing its conflict rules.</p>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+        <select className="select" style={{ minWidth: 260 }} value={newAdminUserId} onChange={event => setNewAdminUserId(event.target.value)}>
+          <option value="">Select a user...</option>
+          {(directoryUsers || []).filter(u => !(admins || []).some(a => a.user_id === u.id)).map(u => <option key={u.id} value={u.id}>{u.display_name} ({u.email})</option>)}
+        </select>
+        <button className="btn btn-primary" disabled={!newAdminUserId} onClick={addAdmin}>Grant SoDAdmin</button>
+      </div>
+      {!admins || admins.length === 0 ? <div className="empty">No one holds AccessPilot.SoDAdmin yet.</div> : <table className="table"><thead><tr><th>User</th><th>Granted by</th><th>Since</th><th>Actions</th></tr></thead><tbody>
+        {admins.map(a => <tr key={a.id}>
+          <td>{a.user_display_name} ({a.user_email})</td><td>{a.granted_by_display_name || '—'}</td><td>{new Date(a.created_at).toLocaleDateString()}</td>
+          <td><button className="btn" onClick={() => removeAdmin(a.user_id)}>Revoke</button></td>
+        </tr>)}
+      </tbody></table>}
+    </div></div>}
+  </Page>;
+}
+function SodConfigurationPage() {
+  const auth = useAuth();
+  const canManage = auth.isSodAdmin;
+  const { data: settings, reload: reloadSettings } = useApiResource<ApiSodNotificationSettings>('/api/v1/sod/notification-settings');
+  const { data: notifications, reload: reloadNotifications } = useApiResource<ApiSodNotification[]>('/api/v1/sod/notifications');
+  const [form, setForm] = useState<ApiSodNotificationSettings | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  useEffect(() => { if (settings) setForm(settings); }, [settings]);
+
+  const save = async () => {
+    if (!form) return;
+    setSaving(true); setMessage('');
+    try {
+      const response = await auth.apiRequest('/api/v1/sod/notification-settings', { method: 'PATCH', body: JSON.stringify(form) });
+      if (response.ok) { setMessage('Saved.'); reloadSettings(); }
+      else { const body = await response.json().catch(() => null); setMessage(body?.error?.message || 'Unable to save.'); }
+    } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
+  };
+
+  const markRead = async (id: string) => { await auth.apiRequest(`/api/v1/sod/notifications/${id}/read`, { method: 'POST' }); reloadNotifications(); };
+  const markAllRead = async () => { await auth.apiRequest('/api/v1/sod/notifications/read-all', { method: 'POST' }); reloadNotifications(); };
+
+  const unreadCount = (notifications || []).filter(n => !n.read_at && !n.resolved_at).length;
+
+  return <Page eyebrow="SEPARATION OF DUTIES" title="SoD Configuration" subtitle="Control when the SoD engine notifies you, and review everything it has ever reported.">
+    <div className="panel" style={{ marginBottom: 24 }}>
+      <div className="panel-head"><h2>Notification settings</h2></div>
+      {!canManage && <div className="notice" style={{ margin: '0 18px 18px' }}>You can view these settings and the notification log. Only an AccessPilot.SoDAdmin can change them.</div>}
+      {!form ? <div className="empty">Loading...</div> : <div className="detail-section">
+        <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}><input type="checkbox" disabled={!canManage} checked={form.notify_on_new_violation} onChange={event => setForm({ ...form, notify_on_new_violation: event.target.checked })} /><span>Notify when a new SoD violation is found</span></label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}><input type="checkbox" disabled={!canManage} checked={form.notify_on_exception_expiring} onChange={event => setForm({ ...form, notify_on_exception_expiring: event.target.checked })} /><span>Notify before an accepted-risk exception expires</span></label>
+        <label className="key" style={{ display: 'block', marginBottom: 22, maxWidth: 260 }}><span>Warn this many days before an exception expires</span><input className="select" style={{ width: '100%' }} type="number" min={1} max={90} disabled={!canManage || !form.notify_on_exception_expiring} value={form.exception_expiring_warning_days} onChange={event => setForm({ ...form, exception_expiring_warning_days: Number(event.target.value) })} /></label>
+        {message && <div className="notice" style={{ marginBottom: 14 }}>{message}</div>}
+        {canManage && <button className="btn btn-primary" disabled={saving} onClick={save}>{saving ? 'Saving...' : 'Save'}</button>}
+      </div>}
+    </div>
+
+    <div className="panel">
+      <div className="panel-head"><h2>Notification Log</h2><div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>{unreadCount > 0 && <span className="badge danger">{unreadCount} unread</span>}<button className="btn" onClick={markAllRead} disabled={!notifications || unreadCount === 0}>Mark all as read</button></div></div>
+      {!notifications ? <div className="empty">Loading...</div> : notifications.length === 0 ? <div className="empty">Nothing has been reported yet — a new violation or a soon-expiring exception will show up here.</div> : <table className="table"><thead><tr><th>When</th><th>Type</th><th>Message</th><th>Status</th><th>Actions</th></tr></thead><tbody>
+        {notifications.map(n => <tr key={n.id} style={{ opacity: n.read_at ? 0.7 : 1 }}>
+          <td>{new Date(n.created_at).toLocaleString()}</td>
+          <td>{n.notification_type.replace(/_/g, ' ')}</td>
+          <td>{n.message}</td>
+          <td>{n.resolved_at ? <span className="badge neutral">Resolved</span> : n.read_at ? <span className="badge neutral">Read</span> : <span className="badge danger">Unread</span>}</td>
+          <td>{!n.read_at && <button className="btn" onClick={() => markRead(n.id)}>Mark read</button>}</td>
+        </tr>)}
+      </tbody></table>}
+    </div>
+  </Page>;
+}
 function AdminOnly({ role, children }: { role: Role; children: React.ReactNode }) { return role === 'admin' ? children : <Navigate to="/dashboard" replace />; }
 function Shell({ role, setRole, children }: { role: Role; setRole: (r: Role) => void; children: React.ReactNode }) {
   const location = useLocation(); const navigate = useNavigate();
   const auth = useAuth();
   const branding = useBranding();
-  const visible = nav.filter(item => item.roles.includes(role));
+  const visible = nav.filter(item => item.roles.includes(role) || (item.extra === 'sod' && auth.isSodAdmin));
   const path = location.pathname;
-  return <div className="app"><aside className="sidebar"><Link to="/dashboard" className="brand"><span className="brand-mark"><img src={branding?.internal_logo || logo} alt="AccessPilot" /></span> AccessPilot</Link>{visible.map((item, index) => { const I = item.icon; const previous = visible[index - 1]; return <div key={item.to}>{item.section && item.section !== previous?.section && <div className="nav-label">{item.section}</div>}<Link className={`nav-item ${path === item.to || (item.to !== '/dashboard' && path.startsWith(item.to)) ? 'active' : ''}`} to={item.to}><I />{item.label}</Link></div> })}<div className="sidebar-foot"><div>ACCESSPILOT CONSOLE</div><div style={{marginTop:5}}>v0.1.0 · Mock environment</div><div className="sidebar-credit">by <span>{branding?.powered_by_text || 'Clover‑X'}</span></div></div></aside><main className="main"><header className="topbar"><button className="mobile-menu" aria-label="Open navigation"><Menu size={20}/></button><div className="crumb">Workspace / <strong>{role === 'admin' ? 'Administration' : 'Self-service'}</strong></div><div className="top-actions">{auth.authConfigured ? <button className="btn" onClick={() => (auth.account || auth.breakglassActive) ? auth.signOut() : auth.signIn()}>{(auth.account || auth.breakglassActive) ? 'Sign out' : 'Sign in'}</button> : <div className="role-switch" aria-label="Development role switcher"><button className={role === 'user' ? 'active' : ''} onClick={() => { setRole('user'); navigate('/dashboard'); }}>User</button><button className={role === 'admin' ? 'active' : ''} onClick={() => { setRole('admin'); navigate('/dashboard'); }}>Admin</button></div>}<Bell size={17} color="#718088"/><div className="profile"><span>{auth.account?.name || (auth.breakglassActive ? `Break-Glass (${auth.breakglassUsername})` : currentUser.name)}</span><span className="avatar">{currentUser.initials}</span></div></div></header>{children}</main></div>;
+  const seesSodBell = role === 'admin' || auth.isSodAdmin;
+  const { data: sodNotifications } = useApiResource<ApiSodNotification[]>('/api/v1/sod/notifications', seesSodBell);
+  const unreadSodCount = (sodNotifications || []).filter(n => !n.read_at && !n.resolved_at).length;
+  return <div className="app"><aside className="sidebar"><Link to="/dashboard" className="brand"><span className="brand-mark"><img src={branding?.internal_logo || logo} alt="AccessPilot" /></span> AccessPilot</Link>{visible.map((item, index) => { const I = item.icon; const previous = visible[index - 1]; return <div key={item.to}>{item.section && item.section !== previous?.section && <div className="nav-label">{item.section}</div>}<Link className={`nav-item ${path === item.to || (item.to !== '/dashboard' && path.startsWith(item.to)) ? 'active' : ''}`} to={item.to}><I />{item.label}</Link></div> })}<div className="sidebar-foot"><div>ACCESSPILOT CONSOLE</div><div style={{marginTop:5}}>v0.1.0 · Mock environment</div><div className="sidebar-credit">by <span>{branding?.powered_by_text || 'Clover‑X'}</span></div></div></aside><main className="main"><header className="topbar"><button className="mobile-menu" aria-label="Open navigation"><Menu size={20}/></button><div className="crumb">Workspace / <strong>{role === 'admin' ? 'Administration' : 'Self-service'}</strong></div><div className="top-actions">{auth.authConfigured ? <button className="btn" onClick={() => (auth.account || auth.breakglassActive) ? auth.signOut() : auth.signIn()}>{(auth.account || auth.breakglassActive) ? 'Sign out' : 'Sign in'}</button> : <div className="role-switch" aria-label="Development role switcher"><button className={role === 'user' ? 'active' : ''} onClick={() => { setRole('user'); navigate('/dashboard'); }}>User</button><button className={role === 'admin' ? 'active' : ''} onClick={() => { setRole('admin'); navigate('/dashboard'); }}>Admin</button></div>}{seesSodBell ? <Link to="/admin/sod/configuration" aria-label="SoD notifications" style={{position:'relative',display:'inline-flex'}}><Bell size={17} color="#718088"/>{unreadSodCount > 0 && <span style={{position:'absolute',top:-6,right:-6,background:'#c0392b',color:'#fff',borderRadius:9,fontSize:10,fontWeight:700,padding:'0 5px',lineHeight:'16px',minWidth:16,textAlign:'center'}}>{unreadSodCount}</span>}</Link> : <Bell size={17} color="#718088"/>}<div className="profile"><span>{auth.account?.name || (auth.breakglassActive ? `Break-Glass (${auth.breakglassUsername})` : currentUser.name)}</span><span className="avatar">{currentUser.initials}</span></div></div></header>{children}</main></div>;
 }
 function Page({ eyebrow, title, subtitle, action, children }: { eyebrow?: string; title: string; subtitle?: string; action?: React.ReactNode; children: React.ReactNode }) { return <div className="content"><div className="page-head"><div>{eyebrow && <div className="eyebrow">{eyebrow}</div>}<h1>{title}</h1>{subtitle && <p className="subtitle">{subtitle}</p>}</div>{action}</div>{children}</div>; }
-function StatCards({ admin = false, dashboard }: { admin?: boolean; dashboard?: DashboardAdmin | null }) { const na = '—'; const stats: Array<[string, string, string, LucideIcon, string?]> = admin ? [['Total users', dashboard ? String(dashboard.users) : na, 'Synced from Microsoft Entra ID', Users, '/admin/users'],['Groups', dashboard ? String(dashboard.groups) : na, 'Synced from Microsoft Entra ID', Network, '/admin/groups'],['Privileged roles', dashboard ? String(dashboard.privilegedRoles) : na, `${dashboard ? dashboard.roles : na} directory roles total`, ShieldCheck, '/admin/roles?privileged=true'],['Active JIT sessions', dashboard ? String(dashboard.activeSessions) : na, 'Currently active, real access grants', Clock3, '/admin/assignments?status=ACTIVE'],['Pending requests', dashboard ? String(dashboard.pendingRequests) : na, 'Awaiting approver decision', FolderKanban, '/admin/assignments?status=PENDING_APPROVAL'],['Expiring access', dashboard ? String(dashboard.expiringAccess) : na, 'Active access expiring within 24 hours', AlertTriangle, '/admin/assignments?status=ACTIVE&expiring=24h'],['Provider health', dashboard?.provider?.status || na, dashboard?.provider ? dashboard.provider.name : 'No provider configured', Cloud, '/admin/providers'],['Policy coverage', na, 'Not available in this release', FileCheck2, '/admin/policies']] : [['Active access','—','Not available in this release',KeyRound],['Eligible access','—','Not available in this release',Shield],['Pending requests','—','Not available in this release',Clock3],['Expiring soon','—','Not available in this release',AlertTriangle]]; return <div className={`stats ${admin ? 'admin-stats' : ''}`}>{stats.map(([label,value,foot,I,to]) => { const body = <><div className="stat-top"><span>{label}</span><span className="stat-icon"><I size={15}/></span></div><div className="stat-value">{value}</div><div className="stat-foot">{foot}</div></>; return to ? <Link to={to} className="stat stat-link" key={String(label)}>{body}</Link> : <div className="stat" key={String(label)}>{body}</div>; })}</div>; }
+interface UserDashboardStats { active: number; eligible: number; pending: number; expiringSoon: number; }
+function StatCards({ admin = false, dashboard, userStats }: { admin?: boolean; dashboard?: DashboardAdmin | null; userStats?: UserDashboardStats | null }) { const na = '—'; const stats: Array<[string, string, string, LucideIcon, string?]> = admin ? [['Total users', dashboard ? String(dashboard.users) : na, 'Synced from Microsoft Entra ID', Users, '/admin/users'],['Groups', dashboard ? String(dashboard.groups) : na, 'Synced from Microsoft Entra ID', Network, '/admin/groups'],['Privileged roles', dashboard ? String(dashboard.privilegedRoles) : na, `${dashboard ? dashboard.roles : na} directory roles total`, ShieldCheck, '/admin/roles?privileged=true'],['Active JIT sessions', dashboard ? String(dashboard.activeSessions) : na, 'Currently active, real access grants', Clock3, '/admin/assignments?status=ACTIVE'],['Pending requests', dashboard ? String(dashboard.pendingRequests) : na, 'Awaiting approver decision', FolderKanban, '/admin/assignments?status=PENDING_APPROVAL'],['Expiring access', dashboard ? String(dashboard.expiringAccess) : na, 'Active access expiring within 24 hours', AlertTriangle, '/admin/assignments?status=ACTIVE&expiring=24h'],['Provider health', dashboard?.provider?.status || na, dashboard?.provider ? dashboard.provider.name : 'No provider configured', Cloud, '/admin/providers'],['Policy coverage', na, 'Not available in this release', FileCheck2, '/admin/policies']] : [['Active access', userStats ? String(userStats.active) : na, 'Currently real, granted access', KeyRound, '/my-access'],['Eligible access', userStats ? String(userStats.eligible) : na, 'Ready for you to activate', Shield, '/my-access'],['Pending requests', userStats ? String(userStats.pending) : na, 'Awaiting approver decision', Clock3, '/my-requests'],['Expiring soon', userStats ? String(userStats.expiringSoon) : na, 'Active access expiring within 24 hours', AlertTriangle, '/my-access']]; return <div className={`stats ${admin ? 'admin-stats' : ''}`}>{stats.map(([label,value,foot,I,to]) => { const body = <><div className="stat-top"><span>{label}</span><span className="stat-icon"><I size={15}/></span></div><div className="stat-value">{value}</div><div className="stat-foot">{foot}</div></>; return to ? <Link to={to} className="stat stat-link" key={String(label)}>{body}</Link> : <div className="stat" key={String(label)}>{body}</div>; })}</div>; }
 function niceAxisMax(value: number): number {
   if (value <= 5) return 5;
   const magnitude = Math.pow(10, Math.floor(Math.log10(value)));
@@ -298,6 +617,7 @@ function PieChart({ segments, onSliceClick }: { segments: { key: string; label: 
 function Dashboard({ role }: { role: Role }) {
   const admin = role === 'admin';
   const auth = useAuth();
+  const navigate = useNavigate();
   const { data: dashboard, error, loading, reload: reloadDashboard } = useApiResource<DashboardAdmin>('/api/v1/dashboard/admin', admin);
   const { data: recentAudit, reload: reloadAudit } = useApiResource<ApiAuditLog[]>('/api/v1/audit-logs', admin);
   const { data: timeline, reload: reloadTimeline } = useApiResource<ApiActivationTimeline>('/api/v1/dashboard/privileged-role-activations?days=30', admin);
@@ -305,8 +625,21 @@ function Dashboard({ role }: { role: Role }) {
   const [selectedSegment, setSelectedSegment] = useState<string | null>(null);
   const { data: segmentMembers, loading: membersLoading } = useApiResource<ApiSegmentMember[]>(`/api/v1/dashboard/user-access-segments/${selectedSegment}`, Boolean(selectedSegment));
   const segmentTitle = selectedSegment === 'permanent-active' ? 'Permanent & Active' : selectedSegment === 'eligible' ? 'Eligible (not yet activated)' : '';
+  const { data: myAssignments, reload: reloadMine } = useApiResource<ApiAssignment[]>('/api/v1/assignments/mine', !admin);
+  const seesSod = admin || auth.isSodAdmin;
+  const { data: sodViolations } = useApiResource<ApiSodViolation[]>('/api/v1/sod/violations', seesSod);
+  const { data: sodActivity } = useApiResource<ApiSodActivityEntry[]>('/api/v1/sod/activity', seesSod);
   const greetingName = auth.account?.name || (auth.authConfigured ? '' : currentUser.name);
   const lastSyncLabel = dashboard?.lastSync?.completedAt ? new Date(dashboard.lastSync.completedAt).toLocaleString() : dashboard?.lastSync ? 'In progress' : 'Never synced';
+
+  const userStats: UserDashboardStats | null = myAssignments ? {
+    active: myAssignments.filter(a => a.status === 'ACTIVE').length,
+    eligible: myAssignments.filter(a => a.status === 'ELIGIBLE').length,
+    pending: myAssignments.filter(a => a.status === 'PENDING_APPROVAL').length,
+    expiringSoon: myAssignments.filter(a => a.status === 'ACTIVE' && a.expiration_time && new Date(a.expiration_time).getTime() - Date.now() <= 24 * 60 * 60 * 1000).length,
+  } : null;
+  const myActiveAccess = (myAssignments || []).filter(a => a.status === 'ACTIVE');
+  const myRecentActivity = [...(myAssignments || [])].sort((a, b) => new Date(b.activated_at || b.created_at).getTime() - new Date(a.activated_at || a.created_at).getTime()).slice(0, 6);
 
   useEffect(() => {
     if (!admin) return;
@@ -315,10 +648,26 @@ function Dashboard({ role }: { role: Role }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [admin]);
 
-  return <Page eyebrow={admin ? 'ADMINISTRATION' : 'SELF-SERVICE'} title={admin ? (greetingName ? `Good morning, ${greetingName.split(' ')[0]}` : 'Good morning') : 'Your access overview'} subtitle={admin ? 'Here is what is happening across your identity environment.' : 'Review your current access and request what you need.'} action={<button className="btn btn-primary" onClick={() => {}}><ArrowRight size={15}/> {admin ? 'Review requests' : 'Request access'}</button>}><StatCards admin={admin} dashboard={dashboard}/>{admin && loading && <div className="empty">Loading dashboard...</div>}{admin && error && <div className="empty">{error}</div>}
+  useEffect(() => {
+    if (admin) return;
+    const id = setInterval(() => reloadMine(), 30000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [admin]);
+
+  return <Page eyebrow={admin ? 'ADMINISTRATION' : 'SELF-SERVICE'} title={admin ? (greetingName ? `Good morning, ${greetingName.split(' ')[0]}` : 'Good morning') : 'Your access overview'} subtitle={admin ? 'Here is what is happening across your identity environment.' : 'Review your current access and request what you need.'} action={<button className="btn btn-primary" onClick={() => navigate(admin ? '/admin/assignments?status=PENDING_APPROVAL' : '/request-packages')}><ArrowRight size={15}/> {admin ? 'Review requests' : 'Request access'}</button>}><StatCards admin={admin} dashboard={dashboard} userStats={userStats}/>{admin && loading && <div className="empty">Loading dashboard...</div>}{admin && error && <div className="empty">{error}</div>}
     {admin && <div className="grid-2" style={{marginBottom:18}}>
       <section className="panel"><div className="panel-head"><h2>Privileged role activations</h2><span className="panel-link">{timeline ? `Last ${timeline.days} days` : ''}</span></div><div className="detail-section">{timeline ? <ActivationTimelineChart series={timeline.series}/> : <div className="empty">Loading timeline...</div>}</div></section>
       <section className="panel"><div className="panel-head"><h2>User access mix</h2><span className="panel-link">Click a slice for the list</span></div><div className="detail-section">{segments ? <PieChart segments={[{key:'permanent-active', label:'Permanent & Active', value: segments.permanentActive, color:'#087f82'},{key:'eligible', label:'Eligible (not yet activated)', value: segments.eligible, color:'#f4b35d'}]} onSliceClick={setSelectedSegment}/> : <div className="empty">Loading...</div>}</div></section>
+    </div>}
+    {seesSod && <div className="panel" style={{ marginBottom: 18 }}>
+      <div className="panel-head"><h2>Separation of Duties</h2><Link to="/admin/sod" className="panel-link">Manage <ChevronRight size={12}/></Link></div>
+      <div className="detail-section"><div className="user-cell"><span className="stat-icon" style={{background: sodViolations && sodViolations.length > 0 ? '#fdecea' : '#e8f6ec', color: sodViolations && sodViolations.length > 0 ? '#8c2b21' : '#1c7c3f'}}><ShieldAlert size={16}/></span><div><div className="user-name">{sodViolations ? `${sodViolations.length} current violation${sodViolations.length === 1 ? '' : 's'}` : 'Loading...'}</div><div className="user-email">{sodViolations && sodViolations.length > 0 ? 'One or more users hold both sides of a conflicting-access rule.' : 'No user currently holds both sides of an active rule.'}</div></div></div>
+        {sodActivity && sodActivity.length > 0 && <div style={{marginTop:16,paddingTop:14,borderTop:'1px solid #eef1f2'}}>
+          <div className="subtitle" style={{marginBottom:8,fontWeight:600}}>Recent SoD activity</div>
+          {sodActivity.slice(0,3).map(entry => <div key={entry.id} className="activity-row" style={{padding:'6px 0'}}><span className="activity-dot"/><div className="activity-copy"><strong>{entry.action.replace(/_/g,' ')}</strong><small>{entry.actor_display_name || 'System'}{entry.target_user_display_name ? ` · ${entry.target_user_display_name}` : ''} · {summarizeSodActivity(entry)} · {new Date(entry.timestamp).toLocaleString()}</small></div></div>)}
+        </div>}
+      </div>
     </div>}
     {selectedSegment && <div className="overlay-backdrop" onClick={() => setSelectedSegment(null)}>
       <div className="overlay-card" onClick={event => event.stopPropagation()}>
@@ -326,7 +675,7 @@ function Dashboard({ role }: { role: Role }) {
         <div className="table-wrap">{membersLoading ? <div className="empty">Loading users...</div> : !segmentMembers || segmentMembers.length === 0 ? <div className="empty">No users in this segment.</div> : <table><thead><tr><th>User</th><th>Email</th></tr></thead><tbody>{segmentMembers.map(m => <tr key={m.id}><td className="user-name">{m.display_name}</td><td>{m.email}</td></tr>)}</tbody></table>}</div>
       </div>
     </div>}
-    <div className="grid-2"><section className="panel"><div className="panel-head"><h2>{admin ? 'Recent access requests' : 'Recent activity'}</h2><Link to={admin ? '/admin/audit' : '/my-requests'} className="panel-link">View all <ChevronRight size={12}/></Link></div>{admin ? (!recentAudit || recentAudit.length === 0 ? <div className="empty">No recent activity.</div> : recentAudit.slice(0,6).map(entry => <div className="activity" key={entry.id}><div className="activity-row"><span className="activity-dot"/><div className="activity-copy"><strong>{entry.action}</strong><small>{entry.actor_display_name || 'System'}{entry.target_user_display_name ? ` · ${entry.target_user_display_name}` : ''} · {new Date(entry.timestamp).toLocaleString()}</small></div><StatusBadge status={entry.result}/></div></div>)) : auditEvents.slice(0,5).map((item, i) => <div className="activity" key={i}><div className="activity-row"><span className="activity-dot"/><div className="activity-copy"><strong>{(item as string[])[2]}</strong><small>{(item as string[])[1]} · {(item as string[])[3]}</small></div><span className="time">{(item as string[])[0]}</span></div></div>)}</section><section className="panel"><div className="panel-head"><h2>{admin ? 'Provider status' : 'Current active access'}</h2>{admin && <StatusBadge status={dashboard?.provider?.status || 'NOT_CONFIGURED'}/>}</div>{admin ? <div className="detail-section"><div className="user-cell"><span className="avatar" style={{background:'#e4f1f5',color:'#33758a'}}><Cloud size={15}/></span><div><div className="user-name">{dashboard?.provider?.name || 'No provider configured'}</div><div className="user-email">{dashboard?.provider ? `${dashboard.provider.status} · Last sync ${lastSyncLabel}` : 'Configure a provider to begin syncing.'}</div></div></div><div className="key-grid" style={{marginTop:24}}><div className="key"><span>Users synced</span><strong>{dashboard ? dashboard.users : '—'}</strong></div><div className="key"><span>Groups synced</span><strong>{dashboard ? dashboard.groups : '—'}</strong></div><div className="key"><span>Directory roles</span><strong>{dashboard ? dashboard.roles : '—'}</strong></div><div className="key"><span>Last sync</span><strong>{lastSyncLabel}</strong></div></div></div> : <div className="detail-section"><div className="timeline"><div className="timeline-item"><strong>Not available in this release</strong><small>Access requests and assignments are not part of this phase.</small></div></div></div>}</section></div></Page>; }
+    <div className="grid-2"><section className="panel"><div className="panel-head"><h2>{admin ? 'Recent access requests' : 'Recent activity'}</h2><Link to={admin ? '/admin/audit' : '/my-requests'} className="panel-link">View all <ChevronRight size={12}/></Link></div>{admin ? (!recentAudit || recentAudit.length === 0 ? <div className="empty">No recent activity.</div> : recentAudit.slice(0,6).map(entry => <div className="activity" key={entry.id}><div className="activity-row"><span className="activity-dot"/><div className="activity-copy"><strong>{entry.action}</strong><small>{entry.actor_display_name || 'System'}{entry.target_user_display_name ? ` · ${entry.target_user_display_name}` : ''} · {new Date(entry.timestamp).toLocaleString()}</small></div><StatusBadge status={entry.result}/></div></div>)) : (myRecentActivity.length === 0 ? <div className="empty">No activity yet.</div> : myRecentActivity.map(item => <div className="activity" key={item.id}><div className="activity-row"><span className="activity-dot"/><div className="activity-copy"><strong>{item.resource_display_name || item.resource_type}{item.package_name ? ` (${item.package_name})` : ''}</strong><small>{item.resource_type} · {new Date(item.activated_at || item.created_at).toLocaleString()}</small></div><StatusBadge status={item.status}/></div></div>))}</section><section className="panel"><div className="panel-head"><h2>{admin ? 'Provider status' : 'Current active access'}</h2>{admin && <StatusBadge status={dashboard?.provider?.status || 'NOT_CONFIGURED'}/>}</div>{admin ? <div className="detail-section"><div className="user-cell"><span className="avatar" style={{background:'#e4f1f5',color:'#33758a'}}><Cloud size={15}/></span><div><div className="user-name">{dashboard?.provider?.name || 'No provider configured'}</div><div className="user-email">{dashboard?.provider ? `${dashboard.provider.status} · Last sync ${lastSyncLabel}` : 'Configure a provider to begin syncing.'}</div></div></div><div className="key-grid" style={{marginTop:24}}><div className="key"><span>Users synced</span><strong>{dashboard ? dashboard.users : '—'}</strong></div><div className="key"><span>Groups synced</span><strong>{dashboard ? dashboard.groups : '—'}</strong></div><div className="key"><span>Directory roles</span><strong>{dashboard ? dashboard.roles : '—'}</strong></div><div className="key"><span>Last sync</span><strong>{lastSyncLabel}</strong></div></div></div> : (myActiveAccess.length === 0 ? <div className="detail-section"><div className="empty">No active access right now. Check My Access for anything eligible to activate.</div></div> : <div className="table-wrap"><table><thead><tr><th>Resource</th><th>Type</th><th>Expires</th></tr></thead><tbody>{myActiveAccess.map(item => <tr key={item.id}><td className="user-name">{item.resource_display_name || item.resource_type}{item.package_name ? <div className="user-email">{item.package_name}</div> : null}</td><td>{item.resource_type}</td><td>{item.expiration_time ? new Date(item.expiration_time).toLocaleString() : 'Permanent'}</td></tr>)}</tbody></table></div>)}</section></div></Page>; }
 function StatusBadge({ status }: { status: string }) { const cls = ['APPROVED','ACTIVE','COMPLETED','CONNECTED','ELIGIBLE','SUCCESS','Healthy','Active'].includes(status) ? 'success' : ['PENDING','PENDING_APPROVAL','SCHEDULED','RUNNING','PARTIAL','Medium'].includes(status) ? 'warning' : ['REJECTED','EXPIRED','REVOKED','FAILED','Disabled','High'].includes(status) ? 'danger' : 'neutral'; return <span className={`badge ${cls}`}>{status}</span>; }
 function TablePanel({ children, toolbar }: { children: React.ReactNode; toolbar?: React.ReactNode }) { return <><div className="toolbar">{toolbar}</div><section className="panel"><div className="table-wrap">{children}</div></section></>; }
 interface FilterOption { value: string; label: string; }
@@ -515,6 +864,30 @@ function MyAccess() {
   const eligibleRows = useMemo(() => groupRows(eligible), [eligible, batchByAssignmentId]);
   const activeRows = useMemo(() => groupRows(active), [active, batchByAssignmentId]);
 
+  // Separation-of-Duties is only ever ENFORCED at the moment access actually becomes real (i.e. when Activate is
+  // clicked) — an eligible row that would conflict is still listed here, exactly like anything else eligible but
+  // not yet granted. This soft, non-blocking pre-check (reusing the same /sod/check the backend itself never
+  // trusts as the real gate) surfaces that risk on the list itself instead of only after clicking Activate.
+  const eligibleIds = eligible.map(a => a.id).join(',');
+  const [sodWarnings, setSodWarnings] = useState<Record<string, string[]>>({});
+  useEffect(() => {
+    if (eligible.length === 0) { setSodWarnings({}); return; }
+    let cancelled = false;
+    (async () => {
+      const entries = await Promise.all(eligible.map(async a => {
+        try {
+          const response = await auth.apiRequest('/api/v1/sod/check', { method: 'POST', body: JSON.stringify({ resource_type: a.resource_type, resource_id: a.resource_id, app_role_external_id: a.app_role_external_id || undefined }) });
+          if (!response.ok) return [a.id, []] as const;
+          const body = await response.json();
+          return [a.id, ((body.conflicts || []) as ApiSodPolicy[]).map(p => p.name)] as const;
+        } catch { return [a.id, []] as const; }
+      }));
+      if (!cancelled) setSodWarnings(Object.fromEntries(entries));
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [eligibleIds]);
+
   const openActivate = (ids: string[], label: string) => { setActivateTarget({ ids, label }); setDurationHours(String(maxHours)); setActivateJustification(''); setActivateMessage(''); };
 
   const submitActivate = async () => {
@@ -545,10 +918,13 @@ function MyAccess() {
     <div className="panel" style={{marginBottom:18}}>
       <div className="panel-head"><h2>Eligible access</h2><span className="panel-link">{eligible.length} available</span></div>
       <div className="detail-section">
-        {loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : eligibleRows.length === 0 ? <div className="notice">Nothing eligible to activate right now.</div> : eligibleRows.map(row => row.kind === 'single'
-          ? <div key={row.assignment.id} className="activity-row"><span className="avatar"><Shield size={14}/></span><div className="activity-copy"><strong>{row.assignment.resource_display_name || row.assignment.resource_id}</strong><small>{row.assignment.resource_type}{row.assignment.package_name ? ` · ${row.assignment.package_name}` : ''} · {row.assignment.assignment_type === 'TEMPORARY' && row.assignment.expiration_time ? `Activate by ${new Date(row.assignment.expiration_time).toLocaleString()}` : 'No activation deadline'}</small></div><button className="btn btn-primary" onClick={() => openActivate([row.assignment.id], row.assignment.resource_display_name || 'this access')}>Activate <ArrowRight size={13}/></button></div>
-          : <div key={row.batch.package_id} className="activity-row"><span className="avatar">📦</span><div className="activity-copy"><strong>{row.batch.package_name}</strong><small>PACKAGE · {row.assignments.length} items</small></div><button className="btn btn-primary" onClick={() => openActivate(row.assignments.map(a => a.id), `"${row.batch.package_name}" (${row.assignments.length} items)`)}>Activate all <ArrowRight size={13}/></button></div>
-        )}
+        {loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : eligibleRows.length === 0 ? <div className="notice">Nothing eligible to activate right now.</div> : eligibleRows.map(row => {
+          const warnings = row.kind === 'single' ? (sodWarnings[row.assignment.id] || []) : Array.from(new Set(row.assignments.flatMap(a => sodWarnings[a.id] || [])));
+          const warningTitle = warnings.length > 0 ? `Activating this may conflict with Separation-of-Duties polic${warnings.length === 1 ? 'y' : 'ies'}: ${warnings.join(', ')}` : undefined;
+          return row.kind === 'single'
+          ? <div key={row.assignment.id} className="activity-row"><span className="avatar"><Shield size={14}/></span><div className="activity-copy"><strong>{row.assignment.resource_display_name || row.assignment.resource_id}</strong><small>{row.assignment.resource_type}{row.assignment.package_name ? ` · ${row.assignment.package_name}` : ''} · {row.assignment.assignment_type === 'TEMPORARY' && row.assignment.expiration_time ? `Activate by ${new Date(row.assignment.expiration_time).toLocaleString()}` : 'No activation deadline'}</small></div>{warnings.length > 0 && <span className="badge danger" title={warningTitle} style={{marginRight:8}}>⚠ SoD conflict</span>}<button className="btn btn-primary" onClick={() => openActivate([row.assignment.id], row.assignment.resource_display_name || 'this access')}>Activate <ArrowRight size={13}/></button></div>
+          : <div key={row.batch.package_id} className="activity-row"><span className="avatar">📦</span><div className="activity-copy"><strong>{row.batch.package_name}</strong><small>PACKAGE · {row.assignments.length} items</small></div>{warnings.length > 0 && <span className="badge danger" title={warningTitle} style={{marginRight:8}}>⚠ SoD conflict</span>}<button className="btn btn-primary" onClick={() => openActivate(row.assignments.map(a => a.id), `"${row.batch.package_name}" (${row.assignments.length} items)`)}>Activate all <ArrowRight size={13}/></button></div>;
+        })}
       </div>
     </div>
     {activateTarget && <form role="dialog" aria-modal="true" className="panel" style={{maxWidth:480,marginBottom:18}} onSubmit={event => { event.preventDefault(); void submitActivate(); }}>
@@ -566,8 +942,24 @@ function MyAccess() {
     )}</tbody></table>}</TablePanel>
   </Page>;
 }
-function RequestAccess() { const [submitted, setSubmitted] = useState(false); return <Page eyebrow="SELF-SERVICE" title="Request access" subtitle="Request temporary access with a clear business justification."><div className="detail-layout"><section className="panel"><div className="detail-section"><div className="detail-title"><h2>Access details</h2><span className="badge info">Step 1 of 2</span></div><label className="key"><span>Resource</span><select className="select" style={{width:'100%'}}><option>Production Administrator</option><option>Security Administrator</option><option>Product Analytics</option></select></label><div className="key-grid" style={{marginTop:20}}><label className="key"><span>Requested duration</span><select className="select" style={{width:'100%'}}><option>2 hours</option><option>1 hour</option><option>4 hours</option></select></label><label className="key"><span>Ticket number</span><input className="select" placeholder="INC-48291" style={{width:'100%'}}/></label></div><label className="key" style={{display:'block',marginTop:20}}><span>Business justification</span><textarea className="select" rows={5} placeholder="Explain why this access is needed and what you will do."></textarea></label></div><div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button className="btn">Cancel</button><button className="btn btn-primary" onClick={() => setSubmitted(true)}><SendIcon/> Submit request</button></div></section><aside className="panel"><div className="panel-head"><h2>Policy requirements</h2></div><div className="detail-section">{submitted && <div className="notice" style={{marginBottom:15}}>Request submitted successfully. It is now awaiting approval.</div>}<div className="notice"><strong>Privileged access</strong><br/>This resource requires MFA, an active ticket, and approval from a designated approver. Maximum duration is 4 hours.</div><div className="timeline" style={{padding:'22px 0 0'}}><div className="timeline-item"><strong>Policy evaluation</strong><small>Passed for your identity</small></div><div className="timeline-item"><strong>Approval required</strong><small>Security Operations</small></div><div className="timeline-item"><strong>Activation</strong><small>Available after approval</small></div></div></div></aside></div></Page>; }
-function SendIcon() { return <ArrowRight size={14}/>; }
+function RequestAccess() {
+  // Real self-service access requests go through Access Packages — every resource an end user can request must
+  // be named in a package's eligibility list, matching real, granted access to real business justification
+  // requirements, fallback approvers, etc. Rebuilding a parallel free-text "any resource" request flow here
+  // would duplicate that entire working system against the dormant, pre-Assignment-model AccessRequest/
+  // ApprovalStep tables — real tables in the schema, but superseded by AccessAssignment years before this UI
+  // page was ever wired up. Rather than fake a second system, this page now honestly points at the real one.
+  const { data: packages, loading } = useApiResource<ApiPackage[]>('/api/v1/packages/requestable');
+  return <Page eyebrow="SELF-SERVICE" title="Request access" subtitle="Self-service access requests go through Access Packages.">
+    <div className="panel">
+      <div className="detail-section">
+        <p style={{marginTop:0}}>AccessPilot's real self-service request flow lives under <strong>Request Packages</strong> — every package there is something you (individually, or via a group you belong to) are specifically eligible to request, with the same real approval and activation workflow as anything an Admin assigns directly.</p>
+        {loading ? <div className="empty">Checking what you're eligible for...</div> : packages && packages.length > 0 ? <div className="notice" style={{marginBottom:16}}>You currently have <strong>{packages.length}</strong> {packages.length === 1 ? 'package' : 'packages'} you can request.</div> : <div className="notice" style={{marginBottom:16}}>You aren't currently eligible for any packages — ask an Admin to add you (or a group you're in) to a package's eligibility list.</div>}
+        <Link to="/request-packages" className="btn btn-primary"><ArrowRight size={15}/> Go to Request Packages</Link>
+      </div>
+    </div>
+  </Page>;
+}
 const emptyPackageRequestForm = { assignment_type: 'PERMANENT', start_date: '', start_clock: '', end_date: '', end_clock: '', justification: '' };
 function RequestPackagesPage() {
   const auth = useAuth();
@@ -1445,5 +1837,55 @@ function OnboardingPage() {
     </section>
   </Page>;
 }
-function Profile() { return <Page eyebrow="SELF-SERVICE" title="Profile" subtitle="Your AccessPilot identity and application role."><div className="detail-layout"><section className="panel"><div className="detail-section"><div className="user-cell"><span className="avatar" style={{width:52,height:52}}>{currentUser.initials}</span><div><h2>{currentUser.name}</h2><p className="subtitle">{currentUser.title}</p></div></div></div><div className="detail-section"><div className="detail-title"><h2>Identity details</h2><StatusBadge status="Active"/></div><div className="key-grid"><div className="key"><span>Email</span><strong>{currentUser.email}</strong></div><div className="key"><span>Department</span><strong>{currentUser.department}</strong></div><div className="key"><span>Identity provider</span><strong>Microsoft Entra ID</strong></div><div className="key"><span>Last sign-in</span><strong>Today, 09:42 UTC</strong></div></div></div></section><aside className="panel"><div className="panel-head"><h2>Application role</h2></div><div className="detail-section"><div className="user-cell"><span className="stat-icon"><ShieldCheck size={16}/></span><div><strong>AccessPilot.Admin</strong><div className="user-email">Development role switcher active</div></div></div><p className="subtitle" style={{lineHeight:1.6,marginTop:18}}>Your role determines which console areas are visible. Authorization is enforced by the backend in production.</p></div></aside></div></Page>; }
+function Profile() {
+  const auth = useAuth();
+  const signedIn = Boolean(auth.account) || auth.breakglassActive;
+  const { data: me, reload: reloadMe } = useApiResource<ApiCurrentUser>('/api/v1/me', signedIn);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshMessage, setRefreshMessage] = useState('');
+  const handleRefresh = async () => {
+    setRefreshing(true); setRefreshMessage('');
+    try { await auth.refreshAccess(); reloadMe(); setRefreshMessage('Refreshed — your roles and permissions are now up to date.'); }
+    catch { setRefreshMessage('Unable to refresh right now.'); }
+    finally { setRefreshing(false); }
+  };
+  const displayName = auth.account?.name || me?.displayName || (auth.breakglassActive ? `Break-Glass (${auth.breakglassUsername})` : currentUser.name);
+  const email = auth.account?.username || me?.email || (auth.authConfigured ? '' : currentUser.email);
+  const department = me?.department || (!auth.authConfigured ? currentUser.department : null);
+  const jobTitle = me?.jobTitle || (!auth.authConfigured ? currentUser.title : null);
+  const roleLabel = auth.role === 'admin' ? 'AccessPilot.Admin' : 'AccessPilot.User';
+  const providerLabel = auth.breakglassActive ? 'Break-Glass (emergency access)' : auth.authConfigured ? 'Microsoft Entra ID' : 'Local (mock/dev mode)';
+  const sessionStarted = signedIn && auth.sessionStartedAt ? new Date(auth.sessionStartedAt).toLocaleString() : '—';
+  const initials = initialsFor(displayName || 'AccessPilot User');
+  return <Page eyebrow="SELF-SERVICE" title="Profile" subtitle="Your AccessPilot identity and application role.">
+    <div className="detail-layout">
+      <section className="panel">
+        <div className="detail-section"><div className="user-cell"><span className="avatar" style={{width:52,height:52}}>{initials}</span><div><h2>{displayName}</h2><p className="subtitle">{jobTitle || email}</p></div></div></div>
+        <div className="detail-section">
+          <div className="detail-title"><h2>Identity details</h2><StatusBadge status={signedIn ? 'Active' : 'NOT_CONFIGURED'}/></div>
+          <div className="key-grid">
+            <div className="key"><span>Email</span><strong>{email || '—'}</strong></div>
+            <div className="key"><span>Department</span><strong>{department || 'Not available'}</strong></div>
+            <div className="key"><span>Identity provider</span><strong>{providerLabel}</strong></div>
+            <div className="key"><span>Tenant</span><strong>{me?.tenantId || auth.account?.tenantId || '—'}</strong></div>
+            <div className="key"><span>Session started</span><strong>{sessionStarted}</strong></div>
+            {me?.employeeId && <div className="key"><span>Employee ID</span><strong>{me.employeeId}</strong></div>}
+          </div>
+        </div>
+      </section>
+      <aside className="panel">
+        <div className="panel-head"><h2>Application role</h2></div>
+        <div className="detail-section">
+          <div className="user-cell"><span className="stat-icon"><ShieldCheck size={16}/></span><div><strong>{roleLabel}</strong><div className="user-email">{me?.roles?.join(', ') || roleLabel}</div></div></div>
+          <p className="subtitle" style={{lineHeight:1.6,marginTop:18}}>Your role determines which console areas are visible. Authorization is enforced by the backend on every request.</p>
+          {signedIn && <>
+            <button className="btn" disabled={refreshing} onClick={handleRefresh} style={{marginTop:16}}>{refreshing ? 'Refreshing...' : 'Refresh my access'}</button>
+            <p className="subtitle" style={{marginTop:8}}>If an admin just changed your roles (e.g. granted Separation-of-Duties admin access), use this instead of signing out — it forces a fresh check without waiting for your session token to expire on its own.</p>
+            {refreshMessage && <div className="notice" style={{marginTop:10}}>{refreshMessage}</div>}
+          </>}
+        </div>
+      </aside>
+    </div>
+  </Page>;
+}
 export default App;

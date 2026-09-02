@@ -151,6 +151,92 @@ class AccessPackageAssignment(Base):
     id: Mapped[UUID] = uuid_pk(); package_id: Mapped[UUID] = mapped_column(ForeignKey("access_packages.id"), nullable=False); package_assignment_id: Mapped[UUID] = mapped_column(Uuid, nullable=False); assignment_id: Mapped[UUID] = mapped_column(ForeignKey("access_assignments.id"), nullable=False, unique=True); user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False); created_at: Mapped[datetime] = created_at(); __table_args__ = (Index("ix_access_package_assignments_batch", "package_assignment_id"),)
 
 
+class SodPolicy(Base):
+    """A Separation-of-Duties rule: two named conflict sides (entities live in SodPolicyEntity) — holding
+    anything from side A *and* anything from side B simultaneously is a violation. Deliberately NOT reusing the
+    dormant Policy/PolicyTarget models (wrong shape — a single-resource duration/approval rule, not a conflict
+    pair)."""
+    __tablename__ = "sod_policies"
+    id: Mapped[UUID] = uuid_pk(); name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True); description: Mapped[Optional[str]] = mapped_column(Text)
+    severity: Mapped[str] = mapped_column(String(20), nullable=False, default="MEDIUM", server_default="MEDIUM"); status: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVE", server_default="ACTIVE")
+    created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at()
+
+
+class SodPolicyEntity(Base):
+    """One member of a SodPolicy's conflict side. entity_type PACKAGE is resolved live against
+    AccessPackageItem at check-time (never duplicated), so editing a package's items automatically updates what
+    the rule means with no migration needed."""
+    __tablename__ = "sod_policy_entities"
+    id: Mapped[UUID] = uuid_pk(); sod_policy_id: Mapped[UUID] = mapped_column(ForeignKey("sod_policies.id"), nullable=False); conflict_side: Mapped[str] = mapped_column(String(1), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(20), nullable=False); entity_id: Mapped[UUID] = mapped_column(Uuid, nullable=False); app_role_external_id: Mapped[Optional[str]] = mapped_column(String(100))
+    created_at: Mapped[datetime] = created_at()
+    __table_args__ = (Index("ix_sod_policy_entities_policy", "sod_policy_id"), UniqueConstraint("sod_policy_id", "conflict_side", "entity_type", "entity_id", "app_role_external_id", name="uq_sod_policy_entity"))
+
+
+class SodAdmin(Base):
+    """A directory user flagged as AccessPilot.SoDAdmin — deliberately NOT an Entra App Role (which would need
+    Application.ReadWrite.All to manage, not granted). A regular Admin grants/revokes this flag from inside
+    AccessPilot itself; the request-time role-resolution in security/auth.py folds it into the caller's
+    effective roles whenever it finds a matching row here. Intentionally separate from AccessPilot.Admin so the
+    SoD engine itself has a genuine separation of duties: a plain Admin can see violations (SOD_READ) and manage
+    who holds this flag (SOD_ADMIN_ASSIGN), but cannot edit SoD rules (SOD_MANAGE) unless they also hold this."""
+    __tablename__ = "sod_admins"
+    id: Mapped[UUID] = uuid_pk(); user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False, unique=True); granted_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); created_at: Mapped[datetime] = created_at()
+
+
+class SodException(Base):
+    """A formally accepted, time-boxed risk: a specific (policy, user) pair for which the conflict is known and
+    deliberately tolerated, rather than eliminated. Unlike everything else in the SoD engine, this genuinely
+    needs to be stored, not live-computed — "we accepted this risk until <date>" is a real decision that must
+    survive across scans, not something derivable from current access state. Scoped to (policy, user), not to
+    the specific entitlements held at grant time — the point is "this user is cleared on this rule," not "this
+    exact pair of resources is cleared," so it still applies if which entitlement satisfies each side changes
+    later. SOD_MANAGE-gated (SoDAdmin only, same as editing the rule itself — an Admin granting exceptions would
+    be an equally effective way to defeat the engine as an Admin editing rules directly, which is already
+    forbidden)."""
+    __tablename__ = "sod_exceptions"
+    id: Mapped[UUID] = uuid_pk(); sod_policy_id: Mapped[UUID] = mapped_column(ForeignKey("sod_policies.id"), nullable=False); user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    justification: Mapped[str] = mapped_column(Text, nullable=False); granted_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False); revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = created_at()
+    __table_args__ = (Index("ix_sod_exceptions_policy_user", "sod_policy_id", "user_id"),)
+
+
+class SodNotificationSettings(Base):
+    """Singleton row (same get-or-create-on-first-read pattern as SecuritySettings/BrandingSettings) controlling
+    whether/when the SoD engine's reconciliation pass (see services/sod.py) creates a SodNotification row. Both
+    toggles default True (notify by default, matching this app's "the feature should visibly work once built"
+    convention) but the threshold itself is nullable-with-a-default so an Admin can tune it without a migration."""
+    __tablename__ = "sod_notification_settings"
+    id: Mapped[UUID] = uuid_pk()
+    notify_on_new_violation: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
+    notify_on_exception_expiring: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
+    exception_expiring_warning_days: Mapped[int] = mapped_column(Integer, nullable=False, default=7, server_default="7")
+    updated_at: Mapped[datetime] = updated_at()
+
+
+class SodNotification(Base):
+    """The notification log — genuinely stored, like SodException, since "we already told someone about this"
+    must survive across reconciliation passes (otherwise the same violation would re-notify every time
+    get_sod_violations() happens to run). Created/resolved by reconcile_sod_notifications() (services/sod.py),
+    which runs opportunistically whenever violations or exceptions are read (no separate scheduler/background
+    worker needed) rather than on a fixed poll interval — consistent with the rest of this engine's
+    "live, on-read compute" philosophy. resolved_at is set once the underlying condition stops being true (the
+    violation is no longer found, or the exception is revoked/no longer within the warning window) — this is
+    what lets reconciliation avoid re-notifying for something already flagged and still ongoing."""
+    __tablename__ = "sod_notifications"
+    id: Mapped[UUID] = uuid_pk()
+    notification_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    sod_policy_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("sod_policies.id"))
+    user_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
+    sod_exception_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("sod_exceptions.id"))
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    read_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = created_at()
+    __table_args__ = (Index("ix_sod_notifications_open", "notification_type", "sod_policy_id", "user_id", "resolved_at"),)
+
+
 class OnboardingImport(Base):
     __tablename__ = "onboarding_imports"
     id: Mapped[UUID] = uuid_pk(); provider_id: Mapped[UUID] = mapped_column(ForeignKey("identity_providers.id"), nullable=False); filename: Mapped[str] = mapped_column(String(255), nullable=False); status: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -214,14 +300,17 @@ class BreakGlassAccount(Base):
 class SecuritySettings(Base):
     """Singleton row (there is only ever one) governing idle-session behavior for every signed-in user, admin and
     end-user alike — blur the screen after `blur_after_minutes` of inactivity, and/or show a click-to-resume lock
-    screen after `lock_after_minutes`. Both are independent on/off toggles with their own threshold; the lock
-    never signs the user out — it only requires an explicit click to dismiss, the underlying session is untouched."""
+    screen after `lock_after_minutes`, and/or actually sign the user out after `logout_after_minutes`. All three
+    are independent on/off toggles with their own threshold; blur/lock never sign the user out — only the
+    logout tier ends the session."""
     __tablename__ = "security_settings"
     id: Mapped[UUID] = uuid_pk()
     blur_enabled: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="false")
     blur_after_minutes: Mapped[int] = mapped_column(nullable=False, default=1, server_default="1")
     lock_enabled: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="false")
     lock_after_minutes: Mapped[int] = mapped_column(nullable=False, default=5, server_default="5")
+    logout_enabled: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="false")
+    logout_after_minutes: Mapped[int] = mapped_column(nullable=False, default=15, server_default="15")
     updated_at: Mapped[datetime] = updated_at()
 
 

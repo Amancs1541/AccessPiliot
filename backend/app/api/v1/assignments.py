@@ -71,7 +71,7 @@ async def reject_assignment(assignment_id: UUID, request: Request, actor: Authen
 @router.post("/{assignment_id}/activate", response_model=AssignmentResponse)
 async def activate_assignment(assignment_id: UUID, data: AssignmentActivate, request: Request, actor: AuthenticatedUser = Depends(require_authenticated_user), db: AsyncSession = Depends(get_db)):
     """Any authenticated user may call this — the service enforces that only the assignment's own user or an Admin can actually activate it. A justification for the activation is mandatory."""
-    assignment, hydrated = await assignment_service.activate_assignment(db, assignment_id, actor.directory_object_id, actor.roles, data.duration_hours, data.justification, request.state.request_id)
+    assignment, hydrated = await assignment_service.activate_assignment(db, assignment_id, actor.directory_object_id, actor.roles, data.duration_hours, data.justification, request.state.request_id, override_sod=data.override_sod)
     return assignment_service.to_response(assignment, hydrated)
 
 

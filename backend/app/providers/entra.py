@@ -164,6 +164,14 @@ class EntraProvider(IdentityProvider):
             for item in items if item.get("resourceId")
         ]
 
+    async def get_user_directory_role_ids(self, external_id: str) -> list[str]:
+        """Live read of the directory roles a user actually holds — including ones assigned directly in Entra
+        (outside AccessPilot), same "not synced/stored, on-demand" pattern as get_user_app_role_assignments above.
+        Only needs the same directory-role-read permission get_roles()/get_role() already use."""
+        async with self._client() as client:
+            items = await client.get_all(f"/users/{external_id}/memberOf/microsoft.graph.directoryRole", params={"$select": "id"})
+        return [item["id"] for item in items if item.get("id")]
+
     async def get_groups(self, query: str | None = None) -> list[NormalizedGroup]:
         params: dict[str, Any] = {"$select": GROUP_SELECT, "$top": "999"}
         headers: dict[str, str] | None = None

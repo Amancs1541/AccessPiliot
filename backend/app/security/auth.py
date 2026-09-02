@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -35,14 +36,28 @@ def _get_jwks_client(jwks_url: str) -> PyJWKClient:
         _jwks_client_url = jwks_url
     return _jwks_client
 
-VALID_ROLES = {"AccessPilot.User", "AccessPilot.Admin", "AccessPilot.BreakGlassAdmin"}
+VALID_ROLES = {"AccessPilot.User", "AccessPilot.Admin", "AccessPilot.BreakGlassAdmin", "AccessPilot.SoDAdmin"}
 PERMISSIONS = {
     "AccessPilot.User": {"ME_READ", "DASHBOARD_USER_READ", "ACCESS_REQUEST_CREATE", "ACCESS_REQUEST_READ_SELF", "ACCESS_REQUEST_CANCEL_SELF", "ASSIGNMENT_READ_SELF", "ASSIGNMENT_ACTIVATE_SELF", "ASSIGNMENT_REVOKE_SELF"},
-    "AccessPilot.Admin": {"ME_READ", "DASHBOARD_ADMIN_READ", "USER_READ", "GROUP_READ", "GROUP_MANAGE", "ROLE_READ", "ROLE_MANAGE", "PROVIDER_READ", "PROVIDER_MANAGE", "PROVIDER_SYNC", "ACCESS_REQUEST_READ", "ACCESS_REQUEST_APPROVE", "ACCESS_REQUEST_REJECT", "ACCESS_REQUEST_CANCEL", "ASSIGNMENT_READ", "ASSIGNMENT_CREATE", "ASSIGNMENT_REVOKE", "ASSIGNMENT_EXTEND", "POLICY_READ", "POLICY_CREATE", "POLICY_UPDATE", "POLICY_DELETE", "AUDIT_READ", "SYNC_READ", "PACKAGE_READ", "PACKAGE_MANAGE", "ONBOARDING_READ", "ONBOARDING_MANAGE", "SECURITY_SETTINGS_MANAGE", "BRANDING_MANAGE"},
+    # SOD_READ (oversight) and SOD_ADMIN_ASSIGN (grant/revoke the AccessPilot.SoDAdmin flag on other users) are
+    # deliberately here, but SOD_MANAGE (create/edit/disable the actual SoD rules) is NOT — a genuine separation
+    # of duties on the SoD engine itself: a plain Admin can see violations and decide who governs the rules, but
+    # cannot rig the rules to clear their own conflicts. See AccessPilot.SoDAdmin below.
+    "AccessPilot.Admin": {"ME_READ", "DASHBOARD_ADMIN_READ", "USER_READ", "GROUP_READ", "GROUP_MANAGE", "ROLE_READ", "ROLE_MANAGE", "PROVIDER_READ", "PROVIDER_MANAGE", "PROVIDER_SYNC", "ACCESS_REQUEST_READ", "ACCESS_REQUEST_APPROVE", "ACCESS_REQUEST_REJECT", "ACCESS_REQUEST_CANCEL", "ASSIGNMENT_READ", "ASSIGNMENT_CREATE", "ASSIGNMENT_REVOKE", "ASSIGNMENT_EXTEND", "POLICY_READ", "POLICY_CREATE", "POLICY_UPDATE", "POLICY_DELETE", "AUDIT_READ", "SYNC_READ", "PACKAGE_READ", "PACKAGE_MANAGE", "ONBOARDING_READ", "ONBOARDING_MANAGE", "SECURITY_SETTINGS_MANAGE", "BRANDING_MANAGE", "SOD_READ", "SOD_ADMIN_ASSIGN"},
     # Deliberately narrow: the default landing role for the hidden /emergency-access/:token flow. Can see NOTHING
     # else in the app — no users/groups/roles/assignments/etc. — until the holder explicitly elevates to full
     # AccessPilot.Admin via POST /auth/breakglass-elevate (see _authenticate_via_portal_config_or_breakglass below).
     "AccessPilot.BreakGlassAdmin": {"ME_READ", "PORTAL_AUTH_MANAGE", "BREAKGLASS_CREDENTIAL_MANAGE"},
+    # NOT sourced from an Entra App Role (unlike every other role here) — this app has no Application.ReadWrite.All
+    # grant, so it can't create/assign Entra App Roles itself. Instead this is a DB-driven flag (see
+    # app.services.sod.is_sod_admin, folded into the caller's effective roles in require_authenticated_user
+    # below) that a plain AccessPilot.Admin grants/revokes on any real directory user from inside the app
+    # (SOD_ADMIN_ASSIGN) — fully dynamic, no Entra portal access needed. Narrowly scoped to SoD governance only,
+    # same "small and specific" spirit as AccessPilot.BreakGlassAdmin.
+    # GROUP_READ/ROLE_READ (the latter also gates GET /applications, see directory.py)/PACKAGE_READ are read-only
+    # additions so SoDAdmin can actually reference real groups/roles/applications/packages when building a rule —
+    # it still cannot MANAGE any of them (create/edit/delete), only SOD_MANAGE lets it touch SoD rules themselves.
+    "AccessPilot.SoDAdmin": {"ME_READ", "DASHBOARD_USER_READ", "SOD_READ", "SOD_MANAGE", "GROUP_READ", "ROLE_READ", "PACKAGE_READ"},
 }
 
 @dataclass(frozen=True)
@@ -241,6 +256,13 @@ async def require_authenticated_user(request: Request, credentials: Optional[HTT
         user = await _authenticate_via_portal_config_or_breakglass(db, credentials.credentials)
         if user is None:
             raise primary_error
+    # AccessPilot.SoDAdmin is DB-driven, not an Entra App Role (see PERMISSIONS above) — fold it into this
+    # caller's effective roles if a plain Admin has flagged their real directory record for it. Local import
+    # avoids a module-load-time circular import between app.security.auth and app.services.sod.
+    if "AccessPilot.SoDAdmin" not in user.roles:
+        from app.services.sod import is_sod_admin
+        if await is_sod_admin(db, user.directory_object_id):
+            user = dataclasses.replace(user, roles=tuple(user.roles) + ("AccessPilot.SoDAdmin",))
     request.state.user = user
     if get_settings().environment == "development" and request.url.path == "/api/v1/me":
         claims = user.claims

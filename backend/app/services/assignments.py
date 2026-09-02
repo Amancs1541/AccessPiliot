@@ -226,6 +226,19 @@ async def create_assignment(session: AsyncSession, data, actor_subject: str, req
     else:
         status = "PENDING_APPROVAL" if approval_required else "ELIGIBLE"
 
+    # SoD check happens here — before the AccessAssignment row is even constructed, so a blocked grant leaves
+    # nothing half-inserted, exactly like every other pre-construction validation above (USER_NOT_FOUND etc.).
+    # Only the bypass-straight-to-ACTIVE branch grants real access at creation time, so it's the only one checked
+    # here; the ordinary PENDING_APPROVAL/ELIGIBLE branches are checked later, at activate_assignment() time.
+    sod_conflicts: list = []
+    if status == "ACTIVE":
+        from app.services.sod import check_sod_conflicts
+        sod_conflicts = await check_sod_conflicts(session, data.user_id, data.resource_type, data.resource_id, data.app_role_external_id)
+        if sod_conflicts and not getattr(data, "override_sod", False):
+            await record_audit(session, action="ASSIGNMENT_CREATE_BLOCKED", target_type="ASSIGNMENT", provider_id=provider_id, actor_user_id=requested_by, request_id=request_id, result="FAILURE", metadata={"reason": "SOD_CONFLICT", "resource_type": data.resource_type, "resource_id": str(data.resource_id), "user_id": str(data.user_id), "conflicting_policies": [p.name for p in sod_conflicts]})
+            await session.commit()
+            raise AccessPilotError("SOD_CONFLICT", f"This grant conflicts with Separation-of-Duties polic{'y' if len(sod_conflicts) == 1 else 'ies'}: {', '.join(p.name for p in sod_conflicts)}.", 409, details={"conflicts": [{"policy_id": str(p.id), "policy_name": p.name, "severity": p.severity} for p in sod_conflicts]})
+
     fallback_approver_id = data.fallback_approver_id if approval_required else None
     # If a wait period is configured, the fallback approver can only act once it elapses without the primary
     # approver having responded; with no wait period, either approver may act at any time (immediate fallback).
@@ -264,7 +277,7 @@ async def create_assignment(session: AsyncSession, data, actor_subject: str, req
             raise
         if data.resource_type == "GROUP":
             await _record_local_group_membership(session, data.user_id, data.resource_id)
-        await record_audit(session, action="ASSIGNMENT_ACTIVATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=provider_id, actor_user_id=requested_by, request_id=request_id, metadata={"decision": "ADMIN_BYPASS", "justification": data.justification})
+        await record_audit(session, action="ASSIGNMENT_ACTIVATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=provider_id, actor_user_id=requested_by, request_id=request_id, metadata={"decision": "ADMIN_BYPASS", "justification": data.justification, "sod_override": bool(sod_conflicts)})
 
     await record_audit(session, action="ASSIGNMENT_CREATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=provider_id, actor_user_id=requested_by, request_id=request_id, metadata={"status": status, "resource_type": data.resource_type, "bypass_activation": bypass_activation})
     await session.commit()
@@ -335,7 +348,7 @@ async def _authorize_activation(session: AsyncSession, assignment: AccessAssignm
     raise AccessPilotError("ACCESS_DENIED", "Only this assignment's own user or an administrator can activate it.", 403)
 
 
-async def activate_assignment(session: AsyncSession, assignment_id: UUID, actor_subject: str, actor_roles: tuple[str, ...], duration_hours: float, justification: str, request_id: str) -> tuple[AccessAssignment, dict]:
+async def activate_assignment(session: AsyncSession, assignment_id: UUID, actor_subject: str, actor_roles: tuple[str, ...], duration_hours: float, justification: str, request_id: str, override_sod: bool = False) -> tuple[AccessAssignment, dict]:
     """Self-service (or admin-on-behalf-of) activation of an ELIGIBLE assignment — the custom-PIM equivalent of
     Entra PIM's 'Activate'. Grants real Entra/Graph access for a duration chosen by the caller, capped at the
     provider's max_self_activation_hours. A justification is mandatory (enforced by the schema) and recorded on
@@ -362,6 +375,16 @@ async def activate_assignment(session: AsyncSession, assignment_id: UUID, actor_
     if duration_hours > max_hours:
         raise AccessPilotError("DURATION_EXCEEDS_MAXIMUM", f"The requested duration exceeds the maximum of {max_hours} hours.", 422)
 
+    # SoD check — the other moment real access becomes real (alongside create_assignment's bypass branch above).
+    # A plain end-user self-activating gets a hard block, no override; an Admin acting on someone else's behalf
+    # may override (still requires the mandatory justification already collected above).
+    from app.services.sod import check_sod_conflicts
+    sod_conflicts = await check_sod_conflicts(session, assignment.user_id, assignment.resource_type, assignment.resource_id, assignment.app_role_external_id)
+    if sod_conflicts and not (override_sod and "AccessPilot.Admin" in actor_roles):
+        await record_audit(session, action="ASSIGNMENT_ACTIVATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, actor_user_id=actor_id, request_id=request_id, result="FAILURE", metadata={"reason": "SOD_CONFLICT", "conflicting_policies": [p.name for p in sod_conflicts], "justification": justification})
+        await session.commit()
+        raise AccessPilotError("SOD_CONFLICT", f"Activating this would conflict with Separation-of-Duties polic{'y' if len(sod_conflicts) == 1 else 'ies'}: {', '.join(p.name for p in sod_conflicts)}.", 409, details={"conflicts": [{"policy_id": str(p.id), "policy_name": p.name, "severity": p.severity} for p in sod_conflicts]})
+
     # Only now that access is actually about to become real do we remove any existing eligible/active access to
     # the exact same target — mirrors approve_assignment's identical reasoning for the approval path.
     await _supersede_existing_assignment(session, user_id=assignment.user_id, resource_type=assignment.resource_type, resource_id=assignment.resource_id, app_role_external_id=assignment.app_role_external_id, provider_id=assignment.provider_id, actor_id=actor_id, request_id=request_id, exclude_id=assignment.id)
@@ -383,7 +406,7 @@ async def activate_assignment(session: AsyncSession, assignment_id: UUID, actor_
     assignment.status = "ACTIVE"
     assignment.activated_at = now
     assignment.expiration_time = now + timedelta(hours=duration_hours)
-    await record_audit(session, action="ASSIGNMENT_ACTIVATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, actor_user_id=actor_id, request_id=request_id, metadata={"decision": "SELF_ACTIVATED", "duration_hours": duration_hours, "justification": justification})
+    await record_audit(session, action="ASSIGNMENT_ACTIVATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, actor_user_id=actor_id, request_id=request_id, metadata={"decision": "SELF_ACTIVATED", "duration_hours": duration_hours, "justification": justification, "sod_override": bool(sod_conflicts)})
     await session.commit()
     await session.refresh(assignment)
     return assignment, await hydrate_display_fields(session, assignment)

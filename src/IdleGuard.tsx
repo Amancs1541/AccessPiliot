@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useAuth } from './auth';
 
-interface SecuritySettings { blur_enabled: boolean; blur_after_minutes: number; lock_enabled: boolean; lock_after_minutes: number; }
+interface SecuritySettings { blur_enabled: boolean; blur_after_minutes: number; lock_enabled: boolean; lock_after_minutes: number; logout_enabled: boolean; logout_after_minutes: number; }
 
 const ACTIVITY_EVENTS = ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll'];
 const CHECK_INTERVAL_MS = 1000;
@@ -16,16 +16,17 @@ export function useRefreshSecuritySettings() {
 }
 
 // Wraps the normal authenticated app (Shell + Routes) for both Admin and end-user sessions. Tracks real user
-// activity to show a dismissible blur after `blur_after_minutes`, and a click-to-resume lock screen after
-// `lock_after_minutes` — independent toggles/timers, per the Security settings page. The lock is deliberately
-// NOT dismissed by mere activity (only an explicit "Continue" click clears it) — it never signs the user out,
-// the underlying session is untouched.
+// activity to show a dismissible blur after `blur_after_minutes`, a click-to-resume lock screen after
+// `lock_after_minutes`, and — a third, independent tier — an actual sign-out after `logout_after_minutes`. The
+// lock is deliberately NOT dismissed by mere activity (only an explicit "Continue" click clears it) and never
+// signs the user out; logout is the only tier that ends the session.
 export function IdleGuard({ children }: { children: ReactNode }) {
   const auth = useAuth();
   const [settings, setSettings] = useState<SecuritySettings | null>(null);
   const [blurred, setBlurred] = useState(false);
   const [locked, setLocked] = useState(false);
   const lastActivity = useRef(Date.now());
+  const loggedOut = useRef(false);
 
   const fetchSettings = useCallback(async () => {
     try {
@@ -40,7 +41,7 @@ export function IdleGuard({ children }: { children: ReactNode }) {
   useEffect(() => { void fetchSettings(); }, [fetchSettings]);
 
   useEffect(() => {
-    if (!settings || (!settings.blur_enabled && !settings.lock_enabled)) return;
+    if (!settings || (!settings.blur_enabled && !settings.lock_enabled && !settings.logout_enabled)) return;
     const markActive = () => {
       lastActivity.current = Date.now();
       setBlurred(false);
@@ -49,13 +50,22 @@ export function IdleGuard({ children }: { children: ReactNode }) {
     ACTIVITY_EVENTS.forEach(eventName => window.addEventListener(eventName, markActive));
     const interval = setInterval(() => {
       const idleMs = Date.now() - lastActivity.current;
-      if (settings.lock_enabled && idleMs >= settings.lock_after_minutes * 60000) setLocked(true);
-      else if (settings.blur_enabled && idleMs >= settings.blur_after_minutes * 60000) setBlurred(true);
+      if (settings.logout_enabled && idleMs >= settings.logout_after_minutes * 60000) {
+        if (!loggedOut.current) {
+          loggedOut.current = true;
+          void auth.signOut();
+        }
+      } else if (settings.lock_enabled && idleMs >= settings.lock_after_minutes * 60000) {
+        setLocked(true);
+      } else if (settings.blur_enabled && idleMs >= settings.blur_after_minutes * 60000) {
+        setBlurred(true);
+      }
     }, CHECK_INTERVAL_MS);
     return () => {
       ACTIVITY_EVENTS.forEach(eventName => window.removeEventListener(eventName, markActive));
       clearInterval(interval);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings]);
 
   const resume = () => { lastActivity.current = Date.now(); setBlurred(false); setLocked(false); };

@@ -27,6 +27,11 @@ class AssignmentCreate(BaseModel):
     fallback_approver_id: Optional[UUID] = None
     fallback_unlock_hours: Optional[int] = Field(default=None, gt=0)
     bypass_activation: bool = False
+    # Only meaningful alongside bypass_activation (the only branch of create_assignment that checks SoD) — the
+    # existing mandatory `justification` field below doubles as the override's justification, no second field
+    # needed. Reachable only via the Admin-only ASSIGNMENT_CREATE endpoint, so no separate role check is needed
+    # here the way activate_assignment's override needs one for its non-admin self-service callers.
+    override_sod: bool = False
     justification: str = Field(min_length=3, max_length=2000)
 
     @field_validator("justification")
@@ -95,6 +100,9 @@ class AssignmentResponse(BaseModel):
 class AssignmentActivate(BaseModel):
     duration_hours: float = Field(gt=0)
     justification: str = Field(min_length=3, max_length=2000)
+    # Only ever honored server-side when the caller is an Admin (self-service end users always get a hard block
+    # on a genuine SoD conflict) — see activate_assignment(), which is the only place that can know who's calling.
+    override_sod: bool = False
 
     @field_validator("justification")
     @classmethod

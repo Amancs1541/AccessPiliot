@@ -9,6 +9,8 @@ class SecuritySettingsResponse(BaseModel):
     blur_after_minutes: int
     lock_enabled: bool
     lock_after_minutes: int
+    logout_enabled: bool
+    logout_after_minutes: int
 
 
 class SecuritySettingsUpdateRequest(BaseModel):
@@ -16,3 +18,5 @@ class SecuritySettingsUpdateRequest(BaseModel):
     blur_after_minutes: int = Field(gt=0, le=120)
     lock_enabled: bool
     lock_after_minutes: int = Field(gt=0, le=120)
+    logout_enabled: bool
+    logout_after_minutes: int = Field(gt=0, le=480)
