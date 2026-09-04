@@ -21,6 +21,7 @@ from app.api.v1.breakglass_console import router as breakglass_console_router
 from app.api.v1.security_settings import router as security_settings_router
 from app.api.v1.branding import router as branding_router
 from app.api.v1.sod import router as sod_router
+from app.api.v1.notifications import router as notifications_router
 
 logger = logging.getLogger("accesspilot.api.v1")
 router = APIRouter(prefix="/api/v1")
@@ -36,6 +37,7 @@ router.include_router(breakglass_console_router)
 router.include_router(security_settings_router)
 router.include_router(branding_router)
 router.include_router(sod_router)
+router.include_router(notifications_router)
 router.include_router(placeholder_router)
 router.include_router(providers_router)
 

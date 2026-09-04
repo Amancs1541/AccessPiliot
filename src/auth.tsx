@@ -33,8 +33,9 @@ interface AuthContextValue {
   // Manual "Refresh my access" action (see the Profile page) — forces a fresh token instead of waiting for
   // MSAL's cached one to expire (up to ~60 minutes), so a real Entra App Role change (e.g. AccessPilot.SoDAdmin
   // assigned/removed in the IDP) can take effect without a full sign-out/sign-in. A no-op-but-safe call for
-  // Break-Glass sessions too — re-verifies against /me, useful mainly for consistency.
-  refreshAccess: () => Promise<void>;
+  // Break-Glass sessions too — re-verifies against /me, useful mainly for consistency. Returns whether it
+  // actually succeeded, so the caller can tell the user the truth instead of always claiming success.
+  refreshAccess: () => Promise<boolean>;
 }
 const AuthContext = createContext<AuthContextValue | null>(null);
 
@@ -194,6 +195,12 @@ function AuthState({ children, authConfigured, apiScope }: { children: ReactNode
         console.groupEnd();
         apiDebugGroupOpen = false;
       }
+      // A failed /me call (expired session, transient 5xx, etc.) must not be silently treated as "this user has
+      // no roles" — that body has no `roles` array either way, so without this check the code below would fall
+      // straight through the success path and quietly compute nextRole as 'user', indistinguishable from an
+      // actual role change. Route it through the catch block instead, where a forced refresh's failure is
+      // reported honestly rather than misread as "your role is now User."
+      if (!response.ok) throw new Error(`GET /me failed with status ${response.status}`);
 
       const nextRole: AppRole = Array.isArray(profile?.roles) && profile.roles.includes(adminAppRole) ? 'admin' : 'user';
       setRole(nextRole);
@@ -207,9 +214,20 @@ function AuthState({ children, authConfigured, apiScope }: { children: ReactNode
       authDebug('FINAL FRONTEND ROLE:', nextRole);
       authDebug('Final authenticated state:', authenticated);
       if (authDebugEnabled) console.groupEnd();
+      return true;
     } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') return;
-      setRole('user');
+      if (error instanceof DOMException && error.name === 'AbortError') return true;
+      // On the very first load, no role has been established yet, so falling back to the least-privilege
+      // default is correct and safe. On a manual "Refresh my access" retry, a role that was already established
+      // must NOT be silently wiped by a transient failure (a flaky network blip, or acquireTokenSilent needing
+      // interaction) — that would make the button actively worse than doing nothing, downgrading a real Admin to
+      // User on a hiccup instead of just failing to pick up a change. Leave existing state untouched instead and
+      // let the caller (refreshAccess) report the failure honestly.
+      if (!options?.forceRefresh) setRole('user');
+      // Unlike the rest of this function's logging, this line is NOT gated behind authDebugEnabled (dev-mode
+      // only) — a "Refresh my access" failure needs to be diagnosable against a real production build too, not
+      // just `npm run dev`. Kept to one concise line, not the full verbose debug block above.
+      if (options?.forceRefresh) console.error('AccessPilot: "Refresh my access" failed —', authDebugError(error));
       if (authDebugEnabled && apiDebugGroupOpen) console.groupEnd();
       if (authDebugEnabled && tokenDebugGroupOpen) console.groupEnd();
       if (authDebugEnabled) console.group('ACCESSPILOT TOKEN DEBUG — TEMPORARY DEVELOPMENT LOGGING');
@@ -217,9 +235,10 @@ function AuthState({ children, authConfigured, apiScope }: { children: ReactNode
       authDebug('acquireTokenSilent() or API request error:', authDebugError(error));
       if (authDebugEnabled) console.groupEnd();
       if (authDebugEnabled) console.group('ACCESSPILOT AUTH STATE DEBUG — TEMPORARY DEVELOPMENT LOGGING');
-      authDebug('FINAL FRONTEND ROLE:', 'user');
+      authDebug('FINAL FRONTEND ROLE:', options?.forceRefresh ? '(unchanged — refresh failed)' : 'user');
       authDebug('Final authenticated state:', authenticated);
       if (authDebugEnabled) console.groupEnd();
+      return false;
     } finally {
       setApiLoading(false);
     }
@@ -301,10 +320,11 @@ function AuthState({ children, authConfigured, apiScope }: { children: ReactNode
       return { ok: false, error: 'Could not reach the backend. Confirm it is running and try again.' };
     }
   };
-  const refreshAccess = async () => {
-    if (breakglassToken) { await verifyBreakglassToken(breakglassToken); return; }
+  const refreshAccess = async (): Promise<boolean> => {
+    if (breakglassToken) { await verifyBreakglassToken(breakglassToken); return true; }
     const current = accounts[0] || null;
-    if (current && apiScope) await loadProfile(current, apiScope, { forceRefresh: true });
+    if (!current || !apiScope) return false;
+    return loadProfile(current, apiScope, { forceRefresh: true });
   };
   const apiRequest = async (path: string, init: RequestInit = {}) => {
     const headers = new Headers(init.headers);

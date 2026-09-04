@@ -95,6 +95,10 @@ class AssignmentResponse(BaseModel):
     revoked_at: Optional[datetime]
     created_at: datetime
     package_name: Optional[str] = None
+    # Display-only: set when this ELIGIBLE/ACTIVE assignment depends on a currently-live SoD exception to stay
+    # allowed — lets the frontend show the real ceiling instead of "No activation deadline" when one exists. The
+    # real enforcement gate is always the live check at activation time, never this field.
+    sod_exception_expires_at: Optional[datetime] = None
 
 
 class AssignmentActivate(BaseModel):

@@ -38,6 +38,7 @@ starlette==0.41.3
 tomli==2.4.1
 typing-extensions==4.16.0
 typing-inspection==0.4.2
+tzdata==2026.3
 uvicorn==0.34.0
 watchfiles==1.1.1
 websockets==15.0.1

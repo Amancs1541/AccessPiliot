@@ -42,14 +42,14 @@ async def test_defaults_are_both_disabled_and_readable_by_a_normal_user(db_overr
         response = await client.get("/api/v1/security-settings")
     assert response.status_code == 200
     body = response.json()
-    assert body == {"blur_enabled": False, "blur_after_minutes": 1, "lock_enabled": False, "lock_after_minutes": 5, "logout_enabled": False, "logout_after_minutes": 15}
+    assert body == {"blur_enabled": False, "blur_after_minutes": 1, "lock_enabled": False, "lock_after_minutes": 5, "logout_enabled": False, "logout_after_minutes": 15, "timezone": "Europe/Berlin"}
 
 
 @pytest.mark.asyncio
 async def test_a_normal_user_cannot_update_settings(db_override):
     authenticate_as("AccessPilot.User")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.patch("/api/v1/security-settings", json={"blur_enabled": True, "blur_after_minutes": 2, "lock_enabled": True, "lock_after_minutes": 10, "logout_enabled": True, "logout_after_minutes": 20})
+        response = await client.patch("/api/v1/security-settings", json={"blur_enabled": True, "blur_after_minutes": 2, "lock_enabled": True, "lock_after_minutes": 10, "logout_enabled": True, "logout_after_minutes": 20, "timezone": "Europe/Berlin"})
     assert response.status_code == 403
 
 
@@ -57,19 +57,19 @@ async def test_a_normal_user_cannot_update_settings(db_override):
 async def test_admin_can_update_settings_and_it_persists(db_override):
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        updated = await client.patch("/api/v1/security-settings", json={"blur_enabled": True, "blur_after_minutes": 2, "lock_enabled": True, "lock_after_minutes": 10, "logout_enabled": True, "logout_after_minutes": 20})
+        updated = await client.patch("/api/v1/security-settings", json={"blur_enabled": True, "blur_after_minutes": 2, "lock_enabled": True, "lock_after_minutes": 10, "logout_enabled": True, "logout_after_minutes": 20, "timezone": "Europe/Berlin"})
         assert updated.status_code == 200
-        assert updated.json() == {"blur_enabled": True, "blur_after_minutes": 2, "lock_enabled": True, "lock_after_minutes": 10, "logout_enabled": True, "logout_after_minutes": 20}
+        assert updated.json() == {"blur_enabled": True, "blur_after_minutes": 2, "lock_enabled": True, "lock_after_minutes": 10, "logout_enabled": True, "logout_after_minutes": 20, "timezone": "Europe/Berlin"}
 
         refetched = await client.get("/api/v1/security-settings")
-    assert refetched.json() == {"blur_enabled": True, "blur_after_minutes": 2, "lock_enabled": True, "lock_after_minutes": 10, "logout_enabled": True, "logout_after_minutes": 20}
+    assert refetched.json() == {"blur_enabled": True, "blur_after_minutes": 2, "lock_enabled": True, "lock_after_minutes": 10, "logout_enabled": True, "logout_after_minutes": 20, "timezone": "Europe/Berlin"}
 
 
 @pytest.mark.asyncio
 async def test_out_of_range_minutes_are_rejected(db_override):
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.patch("/api/v1/security-settings", json={"blur_enabled": True, "blur_after_minutes": 0, "lock_enabled": False, "lock_after_minutes": 5, "logout_enabled": False, "logout_after_minutes": 15})
+        response = await client.patch("/api/v1/security-settings", json={"blur_enabled": True, "blur_after_minutes": 0, "lock_enabled": False, "lock_after_minutes": 5, "logout_enabled": False, "logout_after_minutes": 15, "timezone": "Europe/Berlin"})
     assert response.status_code == 422
 
 
@@ -77,5 +77,25 @@ async def test_out_of_range_minutes_are_rejected(db_override):
 async def test_out_of_range_logout_minutes_are_rejected(db_override):
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.patch("/api/v1/security-settings", json={"blur_enabled": False, "blur_after_minutes": 1, "lock_enabled": False, "lock_after_minutes": 5, "logout_enabled": True, "logout_after_minutes": 0})
+        response = await client.patch("/api/v1/security-settings", json={"blur_enabled": False, "blur_after_minutes": 1, "lock_enabled": False, "lock_after_minutes": 5, "logout_enabled": True, "logout_after_minutes": 0, "timezone": "Europe/Berlin"})
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_an_unrecognized_timezone_is_rejected(db_override):
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.patch("/api/v1/security-settings", json={"blur_enabled": False, "blur_after_minutes": 1, "lock_enabled": False, "lock_after_minutes": 5, "logout_enabled": False, "logout_after_minutes": 15, "timezone": "Not/A_Real_Zone"})
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_a_valid_non_default_timezone_is_accepted_and_persists(db_override):
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        updated = await client.patch("/api/v1/security-settings", json={"blur_enabled": False, "blur_after_minutes": 1, "lock_enabled": False, "lock_after_minutes": 5, "logout_enabled": False, "logout_after_minutes": 15, "timezone": "America/New_York"})
+        assert updated.status_code == 200
+        assert updated.json()["timezone"] == "America/New_York"
+
+        refetched = await client.get("/api/v1/security-settings")
+    assert refetched.json()["timezone"] == "America/New_York"

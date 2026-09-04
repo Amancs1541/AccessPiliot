@@ -174,12 +174,13 @@ class SodPolicyEntity(Base):
 
 
 class SodAdmin(Base):
-    """A directory user flagged as AccessPilot.SoDAdmin — deliberately NOT an Entra App Role (which would need
-    Application.ReadWrite.All to manage, not granted). A regular Admin grants/revokes this flag from inside
-    AccessPilot itself; the request-time role-resolution in security/auth.py folds it into the caller's
-    effective roles whenever it finds a matching row here. Intentionally separate from AccessPilot.Admin so the
-    SoD engine itself has a genuine separation of duties: a plain Admin can see violations (SOD_READ) and manage
-    who holds this flag (SOD_ADMIN_ASSIGN), but cannot edit SoD rules (SOD_MANAGE) unless they also hold this."""
+    """RETIRED — no longer read or written anywhere in the app. Originally an in-app, non-Entra way to flag a
+    directory user as AccessPilot.SoDAdmin (a regular Admin granted/revoked this from inside AccessPilot itself,
+    folded into the caller's effective roles at request time in security/auth.py). Removed deliberately: it let
+    a plain Admin grant themselves or anyone else SoD governance with zero Entra involvement, defeating the
+    whole point of keeping SoD rule-editing separate from Admin — AccessPilot.SoDAdmin is now sourced exclusively
+    from a real Entra App Role assignment, exactly like every other AccessPilot role. Table (and this model) kept
+    only so a `Base.metadata.create_all` never needs a migration change here; not read by any service or API."""
     __tablename__ = "sod_admins"
     id: Mapped[UUID] = uuid_pk(); user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False, unique=True); granted_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); created_at: Mapped[datetime] = created_at()
 
@@ -212,6 +213,17 @@ class SodNotificationSettings(Base):
     notify_on_new_violation: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
     notify_on_exception_expiring: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
     exception_expiring_warning_days: Mapped[int] = mapped_column(Integer, nullable=False, default=7, server_default="7")
+    # Unlike the other two toggles, this gates a notification created eagerly at the moment of the event (see
+    # create_sod_exception_request) rather than one produced by the reconciliation pass — still worth its own
+    # switch, since an SoDAdmin who doesn't want to be pinged on every request should be able to turn it off.
+    notify_on_exception_requested: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
+    # Anti-gaming measure: without this, a user can dodge every check by deactivating one side and immediately
+    # activating the other, since no single moment ever has both sides simultaneously ACTIVE. Defaults OFF
+    # (server_default="false") — unlike the two notification toggles above, this is a real behavior change to
+    # the preventive gate, not just a notification preference, so it stays off until an Admin deliberately opts
+    # in, matching this app's "off by default" convention for every new enforcement lever added this session.
+    cooldown_enabled: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="false")
+    cooldown_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=24, server_default="24")
     updated_at: Mapped[datetime] = updated_at()
 
 
@@ -230,11 +242,44 @@ class SodNotification(Base):
     sod_policy_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("sod_policies.id"))
     user_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
     sod_exception_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("sod_exceptions.id"))
+    sod_exception_request_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("sod_exception_requests.id"))
     message: Mapped[str] = mapped_column(Text, nullable=False)
     read_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = created_at()
     __table_args__ = (Index("ix_sod_notifications_open", "notification_type", "sod_policy_id", "user_id", "resolved_at"),)
+
+
+class SodExceptionRequest(Base):
+    """Bridges a BLOCKED assignment attempt to the exception-grant workflow: an Admin who hits a SOD_CONFLICT
+    while creating an assignment (see check_sod_at_creation on create_assignment) can request an exception
+    instead of just being stuck, or using override_sod to push through unilaterally. Stores enough of the
+    original attempt's shape (approver/fallback/duration below) that granting can recreate it faithfully via
+    create_assignment() itself — including routing through the same approver if one was configured — rather than
+    just clearing the way for the admin to redo it manually."""
+    __tablename__ = "sod_exception_requests"
+    id: Mapped[UUID] = uuid_pk()
+    sod_policy_id: Mapped[UUID] = mapped_column(ForeignKey("sod_policies.id"), nullable=False)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    requested_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
+    justification: Mapped[str] = mapped_column(Text, nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    resource_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    app_role_external_id: Mapped[Optional[str]] = mapped_column(String(100))
+    # The rest of the original blocked AssignmentCreate's shape — captured so a grant can recreate it exactly,
+    # not just a bare no-approver ELIGIBLE row. All optional/defaulted since only the direct Assignments form
+    # (not package assignment, which has no "Request SoD Exception" button yet) populates these today.
+    approver_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
+    fallback_approver_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
+    fallback_unlock_hours: Mapped[Optional[int]] = mapped_column(Integer)
+    assignment_type: Mapped[str] = mapped_column(String(50), nullable=False, default="PERMANENT", server_default="PERMANENT")
+    expiration_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING", server_default="PENDING")
+    decided_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    denial_reason: Mapped[Optional[str]] = mapped_column(Text)
+    sod_exception_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("sod_exceptions.id"))
+    created_at: Mapped[datetime] = created_at()
 
 
 class OnboardingImport(Base):
@@ -311,6 +356,13 @@ class SecuritySettings(Base):
     lock_after_minutes: Mapped[int] = mapped_column(nullable=False, default=5, server_default="5")
     logout_enabled: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="false")
     logout_after_minutes: Mapped[int] = mapped_column(nullable=False, default=15, server_default="15")
+    # The one tenant-wide display setting on this otherwise idle-behavior-only table — lives here because this
+    # is already the one settings row every signed-in user (not just Admin) fetches on load (GET is open to any
+    # authenticated user, see api/v1/security_settings.py), which every date/time display in the app needs to
+    # be able to read regardless of role. An IANA zone identifier (e.g. "Europe/Berlin"), validated with
+    # zoneinfo.ZoneInfo at save time — every displayed date/time in the app is shown in this zone, uniformly for
+    # every viewer, rather than each browser's own local timezone.
+    timezone: Mapped[str] = mapped_column(String(50), nullable=False, default="Europe/Berlin", server_default="Europe/Berlin")
     updated_at: Mapped[datetime] = updated_at()
 
 
@@ -327,3 +379,21 @@ class BrandingSettings(Base):
     internal_logo: Mapped[Optional[str]] = mapped_column(Text)
     powered_by_text: Mapped[Optional[str]] = mapped_column(String(100))
     updated_at: Mapped[datetime] = updated_at()
+
+
+class Notification(Base):
+    """General-purpose, per-user notification — deliberately a SEPARATE table/model from SodNotification, not a
+    generalization of it. SodNotification's read state is a single global flag shared by every Admin/SoDAdmin,
+    which is correct at that small-team scale but wrong here: every ordinary end user needs their own unread
+    count, so read_at belongs to this row (one row per recipient) rather than to a shared condition. Unlike
+    SodNotification's reconcile-a-currently-true-condition model, this one is pure discrete-event logging —
+    something happened once (an assignment was created, approved, rejected...), so there is no resolved_at /
+    auto-resolution concept here; a row is created once and only ever transitions unread -> read."""
+    __tablename__ = "notifications"
+    id: Mapped[UUID] = uuid_pk()
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    notification_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    link: Mapped[Optional[str]] = mapped_column(String(255))
+    read_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = created_at()

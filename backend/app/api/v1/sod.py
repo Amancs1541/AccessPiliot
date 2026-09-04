@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import AccessPilotError
 from app.db.session import get_db
 from app.schemas.audit import AuditLogResponse
-from app.schemas.sod import SodAdminCreate, SodAdminResponse, SodCheckRequest, SodCheckResponse, SodExceptionCreate, SodExceptionResponse, SodNotificationResponse, SodNotificationSettingsResponse, SodNotificationSettingsUpdateRequest, SodPolicyCreate, SodPolicyResponse, SodPolicyUpdate, SodViolation
+from app.schemas.sod import SodCheckRequest, SodCheckResponse, SodExceptionCreate, SodExceptionRequestCreate, SodExceptionRequestDeny, SodExceptionRequestGrant, SodExceptionRequestResponse, SodExceptionResponse, SodNotificationResponse, SodNotificationSettingsResponse, SodNotificationSettingsUpdateRequest, SodPolicyCreate, SodPolicyResponse, SodPolicyUpdate, SodViolation
 from app.security.auth import AuthenticatedUser, require_authenticated_user, require_permission
 from app.services import sod as sod_service
 from app.services.assignments import _resolve_internal_user_id
@@ -17,7 +17,7 @@ from app.services.assignments import _resolve_internal_user_id
 router = APIRouter(prefix="/sod", tags=["sod"])
 sod_read = require_permission("SOD_READ")
 sod_manage = require_permission("SOD_MANAGE")
-sod_admin_assign = require_permission("SOD_ADMIN_ASSIGN")
+assignment_manage = require_permission("ASSIGNMENT_CREATE")
 
 
 @router.get("/policies", response_model=list[SodPolicyResponse])
@@ -39,11 +39,14 @@ async def update_policy(policy_id: UUID, data: SodPolicyUpdate, request: Request
     return await sod_service.to_policy_response(db, policy)
 
 
-@router.delete("/policies/{policy_id}", status_code=204)
+@router.delete("/policies/{policy_id}")
 async def delete_policy(policy_id: UUID, request: Request, actor: AuthenticatedUser = Depends(sod_manage), db: AsyncSession = Depends(get_db)):
+    """Deletes the policy if it has no real history; otherwise disables it instead (kept for exception/
+    notification audit history) and returns the disabled policy — mirrors DELETE /packages/{id}'s identical
+    "delete if never used, else archive" shape. A true delete returns a simple confirmation instead."""
     actor_id = await _resolve_internal_user_id(db, actor.directory_object_id)
-    await sod_service.delete_sod_policy(db, policy_id, actor_id, request.state.request_id)
-    return None
+    result = await sod_service.delete_sod_policy(db, policy_id, actor_id, request.state.request_id)
+    return await sod_service.to_policy_response(db, result) if result is not None else {"deleted": True, "id": str(policy_id)}
 
 
 @router.get("/violations", response_model=list[SodViolation])
@@ -141,20 +144,32 @@ async def mark_all_notifications_read(_: AuthenticatedUser = Depends(sod_read), 
     return None
 
 
-@router.get("/admins", response_model=list[SodAdminResponse])
-async def list_admins(_: AuthenticatedUser = Depends(sod_admin_assign), db: AsyncSession = Depends(get_db)):
-    return await sod_service.list_sod_admins(db)
+@router.get("/exception-requests", response_model=list[SodExceptionRequestResponse])
+async def list_exception_requests(_: AuthenticatedUser = Depends(sod_read), db: AsyncSession = Depends(get_db)):
+    return await sod_service.list_sod_exception_requests(db)
 
 
-@router.post("/admins", response_model=SodAdminResponse, status_code=201)
-async def add_admin(data: SodAdminCreate, request: Request, actor: AuthenticatedUser = Depends(sod_admin_assign), db: AsyncSession = Depends(get_db)):
+@router.post("/exception-requests", response_model=SodExceptionRequestResponse, status_code=201)
+async def create_exception_request(data: SodExceptionRequestCreate, request: Request, actor: AuthenticatedUser = Depends(assignment_manage), db: AsyncSession = Depends(get_db)):
+    """ASSIGNMENT_CREATE-gated: only someone who can create assignments in the first place has a reason to
+    request an exception for one that got blocked. Notifies the SoDAdmin roster; does not touch the original
+    blocked assignment attempt — the admin must retry it manually once (if) an exception is granted."""
     actor_id = await _resolve_internal_user_id(db, actor.directory_object_id)
-    admin = await sod_service.add_sod_admin(db, data.user_id, actor_id, request.state.request_id)
-    return await sod_service.hydrate_sod_admin(db, admin)
+    exception_request = await sod_service.create_sod_exception_request(db, data, actor_id, request.state.request_id)
+    return await sod_service.hydrate_sod_exception_request(db, exception_request)
 
 
-@router.delete("/admins/{user_id}", status_code=204)
-async def remove_admin(user_id: UUID, request: Request, actor: AuthenticatedUser = Depends(sod_admin_assign), db: AsyncSession = Depends(get_db)):
+@router.post("/exception-requests/{exception_request_id}/grant", response_model=SodExceptionRequestResponse)
+async def grant_exception_request(exception_request_id: UUID, data: SodExceptionRequestGrant, request: Request, actor: AuthenticatedUser = Depends(sod_manage), db: AsyncSession = Depends(get_db)):
     actor_id = await _resolve_internal_user_id(db, actor.directory_object_id)
-    await sod_service.remove_sod_admin(db, user_id, actor_id, request.state.request_id)
-    return None
+    exception_request = await sod_service.grant_sod_exception_request(db, exception_request_id, data, actor_id, request.state.request_id)
+    return await sod_service.hydrate_sod_exception_request(db, exception_request)
+
+
+@router.post("/exception-requests/{exception_request_id}/deny", response_model=SodExceptionRequestResponse)
+async def deny_exception_request(exception_request_id: UUID, data: SodExceptionRequestDeny, request: Request, actor: AuthenticatedUser = Depends(sod_manage), db: AsyncSession = Depends(get_db)):
+    actor_id = await _resolve_internal_user_id(db, actor.directory_object_id)
+    exception_request = await sod_service.deny_sod_exception_request(db, exception_request_id, data, actor_id, request.state.request_id)
+    return await sod_service.hydrate_sod_exception_request(db, exception_request)
+
+

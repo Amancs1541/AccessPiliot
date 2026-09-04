@@ -44,7 +44,11 @@ async def list_assignments(_: AuthenticatedUser = Depends(assignment_read), db: 
 
 @router.post("", response_model=AssignmentResponse, status_code=201)
 async def create_assignment(data: AssignmentCreate, request: Request, actor: AuthenticatedUser = Depends(assignment_manage), db: AsyncSession = Depends(get_db)):
-    assignment, hydrated = await assignment_service.create_assignment(db, data, actor.directory_object_id, request.state.request_id)
+    """This endpoint requires ASSIGNMENT_CREATE (Admin-only), so every call here is admin-initiated —
+    check_sod_at_creation=True accordingly (blocks a doomed-to-conflict grant immediately rather than letting
+    it sit ELIGIBLE until someone tries to activate it). Self-service package requests, which never reach this
+    endpoint, are deliberately NOT affected — see packages.py's request_package()."""
+    assignment, hydrated = await assignment_service.create_assignment(db, data, actor.directory_object_id, request.state.request_id, check_sod_at_creation=True)
     return assignment_service.to_response(assignment, hydrated)
 
 

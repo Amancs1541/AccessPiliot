@@ -1,18 +1,35 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useAuth } from './auth';
 
-interface SecuritySettings { blur_enabled: boolean; blur_after_minutes: number; lock_enabled: boolean; lock_after_minutes: number; logout_enabled: boolean; logout_after_minutes: number; }
+interface SecuritySettings { blur_enabled: boolean; blur_after_minutes: number; lock_enabled: boolean; lock_after_minutes: number; logout_enabled: boolean; logout_after_minutes: number; timezone: string; }
 
 const ACTIVITY_EVENTS = ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll'];
 const CHECK_INTERVAL_MS = 1000;
+// Fallback only for the brief window before the real setting has loaded (or if the fetch fails) — matches the
+// model's own default, so the very first render before data arrives is never visibly wrong.
+const DEFAULT_TIMEZONE = 'Europe/Berlin';
 
 // Lets the Security settings page tell an already-mounted IdleGuard "the settings just changed, re-fetch now" —
 // without this, IdleGuard (which fetches once when the authenticated app first loads and stays mounted across
 // every route change) would keep enforcing whatever was configured at that first load until a full page refresh,
-// even though the Security page itself shows the freshly-saved values.
-const SecuritySettingsRefreshContext = createContext<(() => void) | null>(null);
+// even though the Security page itself shows the freshly-saved values. Also exposes the fetched `timezone` (and
+// the rest of the settings) directly — this is the ONE place every signed-in user's browser already fetches
+// GET /security-settings (open to any authenticated user, not just Admin), so every date/time display anywhere
+// in the app reads the configured timezone from here instead of a separate fetch.
+interface SecuritySettingsContextValue { settings: SecuritySettings | null; refresh: () => void; }
+const SecuritySettingsContext = createContext<SecuritySettingsContextValue>({ settings: null, refresh: () => {} });
+export function useSecuritySettingsContext() {
+  return useContext(SecuritySettingsContext);
+}
+/** The tenant-wide configured display timezone (an IANA zone id, e.g. "Europe/Berlin") — falls back to the
+ * model's own default before the real setting has loaded, never to each viewer's own browser-local timezone. */
+export function useAppTimezone(): string {
+  return useContext(SecuritySettingsContext).settings?.timezone ?? DEFAULT_TIMEZONE;
+}
+// Deprecated name kept as an alias so any not-yet-migrated call site keeps working — new code should call
+// useSecuritySettingsContext().refresh instead.
 export function useRefreshSecuritySettings() {
-  return useContext(SecuritySettingsRefreshContext);
+  return useContext(SecuritySettingsContext).refresh;
 }
 
 // Wraps the normal authenticated app (Shell + Routes) for both Admin and end-user sessions. Tracks real user
@@ -69,9 +86,10 @@ export function IdleGuard({ children }: { children: ReactNode }) {
   }, [settings]);
 
   const resume = () => { lastActivity.current = Date.now(); setBlurred(false); setLocked(false); };
+  const contextValue = useMemo(() => ({ settings, refresh: fetchSettings }), [settings, fetchSettings]);
 
   return (
-    <SecuritySettingsRefreshContext.Provider value={fetchSettings}>
+    <SecuritySettingsContext.Provider value={contextValue}>
       {children}
       {blurred && !locked && <div aria-hidden="true" style={{ position: 'fixed', inset: 0, backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)', background: 'rgba(23,33,43,0.12)', zIndex: 9998, pointerEvents: 'none' }} />}
       {locked && (
@@ -82,6 +100,6 @@ export function IdleGuard({ children }: { children: ReactNode }) {
           <button type="button" className="btn btn-primary" onClick={resume}>Continue</button>
         </div>
       )}
-    </SecuritySettingsRefreshContext.Provider>
+    </SecuritySettingsContext.Provider>
   );
 }

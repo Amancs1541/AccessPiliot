@@ -115,21 +115,6 @@ class SodCheckResponse(BaseModel):
     conflicts: list[SodPolicyResponse]
 
 
-class SodAdminCreate(BaseModel):
-    user_id: UUID
-
-
-class SodAdminResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: UUID
-    user_id: UUID
-    user_display_name: Optional[str] = None
-    user_email: Optional[str] = None
-    granted_by: Optional[UUID] = None
-    granted_by_display_name: Optional[str] = None
-    created_at: datetime
-
-
 class SodExceptionCreate(BaseModel):
     sod_policy_id: UUID
     user_id: UUID
@@ -171,12 +156,18 @@ class SodNotificationSettingsResponse(BaseModel):
     notify_on_new_violation: bool
     notify_on_exception_expiring: bool
     exception_expiring_warning_days: int
+    notify_on_exception_requested: bool
+    cooldown_enabled: bool
+    cooldown_hours: int
 
 
 class SodNotificationSettingsUpdateRequest(BaseModel):
     notify_on_new_violation: bool
     notify_on_exception_expiring: bool
     exception_expiring_warning_days: int = Field(gt=0, le=90)
+    notify_on_exception_requested: bool
+    cooldown_enabled: bool
+    cooldown_hours: int = Field(gt=0, le=720)
 
 
 class SodNotificationResponse(BaseModel):
@@ -190,4 +181,63 @@ class SodNotificationResponse(BaseModel):
     message: str
     read_at: Optional[datetime] = None
     resolved_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class SodExceptionRequestCreate(BaseModel):
+    sod_policy_id: UUID
+    user_id: UUID
+    justification: str = Field(min_length=3, max_length=2000)
+    resource_type: str = Field(pattern="^(GROUP|ROLE|APPLICATION)$")
+    resource_id: UUID
+    app_role_external_id: Optional[str] = None
+    # The rest of the originally-blocked AssignmentCreate's shape, so a grant can recreate it faithfully
+    # (including routing through the same approver) instead of only ever landing on a bare ELIGIBLE row.
+    approver_id: Optional[UUID] = None
+    fallback_approver_id: Optional[UUID] = None
+    fallback_unlock_hours: Optional[int] = Field(default=None, gt=0)
+    assignment_type: str = Field(default="PERMANENT", pattern="^(PERMANENT|TEMPORARY)$")
+    expiration_time: Optional[datetime] = None
+
+
+class SodExceptionRequestGrant(BaseModel):
+    expires_at: datetime
+
+    @model_validator(mode="after")
+    def _validate_expires_in_future(self) -> "SodExceptionRequestGrant":
+        from datetime import datetime as _dt, timezone as _tz
+        expires = self.expires_at if self.expires_at.tzinfo else self.expires_at.replace(tzinfo=_tz.utc)
+        if expires <= _dt.now(_tz.utc):
+            raise ValueError("expires_at must be in the future")
+        return self
+
+
+class SodExceptionRequestDeny(BaseModel):
+    reason: Optional[str] = Field(default=None, max_length=2000)
+
+
+class SodExceptionRequestResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    sod_policy_id: UUID
+    policy_name: Optional[str] = None
+    user_id: UUID
+    user_display_name: Optional[str] = None
+    requested_by: Optional[UUID] = None
+    requested_by_display_name: Optional[str] = None
+    justification: str
+    resource_type: str
+    resource_id: UUID
+    resource_display_name: Optional[str] = None
+    app_role_external_id: Optional[str] = None
+    approver_id: Optional[UUID] = None
+    approver_display_name: Optional[str] = None
+    assignment_type: str
+    expiration_time: Optional[datetime] = None
+    status: str
+    decided_by: Optional[UUID] = None
+    decided_by_display_name: Optional[str] = None
+    decided_at: Optional[datetime] = None
+    denial_reason: Optional[str] = None
+    sod_exception_id: Optional[UUID] = None
     created_at: datetime

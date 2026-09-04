@@ -17,6 +17,7 @@ from app.services.bootstrap import ensure_bootstrap_credential
 from app.workers.activation import activation_worker_loop
 from app.workers.expiration import expiration_worker_loop
 from app.workers.scheduler import sync_scheduler_loop
+from app.workers.sod_expiry import sod_exception_expiry_worker_loop
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -76,6 +77,7 @@ async def lifespan(_: FastAPI):
         background_tasks.append(asyncio.create_task(sync_scheduler_loop(AsyncSessionLocal)))
         background_tasks.append(asyncio.create_task(expiration_worker_loop(AsyncSessionLocal)))
         background_tasks.append(asyncio.create_task(activation_worker_loop(AsyncSessionLocal)))
+        background_tasks.append(asyncio.create_task(sod_exception_expiry_worker_loop(AsyncSessionLocal)))
     yield
     for task in background_tasks:
         task.cancel()

@@ -12,6 +12,7 @@ from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment,
 from app.providers.graph_client import GraphError
 from app.schemas.assignments import AssignmentResponse
 from app.services.audit import record_audit
+from app.services.notifications import create_notification
 from app.services.provider_configuration import _connector
 
 
@@ -25,7 +26,7 @@ def to_response(assignment: AccessAssignment, hydrated: dict) -> AssignmentRespo
         fallback_approver_id=assignment.fallback_approver_id, fallback_unlock_at=assignment.fallback_unlock_at,
         bypass_activation=assignment.bypass_activation,
         activated_at=assignment.activated_at, revoked_at=assignment.revoked_at, created_at=assignment.created_at,
-        package_name=hydrated.get("package_name"),
+        package_name=hydrated.get("package_name"), sod_exception_expires_at=hydrated.get("sod_exception_expires_at"),
     )
 
 
@@ -69,7 +70,11 @@ async def hydrate_display_fields(session: AsyncSession, assignment: AccessAssign
     package_name = (await session.execute(
         select(AccessPackage.name).join(AccessPackageAssignment, AccessPackageAssignment.package_id == AccessPackage.id).where(AccessPackageAssignment.assignment_id == assignment.id)
     )).scalar_one_or_none()
-    return {"user_display_name": user.display_name if user else None, "resource_display_name": resource_name, "package_name": package_name}
+    # Local import to avoid a circular import at module level — sod.py itself imports from this module directly
+    # (create_assignment, revoke_provider_access), so the reverse direction has to stay function-scoped.
+    from app.services.sod import get_sod_exception_covering_assignment
+    covering_exception = await get_sod_exception_covering_assignment(session, assignment)
+    return {"user_display_name": user.display_name if user else None, "resource_display_name": resource_name, "package_name": package_name, "sod_exception_expires_at": covering_exception.expires_at if covering_exception else None}
 
 
 async def _grant_provider_access(session: AsyncSession, provider_id: UUID, resource_type: str, target_external_id: str, user_external_id: str, app_role_external_id: Optional[str] = None) -> None:
@@ -186,7 +191,7 @@ async def _supersede_existing_assignment(session: AsyncSession, *, user_id: UUID
     await session.commit()
 
 
-async def create_assignment(session: AsyncSession, data, actor_subject: str, request_id: str) -> tuple[AccessAssignment, dict]:
+async def create_assignment(session: AsyncSession, data, actor_subject: str, request_id: str, check_sod_at_creation: bool = False) -> tuple[AccessAssignment, dict]:
     target_user = await session.get(User, data.user_id)
     if not target_user:
         raise AccessPilotError("USER_NOT_FOUND", "The user was not found.", 404)
@@ -228,10 +233,14 @@ async def create_assignment(session: AsyncSession, data, actor_subject: str, req
 
     # SoD check happens here — before the AccessAssignment row is even constructed, so a blocked grant leaves
     # nothing half-inserted, exactly like every other pre-construction validation above (USER_NOT_FOUND etc.).
-    # Only the bypass-straight-to-ACTIVE branch grants real access at creation time, so it's the only one checked
-    # here; the ordinary PENDING_APPROVAL/ELIGIBLE branches are checked later, at activate_assignment() time.
+    # The bypass-straight-to-ACTIVE branch is ALWAYS checked (that's the moment real access becomes real). The
+    # ordinary PENDING_APPROVAL/ELIGIBLE branches are additionally checked when check_sod_at_creation=True —
+    # set only by admin-initiated callers (the direct "Add assignment" endpoint, admin package-assign), NOT
+    # self-service package requests, which still defer to activate_assignment() as before. The idea: an admin
+    # assigning something that's already known to conflict should find out immediately, not watch it sit
+    # ELIGIBLE only to be blocked later when someone tries to activate it.
     sod_conflicts: list = []
-    if status == "ACTIVE":
+    if status == "ACTIVE" or check_sod_at_creation:
         from app.services.sod import check_sod_conflicts
         sod_conflicts = await check_sod_conflicts(session, data.user_id, data.resource_type, data.resource_id, data.app_role_external_id)
         if sod_conflicts and not getattr(data, "override_sod", False):
@@ -279,7 +288,15 @@ async def create_assignment(session: AsyncSession, data, actor_subject: str, req
             await _record_local_group_membership(session, data.user_id, data.resource_id)
         await record_audit(session, action="ASSIGNMENT_ACTIVATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=provider_id, actor_user_id=requested_by, request_id=request_id, metadata={"decision": "ADMIN_BYPASS", "justification": data.justification, "sod_override": bool(sod_conflicts)})
 
-    await record_audit(session, action="ASSIGNMENT_CREATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=provider_id, actor_user_id=requested_by, request_id=request_id, metadata={"status": status, "resource_type": data.resource_type, "bypass_activation": bypass_activation})
+    await record_audit(session, action="ASSIGNMENT_CREATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=provider_id, actor_user_id=requested_by, request_id=request_id, metadata={"status": status, "resource_type": data.resource_type, "bypass_activation": bypass_activation, "sod_override": bool(sod_conflicts) if status != "ACTIVE" else False})
+    # General notification (see services/notifications.py) — deliberately distinct from a self-service request,
+    # which the requester already knows about since they just did it themselves.
+    if approval_required:
+        for approver_id in {data.approver_id, fallback_approver_id} - {None}:
+            await create_notification(session, approver_id, "ASSIGNMENT_PENDING_APPROVAL", f"{target_user.display_name} requested {resource_name} — awaiting your approval.", link="/approvals")
+    elif requested_by != data.user_id:
+        verb = "now have active access to" if status == "ACTIVE" else "are now eligible to activate"
+        await create_notification(session, data.user_id, "ASSIGNMENT_CREATED", f"You {verb} {resource_name}.", link="/my-access")
     await session.commit()
     await session.refresh(assignment)
     return assignment, {"user_display_name": target_user.display_name, "resource_display_name": resource_name}
@@ -389,7 +406,7 @@ async def activate_assignment(session: AsyncSession, assignment_id: UUID, actor_
     # the exact same target — mirrors approve_assignment's identical reasoning for the approval path.
     await _supersede_existing_assignment(session, user_id=assignment.user_id, resource_type=assignment.resource_type, resource_id=assignment.resource_id, app_role_external_id=assignment.app_role_external_id, provider_id=assignment.provider_id, actor_id=actor_id, request_id=request_id, exclude_id=assignment.id)
 
-    _, _, target_external_id = await _resolve_target(session, assignment.resource_type, assignment.resource_id)
+    _, resource_name, target_external_id = await _resolve_target(session, assignment.resource_type, assignment.resource_id)
     target_user = await session.get(User, assignment.user_id)
     if not target_user:
         raise AccessPilotError("USER_NOT_FOUND", "The user was not found.", 404)
@@ -407,6 +424,8 @@ async def activate_assignment(session: AsyncSession, assignment_id: UUID, actor_
     assignment.activated_at = now
     assignment.expiration_time = now + timedelta(hours=duration_hours)
     await record_audit(session, action="ASSIGNMENT_ACTIVATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, actor_user_id=actor_id, request_id=request_id, metadata={"decision": "SELF_ACTIVATED", "duration_hours": duration_hours, "justification": justification, "sod_override": bool(sod_conflicts)})
+    if actor_id != assignment.user_id:
+        await create_notification(session, assignment.user_id, "ASSIGNMENT_ACTIVATED", f"An administrator activated your access to {resource_name} — active for {duration_hours} hour{'s' if duration_hours != 1 else ''}.", link="/my-access")
     await session.commit()
     await session.refresh(assignment)
     return assignment, await hydrate_display_fields(session, assignment)
@@ -435,6 +454,9 @@ async def deactivate_assignment(session: AsyncSession, assignment_id: UUID, acto
     assignment.expiration_time = None
     assignment.bypass_activation = False
     await record_audit(session, action="ASSIGNMENT_DEACTIVATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, actor_user_id=actor_id, request_id=request_id, metadata={"decision": "SELF_DEACTIVATED"})
+    if actor_id != assignment.user_id:
+        _, resource_name, _ = await _resolve_target(session, assignment.resource_type, assignment.resource_id)
+        await create_notification(session, assignment.user_id, "ASSIGNMENT_DEACTIVATED", f"An administrator deactivated your access to {resource_name}.", link="/my-access")
     await session.commit()
     await session.refresh(assignment)
     return assignment, await hydrate_display_fields(session, assignment)
@@ -462,6 +484,9 @@ async def revoke_assignment(session: AsyncSession, assignment_id: UUID, actor_su
     assignment.status = "REVOKED"
     assignment.revoked_at = datetime.now(timezone.utc)
     await record_audit(session, action="ASSIGNMENT_REVOKED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, actor_user_id=actor_id, request_id=request_id, metadata={"reason": "ADMIN_REVOKED", "previous_status": previous_status, "justification": justification})
+    if actor_id != assignment.user_id:
+        _, resource_name, _ = await _resolve_target(session, assignment.resource_type, assignment.resource_id)
+        await create_notification(session, assignment.user_id, "ASSIGNMENT_REVOKED", f"Your access to {resource_name} was revoked by an administrator.", link="/my-access")
     await session.commit()
     await session.refresh(assignment)
     return assignment, await hydrate_display_fields(session, assignment)
@@ -484,6 +509,9 @@ async def approve_assignment(session: AsyncSession, assignment_id: UUID, actor_s
     assignment.status = "ELIGIBLE"
     assignment.approved_by = actor_id or assignment.approved_by
     await record_audit(session, action="ASSIGNMENT_APPROVED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, actor_user_id=actor_id, request_id=request_id, metadata={"decision": "APPROVED", "justification": justification})
+    if actor_id != assignment.user_id:
+        _, resource_name, _ = await _resolve_target(session, assignment.resource_type, assignment.resource_id)
+        await create_notification(session, assignment.user_id, "ASSIGNMENT_APPROVED", f"Your request for {resource_name} was approved — you can now activate it from My Access.", link="/my-access")
     await session.commit()
     await session.refresh(assignment)
     return assignment, await hydrate_display_fields(session, assignment)
@@ -497,6 +525,9 @@ async def reject_assignment(session: AsyncSession, assignment_id: UUID, actor_su
     assignment.status = "REJECTED"
     assignment.approved_by = actor_id or assignment.approved_by
     await record_audit(session, action="ASSIGNMENT_REJECTED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, actor_user_id=actor_id, request_id=request_id, metadata={"decision": "REJECTED"})
+    if actor_id != assignment.user_id:
+        _, resource_name, _ = await _resolve_target(session, assignment.resource_type, assignment.resource_id)
+        await create_notification(session, assignment.user_id, "ASSIGNMENT_REJECTED", f"Your request for {resource_name} was rejected.", link="/my-requests")
     await session.commit()
     await session.refresh(assignment)
     return assignment, await hydrate_display_fields(session, assignment)

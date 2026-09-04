@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Box, Check, ChevronRight, Clock3, Cloud, Copy, Database, ExternalLink, FileCheck2, FolderKanban, Gauge, Image, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Lock, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldAlert, ShieldCheck, SlidersHorizontal, UploadCloud, UserRound, Users, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -7,7 +7,7 @@ import { mockService, useMockState } from './mockService';
 import { apiBaseUrl, useAuth } from './auth';
 import ProviderConfiguration from './ProviderConfiguration';
 import { BreakGlassDashboard } from './BreakGlassDashboard';
-import { IdleGuard, useRefreshSecuritySettings } from './IdleGuard';
+import { IdleGuard, useRefreshSecuritySettings, useAppTimezone } from './IdleGuard';
 import logo from './assets/logo.png';
 
 interface ApiUser { id: string; provider_id: string; external_id: string; email: string; display_name: string; given_name: string | null; surname: string | null; department: string | null; job_title: string | null; status: string; employee_id: string | null; source: string | null; last_synced_at: string | null; }
@@ -28,16 +28,21 @@ interface ApiUserAccessSegments { permanentActive: number; eligible: number; }
 interface ApiSegmentMember { id: string; display_name: string; email: string; }
 interface ApiOnboardingImport { id: string; filename: string; status: string; total_records: number; created_count: number; updated_count: number; disabled_count: number; no_change_count: number; failed_count: number; access_revoked_count: number; access_revoke_failed_count: number; real_accounts_provisioned_count: number; birthright_assignments_created_count: number; error_summary: Record<string, unknown> | null; created_at: string; completed_at: string | null; }
 interface ApiOnboardingImportRecord { row_number: number; employee_id: string; action: string; error_message: string | null; raw_data: Record<string, string> | null; }
-interface ApiSecuritySettings { blur_enabled: boolean; blur_after_minutes: number; lock_enabled: boolean; lock_after_minutes: number; logout_enabled: boolean; logout_after_minutes: number; }
+interface ApiSecuritySettings { blur_enabled: boolean; blur_after_minutes: number; lock_enabled: boolean; lock_after_minutes: number; logout_enabled: boolean; logout_after_minutes: number; timezone: string; }
+// A short, curated list rather than every IANA zone (~400) — covers the timezones this deployment's users are
+// actually likely to be in; "Other (type it below)" falls through to a free-text input validated server-side by
+// the exact same zoneinfo check, so nothing is actually unreachable, just not pre-listed.
+const COMMON_TIMEZONES = ['UTC', 'Europe/London', 'Europe/Berlin', 'Europe/Paris', 'Europe/Madrid', 'Europe/Rome', 'Europe/Warsaw', 'Europe/Moscow', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'America/Sao_Paulo', 'Asia/Dubai', 'Asia/Kolkata', 'Asia/Shanghai', 'Asia/Singapore', 'Asia/Tokyo', 'Australia/Sydney', 'Pacific/Auckland'];
 interface ApiCurrentUser { id: string; displayName: string; email: string | null; tenantId: string; roles: string[]; department: string | null; jobTitle: string | null; employeeId: string | null; }
 interface ApiSodEntity { id: string; conflict_side: string; entity_type: string; entity_id: string; entity_display_name: string | null; app_role_external_id: string | null; entity_resolved: boolean; }
 interface ApiSodPolicy { id: string; name: string; description: string | null; severity: string; status: string; entities: ApiSodEntity[]; created_at: string; updated_at: string; }
 interface ApiSodViolationHolding { assignment_id: string | null; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; source: string; }
 interface ApiSodViolation { policy_id: string; policy_name: string; severity: string; user_id: string; user_display_name: string | null; side_a_holdings: ApiSodViolationHolding[]; side_b_holdings: ApiSodViolationHolding[]; exception_active: boolean; exception_expires_at: string | null; }
-interface ApiSodAdmin { id: string; user_id: string; user_display_name: string | null; user_email: string | null; granted_by: string | null; granted_by_display_name: string | null; created_at: string; }
 interface ApiSodException { id: string; sod_policy_id: string; policy_name: string | null; user_id: string; user_display_name: string | null; user_email: string | null; justification: string; granted_by: string | null; granted_by_display_name: string | null; expires_at: string; revoked_at: string | null; is_active: boolean; created_at: string; }
-interface ApiSodNotificationSettings { notify_on_new_violation: boolean; notify_on_exception_expiring: boolean; exception_expiring_warning_days: number; }
+interface ApiSodNotificationSettings { notify_on_new_violation: boolean; notify_on_exception_expiring: boolean; exception_expiring_warning_days: number; notify_on_exception_requested: boolean; cooldown_enabled: boolean; cooldown_hours: number; }
 interface ApiSodNotification { id: string; notification_type: string; sod_policy_id: string | null; policy_name: string | null; user_id: string | null; user_display_name: string | null; message: string; read_at: string | null; resolved_at: string | null; created_at: string; }
+interface ApiNotification { id: string; notification_type: string; message: string; link: string | null; read_at: string | null; created_at: string; }
+interface ApiSodExceptionRequest { id: string; sod_policy_id: string; policy_name: string | null; user_id: string; user_display_name: string | null; requested_by: string | null; requested_by_display_name: string | null; justification: string; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; approver_id: string | null; approver_display_name: string | null; assignment_type: string; expiration_time: string | null; status: string; decided_by: string | null; decided_by_display_name: string | null; decided_at: string | null; denial_reason: string | null; sod_exception_id: string | null; created_at: string; }
 interface ApiSodActivityEntry { id: string; timestamp: string; actor_display_name: string | null; action: string; target_user_display_name: string | null; result: string; metadata: Record<string, unknown> | null; }
 function summarizeSodActivity(entry: ApiSodActivityEntry): string {
   const m = entry.metadata || {};
@@ -107,8 +112,8 @@ const nav = [
   { label: 'Access Packages', icon: Box, to: '/admin/access-packages', roles: ['admin'] },
   { label: 'Policies', icon: SlidersHorizontal, to: '/admin/policies', roles: ['admin'], section: 'GOVERNANCE' },
   { label: 'Audit Logs', icon: BookOpen, to: '/admin/audit', roles: ['admin'] },
-  // Its own sidebar section, not folded into GOVERNANCE — also visible to a plain end-user who holds the
-  // DB-driven AccessPilot.SoDAdmin flag (see Shell's nav filter, which additionally checks auth.isSodAdmin for
+  // Its own sidebar section, not folded into GOVERNANCE — also visible to a plain end-user who holds the real
+  // Entra AccessPilot.SoDAdmin app role (see Shell's nav filter, which additionally checks auth.isSodAdmin for
   // items marked extra: 'sod') — 'admin' alone is neither sufficient nor necessary for these two.
   { label: 'Separation of Duties', icon: ShieldAlert, to: '/admin/sod', roles: ['admin'], extra: 'sod', section: 'SEPARATION OF DUTIES' },
   { label: 'SoD Configuration', icon: Settings2, to: '/admin/sod/configuration', roles: ['admin'], extra: 'sod' },
@@ -173,6 +178,16 @@ function SecurityPage() {
       <label className="key" style={{display:'block',marginBottom:22,maxWidth:220}}><span>Lock after (minutes)</span><input className="select" style={{width:'100%'}} type="number" min={1} max={120} disabled={!form.lock_enabled} value={form.lock_after_minutes} onChange={event => setForm({...form, lock_after_minutes: Number(event.target.value)})}/></label>
       <label style={{display:'flex',alignItems:'center',gap:10,marginBottom:12}}><input type="checkbox" checked={form.logout_enabled} onChange={event => setForm({...form, logout_enabled: event.target.checked})}/><span>Automatically sign out after inactivity — ends the session; the user must sign in again</span></label>
       <label className="key" style={{display:'block',marginBottom:22,maxWidth:220}}><span>Sign out after (minutes)</span><input className="select" style={{width:'100%'}} type="number" min={1} max={480} disabled={!form.logout_enabled} value={form.logout_after_minutes} onChange={event => setForm({...form, logout_after_minutes: Number(event.target.value)})}/></label>
+      <div className="key" style={{marginBottom:8}}><span>Display timezone</span></div>
+      <p className="subtitle" style={{marginTop:0,marginBottom:14,maxWidth:640}}>Every date and time shown anywhere in AccessPilot, for every signed-in user, is displayed in this timezone — it does not change what time you're prompted for when you enter a date, only how dates already on record are shown.</p>
+      <label className="key" style={{display:'block',marginBottom: COMMON_TIMEZONES.includes(form.timezone) ? 22 : 10, maxWidth:320}}>
+        <span>Timezone</span>
+        <select className="select" style={{width:'100%'}} value={COMMON_TIMEZONES.includes(form.timezone) ? form.timezone : 'OTHER'} onChange={event => setForm({...form, timezone: event.target.value === 'OTHER' ? '' : event.target.value})}>
+          {COMMON_TIMEZONES.map(zone => <option key={zone} value={zone}>{zone}</option>)}
+          <option value="OTHER">Other (type it below)</option>
+        </select>
+      </label>
+      {!COMMON_TIMEZONES.includes(form.timezone) && <label className="key" style={{display:'block',marginBottom:22,maxWidth:320}}><span>IANA timezone name (e.g. "Asia/Kolkata")</span><input className="select" style={{width:'100%'}} value={form.timezone} onChange={event => setForm({...form, timezone: event.target.value})}/></label>}
       {message && <div className="notice" style={{marginBottom:14}}>{message}</div>}
       <button className="btn btn-primary" disabled={saving} onClick={save}>{saving ? 'Saving...' : 'Save'}</button>
     </div></div>}
@@ -263,40 +278,67 @@ function SodEntityPicker({ rows, groups, roles, applications, packages, onAdd, o
 const emptySodForm = { name: '', description: '', severity: 'MEDIUM', sideA: [] as SodEntityRow[], sideB: [] as SodEntityRow[] };
 function SodPage() {
   const auth = useAuth();
+  const timezone = useAppTimezone();
   const canManageRules = auth.isSodAdmin;
-  const canManageRoster = auth.role === 'admin';
   const { data: policies, loading, reload } = useApiResource<ApiSodPolicy[]>('/api/v1/sod/policies');
   const { data: violations, reload: reloadViolations } = useApiResource<ApiSodViolation[]>('/api/v1/sod/violations');
   const { data: groups } = useApiResource<ApiGroup[]>('/api/v1/groups');
   const { data: roles } = useApiResource<ApiRole[]>('/api/v1/roles');
   const { data: applications } = useApiResource<ApiApplication[]>('/api/v1/applications');
   const { data: packages } = useApiResource<ApiPackage[]>('/api/v1/packages');
-  const { data: admins, reload: reloadAdmins } = useApiResource<ApiSodAdmin[]>('/api/v1/sod/admins', canManageRoster);
-  const { data: directoryUsers } = useApiResource<ApiUser[]>('/api/v1/users', canManageRoster);
   const { data: activity } = useApiResource<ApiSodActivityEntry[]>('/api/v1/sod/activity');
   const { data: exceptions, reload: reloadExceptions } = useApiResource<ApiSodException[]>('/api/v1/sod/exceptions');
+  const { data: exceptionRequests, reload: reloadExceptionRequests } = useApiResource<ApiSodExceptionRequest[]>('/api/v1/sod/exception-requests');
+  // Live: a plain DB read (no reconciliation, no Graph scan — see the Bell's own comment in Shell for why that
+  // one is 60s), so a pending request from an admin shows up on this page quickly while an SoDAdmin has it open.
+  useEffect(() => {
+    const id = setInterval(() => reloadExceptionRequests(), 20000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const [grantingRequest, setGrantingRequest] = useState<ApiSodExceptionRequest | null>(null);
+  const [grantExpiresAt, setGrantExpiresAt] = useState('');
+  const [requestActionSaving, setRequestActionSaving] = useState(false);
+  const [requestActionMessage, setRequestActionMessage] = useState('');
+  const openGrantRequest = (request: ApiSodExceptionRequest) => { setGrantingRequest(request); setGrantExpiresAt(defaultExpiry()); setRequestActionMessage(''); };
+  const submitGrantRequest = async () => {
+    if (!grantingRequest || !grantExpiresAt) return;
+    setRequestActionSaving(true); setRequestActionMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/sod/exception-requests/${grantingRequest.id}/grant`, { method: 'POST', body: JSON.stringify({ expires_at: new Date(grantExpiresAt).toISOString() }) });
+      if (response.ok) { setGrantingRequest(null); reloadExceptionRequests(); reloadExceptions(); reloadViolations(); }
+      else { const body = await response.json().catch(() => null); setRequestActionMessage(body?.error?.message || 'Unable to grant this request.'); }
+    } catch { setRequestActionMessage('Unable to reach the backend.'); }
+    finally { setRequestActionSaving(false); }
+  };
+  const denyRequest = async (request: ApiSodExceptionRequest) => {
+    const reason = window.prompt(`Deny the exception request from ${request.requested_by_display_name || 'this admin'} for ${request.user_display_name || request.user_id}? Reason (optional):`);
+    if (reason === null) return;
+    const response = await auth.apiRequest(`/api/v1/sod/exception-requests/${request.id}/deny`, { method: 'POST', body: JSON.stringify({ reason: reason.trim() || undefined }) });
+    if (response.ok) reloadExceptionRequests();
+  };
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState(emptySodForm);
   const [message, setMessage] = useState('');
   const [saving, setSaving] = useState(false);
-  const [newAdminUserId, setNewAdminUserId] = useState('');
-  const [exceptionForm, setExceptionForm] = useState<{ policyId: string; policyName: string; userId: string; userLabel: string; justification: string; expiresAt: string } | null>(null);
-  const [exceptionSaving, setExceptionSaving] = useState(false);
-  const [exceptionMessage, setExceptionMessage] = useState('');
-  const defaultExpiry = () => { const d = new Date(); d.setDate(d.getDate() + 30); return d.toISOString().slice(0, 16); };
-  const openExceptionForm = (policyId: string, policyName: string, userId: string, userLabel: string) => { setExceptionForm({ policyId, policyName, userId, userLabel, justification: '', expiresAt: defaultExpiry() }); setExceptionMessage(''); };
-  const submitException = async () => {
-    if (!exceptionForm) return;
-    if (exceptionForm.justification.trim().length < 3) { setExceptionMessage('A justification (at least 3 characters) is required.'); return; }
-    if (!exceptionForm.expiresAt) { setExceptionMessage('Pick an expiry date.'); return; }
-    setExceptionSaving(true); setExceptionMessage('');
-    try {
-      const response = await auth.apiRequest('/api/v1/sod/exceptions', { method: 'POST', body: JSON.stringify({ sod_policy_id: exceptionForm.policyId, user_id: exceptionForm.userId, justification: exceptionForm.justification.trim(), expires_at: new Date(exceptionForm.expiresAt).toISOString() }) });
-      if (response.ok) { setExceptionForm(null); reloadExceptions(); reloadViolations(); }
-      else { const body = await response.json().catch(() => null); setExceptionMessage(body?.error?.message || 'Unable to grant this exception.'); }
-    } catch { setExceptionMessage('Unable to reach the backend.'); }
-    finally { setExceptionSaving(false); }
+  // Granting an exception is deliberately only reachable through the exception-request workflow now (a blocked
+  // admin attempt -> request -> SoDAdmin review in the Exception Requests panel) — there used to also be an
+  // instant "Grant exception" button right on this Violations table, bypassing that trail entirely with no
+  // approval-routing awareness of its own; the user asked for it removed so granting always goes through one
+  // reviewable path. The backend's POST /sod/exceptions endpoint itself still exists (untouched, still callable
+  // directly via the API) — only this direct-grant UI shortcut was removed; nothing in the frontend calls it
+  // anymore (only GET, for the Active Exceptions list below, and DELETE, to revoke).
+  // A `datetime-local` input's value is read/written as LOCAL wall-clock time, never UTC — `toISOString()`
+  // always returns the UTC representation, so slicing that (the previous, buggy version of this function) silently
+  // shifted the pre-filled default by the browser's own UTC offset every time, with no visible sign anything was
+  // wrong until the stored expires_at came back off by exactly that many hours. Building the string from local
+  // getters (getFullYear/getMonth/...) instead keeps it in the same local time the input actually expects.
+  const defaultExpiry = () => {
+    const d = new Date();
+    d.setDate(d.getDate() + 30);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
   };
   const revokeException = async (id: string) => {
     if (!window.confirm('Revoke this exception now? The conflict will be blocked again immediately for any new grant.')) return;
@@ -343,25 +385,15 @@ function SodPage() {
   };
 
   const remove = async (policy: ApiSodPolicy) => {
-    if (!window.confirm(`Delete the SoD policy "${policy.name}"? This cannot be undone.`)) return;
+    if (!window.confirm(`Delete the SoD policy "${policy.name}"? If it has never had an exception or notification, it's removed entirely; otherwise it will be disabled instead (kept for audit history).`)) return;
     const response = await auth.apiRequest(`/api/v1/sod/policies/${policy.id}`, { method: 'DELETE' });
     if (response.ok) { reload(); reloadViolations(); }
-  };
-
-  const addAdmin = async () => {
-    if (!newAdminUserId) return;
-    const response = await auth.apiRequest('/api/v1/sod/admins', { method: 'POST', body: JSON.stringify({ user_id: newAdminUserId }) });
-    if (response.ok) { setNewAdminUserId(''); reloadAdmins(); }
-  };
-  const removeAdmin = async (userId: string) => {
-    const response = await auth.apiRequest(`/api/v1/sod/admins/${userId}`, { method: 'DELETE' });
-    if (response.ok) reloadAdmins();
   };
 
   const summarize = (policy: ApiSodPolicy, side: string) => policy.entities.filter(e => e.conflict_side === side).map(e => e.entity_display_name || 'Unresolved').join(', ') || '—';
 
   return <Page eyebrow="GOVERNANCE" title="Separation of Duties" subtitle="Admin-configurable rules preventing any user from holding two conflicting entitlements at once — enforced live, at the moment access actually becomes real." action={canManageRules && <button className="btn btn-primary" onClick={startCreate}>+ Add SoD policy</button>}>
-    {!canManageRules && <div className="notice" style={{ marginBottom: 18 }}>You can view rules and violations. Only an AccessPilot.SoDAdmin can create, edit, or disable rules — ask an Admin to grant that if you need it.</div>}
+    {!canManageRules && <div className="notice" style={{ marginBottom: 18 }}>You can view rules and violations. Only an AccessPilot.SoDAdmin can create, edit, or disable rules — that role is assigned directly in Entra, not from inside AccessPilot.</div>}
     {showForm && canManageRules && <div className="panel" style={{ marginBottom: 24 }}><div className="detail-section">
       <div className="detail-title"><h2>{editingId ? 'Edit SoD policy' : 'New SoD policy'}</h2></div>
       <label className="key" style={{ display: 'block', marginBottom: 14, maxWidth: 420 }}><span>Name</span><input className="select" style={{ width: '100%' }} value={form.name} onChange={event => setForm({ ...form, name: event.target.value })} /></label>
@@ -380,7 +412,7 @@ function SodPage() {
 
     <div className="panel" style={{ marginBottom: 24 }}>
       <div className="panel-head"><h2>Policies</h2></div>
-      {loading ? <div className="empty">Loading...</div> : !policies || policies.length === 0 ? <div className="empty">No SoD policies defined yet.</div> : <table className="table"><thead><tr><th>Name</th><th>Severity</th><th>Status</th><th>Side A</th><th>Side B</th>{canManageRules && <th>Actions</th>}</tr></thead><tbody>
+      {loading ? <div className="empty">Loading...</div> : !policies || policies.length === 0 ? <div className="empty">No SoD policies defined yet.</div> : <div className="table-wrap"><table className="table"><thead><tr><th>Name</th><th>Severity</th><th>Status</th><th>Side A</th><th>Side B</th>{canManageRules && <th>Actions</th>}</tr></thead><tbody>
         {policies.map(policy => <tr key={policy.id}>
           <td>{policy.name}</td><td>{policy.severity}</td><td><StatusBadge status={policy.status} /></td>
           <td>{summarize(policy, 'A')}</td><td>{summarize(policy, 'B')}</td>
@@ -390,87 +422,90 @@ function SodPage() {
             <button className="btn" onClick={() => remove(policy)}>Delete</button>
           </td>}
         </tr>)}
-      </tbody></table>}
+      </tbody></table></div>}
     </div>
-
-    {exceptionForm && <form role="dialog" aria-modal="true" className="panel" style={{ maxWidth: 480, marginBottom: 24 }} onSubmit={event => { event.preventDefault(); void submitException(); }}>
-      <div className="panel-head"><h2>Grant an exception</h2><button type="button" className="btn" aria-label="Close" onClick={() => setExceptionForm(null)}><X size={14} /></button></div>
-      <div className="detail-section">
-        <p className="subtitle" style={{ marginTop: 0 }}>Formally accept this specific conflict for <strong>{exceptionForm.userLabel}</strong> on policy <strong>{exceptionForm.policyName}</strong>, for a bounded period. New grants for this user on this rule won't be blocked while the exception is active — it can be revoked early at any time.</p>
-        <label className="key" style={{ display: 'block', marginBottom: 14 }}><span>Justification — why is this risk acceptable? (required)</span><input className="select" style={{ width: '100%' }} required value={exceptionForm.justification} onChange={event => setExceptionForm({ ...exceptionForm, justification: event.target.value })} /></label>
-        <label className="key" style={{ display: 'block' }}><span>Expires</span><input className="select" style={{ width: '100%' }} type="datetime-local" required value={exceptionForm.expiresAt} onChange={event => setExceptionForm({ ...exceptionForm, expiresAt: event.target.value })} /></label>
-        {exceptionMessage && <div className="notice" style={{ marginTop: 14 }}>{exceptionMessage}</div>}
-      </div>
-      <div className="detail-section" style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}><button type="button" className="btn" onClick={() => setExceptionForm(null)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={exceptionSaving}>{exceptionSaving ? 'Granting...' : 'Grant exception'}</button></div>
-    </form>}
 
     <div className="panel" style={{ marginBottom: 24 }}>
       <div className="panel-head"><h2>Violations</h2></div>
-      {!violations ? <div className="empty">Loading...</div> : violations.length === 0 ? <div className="empty">No current violations — nobody holds both sides of an active rule.</div> : <table className="table"><thead><tr><th>User</th><th>Policy</th><th>Severity</th><th>Side A holdings</th><th>Side B holdings</th><th>Risk status</th></tr></thead><tbody>
+      {!canManageRules ? null : <div className="notice" style={{ margin: '0 18px 18px' }}>Exceptions can no longer be granted directly from this table — an admin must request one via a blocked assignment attempt, which the SoDAdmin then reviews in the Exception Requests panel below.</div>}
+      {!violations ? <div className="empty">Loading...</div> : violations.length === 0 ? <div className="empty">No current violations — nobody holds both sides of an active rule.</div> : <div className="table-wrap"><table className="table"><thead><tr><th>User</th><th>Policy</th><th>Severity</th><th>Side A holdings</th><th>Side B holdings</th><th>Risk status</th></tr></thead><tbody>
         {violations.map((v, i) => <tr key={i}>
           <td>{v.user_display_name || v.user_id}</td><td>{v.policy_name}</td><td>{v.severity}</td>
           <td>{v.side_a_holdings.map(h => `${h.resource_display_name || h.resource_type}${h.source === 'DIRECT_IN_ENTRA' ? ' (direct in Entra)' : ''}`).join(', ')}</td>
           <td>{v.side_b_holdings.map(h => `${h.resource_display_name || h.resource_type}${h.source === 'DIRECT_IN_ENTRA' ? ' (direct in Entra)' : ''}`).join(', ')}</td>
           <td>{v.exception_active
-            ? <span className="badge success">Accepted until {v.exception_expires_at ? new Date(v.exception_expires_at).toLocaleDateString() : '—'}</span>
-            : canManageRules ? <button className="btn" onClick={() => openExceptionForm(v.policy_id, v.policy_name, v.user_id, v.user_display_name || v.user_id)}>Grant exception</button> : <span className="badge danger">Open</span>}
+            ? <span className="badge success">Accepted until {v.exception_expires_at ? formatWithZone(v.exception_expires_at, timezone) : '—'}</span>
+            : <span className="badge danger">Open</span>}
           </td>
         </tr>)}
-      </tbody></table>}
+      </tbody></table></div>}
+    </div>
+
+    {grantingRequest && <form role="dialog" aria-modal="true" className="panel" style={{ maxWidth: 480, marginBottom: 24 }} onSubmit={event => { event.preventDefault(); void submitGrantRequest(); }}>
+      <div className="panel-head"><h2>Grant exception request</h2><button type="button" className="btn" aria-label="Close" onClick={() => setGrantingRequest(null)}><X size={14} /></button></div>
+      <div className="detail-section">
+        <p className="subtitle" style={{ marginTop: 0 }}>Requested by <strong>{grantingRequest.requested_by_display_name || 'an administrator'}</strong> for <strong>{grantingRequest.user_display_name || grantingRequest.user_id}</strong> on policy <strong>{grantingRequest.policy_name || '—'}</strong>, for <strong>{grantingRequest.resource_display_name || grantingRequest.resource_type}</strong>.</p>
+        <p className="subtitle" style={{ marginBottom: 16 }}>Justification: {grantingRequest.justification}</p>
+        <label className="key" style={{ display: 'block' }}><span>Expires (your device's local time)</span><input className="select" style={{ width: '100%' }} type="datetime-local" required value={grantExpiresAt} onChange={event => setGrantExpiresAt(event.target.value)} /></label>
+        {requestActionMessage && <div className="notice" style={{ marginTop: 14 }}>{requestActionMessage}</div>}
+      </div>
+      <div className="detail-section" style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}><button type="button" className="btn" onClick={() => setGrantingRequest(null)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={requestActionSaving}>{requestActionSaving ? 'Granting...' : 'Grant exception'}</button></div>
+    </form>}
+
+    <div className="panel" style={{ marginBottom: 24 }}>
+      <div className="panel-head"><h2>Exception Requests</h2></div>
+      <div className="detail-section">
+        <p className="subtitle" style={{ marginTop: 0, marginBottom: 16 }}>When an admin's own assignment is blocked by a policy, they can ask here instead of being stuck — granting recreates the original attempt exactly, including routing through the same approver if one was configured, unless another, still-unresolved policy also blocks it.</p>
+        {!exceptionRequests || exceptionRequests.length === 0 ? <div className="empty">No exception requests have been made yet.</div> : <div className="table-wrap"><table className="table"><thead><tr><th>Requested by</th><th>User</th><th>Policy</th><th>Target</th><th>Routing</th><th>Justification</th><th>Status</th>{canManageRules && <th>Actions</th>}</tr></thead><tbody>
+          {exceptionRequests.map(request => <tr key={request.id}>
+            <td>{request.requested_by_display_name || '—'}</td>
+            <td>{request.user_display_name || request.user_id}</td>
+            <td>{request.policy_name || '—'}</td>
+            <td>{request.resource_display_name || request.resource_type}</td>
+            <td>{request.approver_id ? `Approval: ${request.approver_display_name || '—'}` : 'Direct (eligible)'}</td>
+            <td>{request.justification}</td>
+            <td>{request.status === 'PENDING' ? <span className="badge danger">Pending</span> : request.status === 'GRANTED' ? <span className="badge success">Granted</span> : <span className="badge neutral">Denied{request.denial_reason ? `: ${request.denial_reason}` : ''}</span>}</td>
+            {canManageRules && <td>{request.status === 'PENDING' && <div style={{ display: 'flex', gap: 8 }}><button className="btn" onClick={() => openGrantRequest(request)}>Grant</button><button className="btn" onClick={() => denyRequest(request)}>Deny</button></div>}</td>}
+          </tr>)}
+        </tbody></table></div>}
+      </div>
     </div>
 
     <div className="panel" style={{ marginBottom: 24 }}>
       <div className="panel-head"><h2>Active Exceptions</h2></div>
       <div className="detail-section">
         <p className="subtitle" style={{ marginTop: 0, marginBottom: 16 }}>Time-boxed risk acceptances — while one is active, new grants for that user on that rule aren't blocked. Every grant, revoke, and expiry is on the record in SoD Activity below.</p>
-        {!exceptions || exceptions.length === 0 ? <div className="empty">No exceptions have ever been granted.</div> : <table className="table"><thead><tr><th>User</th><th>Policy</th><th>Justification</th><th>Granted by</th><th>Status</th><th>Actions</th></tr></thead><tbody>
+        {!exceptions || exceptions.length === 0 ? <div className="empty">No exceptions have ever been granted.</div> : <div className="table-wrap"><table className="table"><thead><tr><th>User</th><th>Policy</th><th>Justification</th><th>Granted by</th><th>Status</th><th>Actions</th></tr></thead><tbody>
           {exceptions.map(exception => <tr key={exception.id}>
             <td>{exception.user_display_name || exception.user_id}</td>
             <td>{exception.policy_name || '—'}</td>
             <td>{exception.justification}</td>
             <td>{exception.granted_by_display_name || '—'}</td>
-            <td>{exception.revoked_at ? <span className="badge neutral">Revoked</span> : exception.is_active ? <span className="badge success">Active until {new Date(exception.expires_at).toLocaleString()}</span> : <span className="badge neutral">Expired</span>}</td>
+            <td>{exception.revoked_at ? <span className="badge neutral">Revoked</span> : exception.is_active ? <span className="badge success">Active until {formatWithZone(exception.expires_at, timezone)}</span> : <span className="badge neutral">Expired</span>}</td>
             <td>{canManageRules && exception.is_active && <button className="btn" onClick={() => revokeException(exception.id)}>Revoke</button>}</td>
           </tr>)}
-        </tbody></table>}
+        </tbody></table></div>}
       </div>
     </div>
 
-    <div className="panel" style={{ marginBottom: canManageRoster ? 24 : 0 }}>
+    <div className="panel">
       <div className="panel-head"><h2>SoD Activity</h2></div>
-      {!activity ? <div className="empty">Loading...</div> : activity.length === 0 ? <div className="empty">No SoD activity yet — rule changes, roster changes, and any blocked or overridden grant will show up here.</div> : <table className="table"><thead><tr><th>When</th><th>Action</th><th>Actor</th><th>Target user</th><th>Result</th><th>Details</th></tr></thead><tbody>
+      {!activity ? <div className="empty">Loading...</div> : activity.length === 0 ? <div className="empty">No SoD activity yet — rule changes, roster changes, and any blocked or overridden grant will show up here.</div> : <div className="table-wrap"><table className="table"><thead><tr><th>When</th><th>Action</th><th>Actor</th><th>Target user</th><th>Result</th><th>Details</th></tr></thead><tbody>
         {activity.map(entry => <tr key={entry.id}>
-          <td>{new Date(entry.timestamp).toLocaleString()}</td>
+          <td>{formatDateTime(entry.timestamp, timezone)}</td>
           <td>{entry.action.replace(/_/g, ' ')}</td>
           <td>{entry.actor_display_name || 'System'}</td>
           <td>{entry.target_user_display_name || '—'}</td>
           <td><StatusBadge status={entry.result} /></td>
           <td>{summarizeSodActivity(entry)}</td>
         </tr>)}
-      </tbody></table>}
+      </tbody></table></div>}
     </div>
-
-    {canManageRoster && <div className="panel"><div className="detail-section">
-      <div className="detail-title"><h2>SoD Administrators</h2></div>
-      <p className="subtitle" style={{ marginBottom: 16 }}>Only these directory users (plus you, as an Admin, for oversight and roster management) can create or edit SoD rules — a genuine separation between managing access and governing its conflict rules.</p>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-        <select className="select" style={{ minWidth: 260 }} value={newAdminUserId} onChange={event => setNewAdminUserId(event.target.value)}>
-          <option value="">Select a user...</option>
-          {(directoryUsers || []).filter(u => !(admins || []).some(a => a.user_id === u.id)).map(u => <option key={u.id} value={u.id}>{u.display_name} ({u.email})</option>)}
-        </select>
-        <button className="btn btn-primary" disabled={!newAdminUserId} onClick={addAdmin}>Grant SoDAdmin</button>
-      </div>
-      {!admins || admins.length === 0 ? <div className="empty">No one holds AccessPilot.SoDAdmin yet.</div> : <table className="table"><thead><tr><th>User</th><th>Granted by</th><th>Since</th><th>Actions</th></tr></thead><tbody>
-        {admins.map(a => <tr key={a.id}>
-          <td>{a.user_display_name} ({a.user_email})</td><td>{a.granted_by_display_name || '—'}</td><td>{new Date(a.created_at).toLocaleDateString()}</td>
-          <td><button className="btn" onClick={() => removeAdmin(a.user_id)}>Revoke</button></td>
-        </tr>)}
-      </tbody></table>}
-    </div></div>}
   </Page>;
 }
 function SodConfigurationPage() {
   const auth = useAuth();
+  const timezone = useAppTimezone();
   const canManage = auth.isSodAdmin;
   const { data: settings, reload: reloadSettings } = useApiResource<ApiSodNotificationSettings>('/api/v1/sod/notification-settings');
   const { data: notifications, reload: reloadNotifications } = useApiResource<ApiSodNotification[]>('/api/v1/sod/notifications');
@@ -478,6 +513,14 @@ function SodConfigurationPage() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   useEffect(() => { if (settings) setForm(settings); }, [settings]);
+  // Live: this page's own notification log auto-refreshes so a new violation or exception request shows up
+  // without the SoDAdmin needing to manually reload. 60s, matching the Bell's own interval in Shell (both call
+  // the same reconciling endpoint — see that comment for the real Graph-scan cost this trades off against).
+  useEffect(() => {
+    const id = setInterval(() => reloadNotifications(), 60000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const save = async () => {
     if (!form) return;
@@ -502,6 +545,10 @@ function SodConfigurationPage() {
         <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}><input type="checkbox" disabled={!canManage} checked={form.notify_on_new_violation} onChange={event => setForm({ ...form, notify_on_new_violation: event.target.checked })} /><span>Notify when a new SoD violation is found</span></label>
         <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}><input type="checkbox" disabled={!canManage} checked={form.notify_on_exception_expiring} onChange={event => setForm({ ...form, notify_on_exception_expiring: event.target.checked })} /><span>Notify before an accepted-risk exception expires</span></label>
         <label className="key" style={{ display: 'block', marginBottom: 22, maxWidth: 260 }}><span>Warn this many days before an exception expires</span><input className="select" style={{ width: '100%' }} type="number" min={1} max={90} disabled={!canManage || !form.notify_on_exception_expiring} value={form.exception_expiring_warning_days} onChange={event => setForm({ ...form, exception_expiring_warning_days: Number(event.target.value) })} /></label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}><input type="checkbox" disabled={!canManage} checked={form.notify_on_exception_requested} onChange={event => setForm({ ...form, notify_on_exception_requested: event.target.checked })} /><span>Notify when an admin requests an SoD exception for a blocked assignment</span></label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}><input type="checkbox" disabled={!canManage} checked={form.cooldown_enabled} onChange={event => setForm({ ...form, cooldown_enabled: event.target.checked })} /><span>Enforce a cooldown after deactivating or revoking access, before the conflicting side can be activated</span></label>
+        <p className="subtitle" style={{ marginTop: 0, marginBottom: 14, maxWidth: 640 }}>Without this, a user could deactivate one side of a conflict and immediately activate the other, then flip back later — never holding both at the exact same instant, but never really giving either up either. Enabling this blocks that cycle for a bounded window after each deactivation/revocation.</p>
+        <label className="key" style={{ display: 'block', marginBottom: 22, maxWidth: 260 }}><span>Cooldown window (hours)</span><input className="select" style={{ width: '100%' }} type="number" min={1} max={720} disabled={!canManage || !form.cooldown_enabled} value={form.cooldown_hours} onChange={event => setForm({ ...form, cooldown_hours: Number(event.target.value) })} /></label>
         {message && <div className="notice" style={{ marginBottom: 14 }}>{message}</div>}
         {canManage && <button className="btn btn-primary" disabled={saving} onClick={save}>{saving ? 'Saving...' : 'Save'}</button>}
       </div>}
@@ -509,15 +556,15 @@ function SodConfigurationPage() {
 
     <div className="panel">
       <div className="panel-head"><h2>Notification Log</h2><div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>{unreadCount > 0 && <span className="badge danger">{unreadCount} unread</span>}<button className="btn" onClick={markAllRead} disabled={!notifications || unreadCount === 0}>Mark all as read</button></div></div>
-      {!notifications ? <div className="empty">Loading...</div> : notifications.length === 0 ? <div className="empty">Nothing has been reported yet — a new violation or a soon-expiring exception will show up here.</div> : <table className="table"><thead><tr><th>When</th><th>Type</th><th>Message</th><th>Status</th><th>Actions</th></tr></thead><tbody>
+      {!notifications ? <div className="empty">Loading...</div> : notifications.length === 0 ? <div className="empty">Nothing has been reported yet — a new violation or a soon-expiring exception will show up here.</div> : <div className="table-wrap"><table className="table"><thead><tr><th>When</th><th>Type</th><th>Message</th><th>Status</th><th>Actions</th></tr></thead><tbody>
         {notifications.map(n => <tr key={n.id} style={{ opacity: n.read_at ? 0.7 : 1 }}>
-          <td>{new Date(n.created_at).toLocaleString()}</td>
+          <td>{formatDateTime(n.created_at, timezone)}</td>
           <td>{n.notification_type.replace(/_/g, ' ')}</td>
           <td>{n.message}</td>
           <td>{n.resolved_at ? <span className="badge neutral">Resolved</span> : n.read_at ? <span className="badge neutral">Read</span> : <span className="badge danger">Unread</span>}</td>
           <td>{!n.read_at && <button className="btn" onClick={() => markRead(n.id)}>Mark read</button>}</td>
         </tr>)}
-      </tbody></table>}
+      </tbody></table></div>}
     </div>
   </Page>;
 }
@@ -525,13 +572,77 @@ function AdminOnly({ role, children }: { role: Role; children: React.ReactNode }
 function Shell({ role, setRole, children }: { role: Role; setRole: (r: Role) => void; children: React.ReactNode }) {
   const location = useLocation(); const navigate = useNavigate();
   const auth = useAuth();
+  const timezone = useAppTimezone();
   const branding = useBranding();
   const visible = nav.filter(item => item.roles.includes(role) || (item.extra === 'sod' && auth.isSodAdmin));
   const path = location.pathname;
+  const signedIn = Boolean(auth.account) || auth.breakglassActive;
   const seesSodBell = role === 'admin' || auth.isSodAdmin;
-  const { data: sodNotifications } = useApiResource<ApiSodNotification[]>('/api/v1/sod/notifications', seesSodBell);
+  const { data: sodNotifications, reload: reloadSodNotifications } = useApiResource<ApiSodNotification[]>('/api/v1/sod/notifications', seesSodBell);
+  // Every signed-in user's own assignment/approval notifications (see backend/app/services/notifications.py) —
+  // same dropdown, same style, as the org-wide notification experience, distinct from the SoD-only feed above.
+  const { data: myNotifications, reload: reloadMyNotifications } = useApiResource<ApiNotification[]>('/api/v1/notifications', signedIn);
   const unreadSodCount = (sodNotifications || []).filter(n => !n.read_at && !n.resolved_at).length;
-  return <div className="app"><aside className="sidebar"><Link to="/dashboard" className="brand"><span className="brand-mark"><img src={branding?.internal_logo || logo} alt="AccessPilot" /></span> AccessPilot</Link>{visible.map((item, index) => { const I = item.icon; const previous = visible[index - 1]; return <div key={item.to}>{item.section && item.section !== previous?.section && <div className="nav-label">{item.section}</div>}<Link className={`nav-item ${path === item.to || (item.to !== '/dashboard' && path.startsWith(item.to)) ? 'active' : ''}`} to={item.to}><I />{item.label}</Link></div> })}<div className="sidebar-foot"><div>ACCESSPILOT CONSOLE</div><div style={{marginTop:5}}>v0.1.0 · Mock environment</div><div className="sidebar-credit">by <span>{branding?.powered_by_text || 'Clover‑X'}</span></div></div></aside><main className="main"><header className="topbar"><button className="mobile-menu" aria-label="Open navigation"><Menu size={20}/></button><div className="crumb">Workspace / <strong>{role === 'admin' ? 'Administration' : 'Self-service'}</strong></div><div className="top-actions">{auth.authConfigured ? <button className="btn" onClick={() => (auth.account || auth.breakglassActive) ? auth.signOut() : auth.signIn()}>{(auth.account || auth.breakglassActive) ? 'Sign out' : 'Sign in'}</button> : <div className="role-switch" aria-label="Development role switcher"><button className={role === 'user' ? 'active' : ''} onClick={() => { setRole('user'); navigate('/dashboard'); }}>User</button><button className={role === 'admin' ? 'active' : ''} onClick={() => { setRole('admin'); navigate('/dashboard'); }}>Admin</button></div>}{seesSodBell ? <Link to="/admin/sod/configuration" aria-label="SoD notifications" style={{position:'relative',display:'inline-flex'}}><Bell size={17} color="#718088"/>{unreadSodCount > 0 && <span style={{position:'absolute',top:-6,right:-6,background:'#c0392b',color:'#fff',borderRadius:9,fontSize:10,fontWeight:700,padding:'0 5px',lineHeight:'16px',minWidth:16,textAlign:'center'}}>{unreadSodCount}</span>}</Link> : <Bell size={17} color="#718088"/>}<div className="profile"><span>{auth.account?.name || (auth.breakglassActive ? `Break-Glass (${auth.breakglassUsername})` : currentUser.name)}</span><span className="avatar">{currentUser.initials}</span></div></div></header>{children}</main></div>;
+  const unreadMyCount = (myNotifications || []).filter(n => !n.read_at).length;
+  const unreadTotal = unreadSodCount + unreadMyCount;
+  // Live: the Bell badge auto-refreshes so new notifications are visible from anywhere in the app, not just
+  // after opening a specific page. The personal feed is a plain per-user DB read (cheap), so it polls every 10s
+  // — short enough to feel close to live without needing real push infrastructure (no WebSocket/SSE exists in
+  // this app). The SoD feed stays at 60s deliberately — it re-runs a full reconciliation pass on every call, a
+  // real ~15s Graph-read cost when ROLE/APPLICATION rules exist (see docs/19_SOD_ENGINE.md §11/§16), so polling
+  // it anywhere near this fast would leave that scan running almost continuously.
+  useEffect(() => {
+    if (!signedIn) return;
+    const id = setInterval(() => reloadMyNotifications(), 10000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signedIn]);
+  useEffect(() => {
+    if (!seesSodBell) return;
+    const id = setInterval(() => reloadSodNotifications(), 60000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seesSodBell]);
+  const [notifOpen, setNotifOpen] = useState(false);
+  const notifRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!notifOpen) return;
+    const onClickOutside = (event: MouseEvent) => { if (notifRef.current && !notifRef.current.contains(event.target as Node)) setNotifOpen(false); };
+    document.addEventListener('mousedown', onClickOutside);
+    return () => document.removeEventListener('mousedown', onClickOutside);
+  }, [notifOpen]);
+  const toggleNotif = () => { setNotifOpen(open => !open); if (!notifOpen) { reloadMyNotifications(); if (seesSodBell) reloadSodNotifications(); } };
+  const markMyNotifRead = async (id: string) => { await auth.apiRequest(`/api/v1/notifications/${id}/read`, { method: 'POST' }); reloadMyNotifications(); };
+  const markSodNotifRead = async (id: string) => { await auth.apiRequest(`/api/v1/sod/notifications/${id}/read`, { method: 'POST' }); reloadSodNotifications(); };
+  const markAllNotifRead = async () => { await Promise.all([auth.apiRequest('/api/v1/notifications/read-all', { method: 'POST' }), ...(seesSodBell ? [auth.apiRequest('/api/v1/sod/notifications/read-all', { method: 'POST' })] : [])]); reloadMyNotifications(); if (seesSodBell) reloadSodNotifications(); };
+  type MergedNotif = { key: string; message: string; created_at: string; unread: boolean; link: string | null; onMarkRead: (() => void) | null };
+  const mergedNotifs: MergedNotif[] = [
+    ...(myNotifications || []).map(n => ({ key: `my-${n.id}`, message: n.message, created_at: n.created_at, unread: !n.read_at, link: n.link, onMarkRead: n.read_at ? null : () => markMyNotifRead(n.id) })),
+    ...(seesSodBell ? (sodNotifications || []).map(n => ({ key: `sod-${n.id}`, message: n.message, created_at: n.created_at, unread: !n.read_at && !n.resolved_at, link: '/admin/sod/configuration', onMarkRead: (!n.read_at && !n.resolved_at) ? () => markSodNotifRead(n.id) : null })) : []),
+  ].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()).slice(0, 10);
+  const notifBell = signedIn ? <div className="notif-bell-wrap" ref={notifRef}>
+    <button type="button" className="notif-bell-btn" aria-label="Notifications" onClick={toggleNotif}>
+      <Bell size={17} color="#718088"/>
+      {unreadTotal > 0 && <span style={{position:'absolute',top:-2,right:-2,background:'#c0392b',color:'#fff',borderRadius:9,fontSize:10,fontWeight:700,padding:'0 5px',lineHeight:'16px',minWidth:16,textAlign:'center'}}>{unreadTotal}</span>}
+    </button>
+    {notifOpen && <div className="notif-dropdown">
+      <div className="notif-dropdown-head"><h3>Notifications</h3>{unreadTotal > 0 && <span className="badge danger">{unreadTotal} unread</span>}</div>
+      <div className="notif-dropdown-list">
+        {mergedNotifs.length === 0 ? <div className="notif-dropdown-empty">Nothing to report yet.</div> : mergedNotifs.map(n => <div key={n.key} className={`notif-item ${n.unread ? 'unread' : ''}`}>
+          <div className="notif-item-top"><span className="notif-item-message">{n.message}</span><span className="notif-item-time">{new Date(n.created_at).toLocaleString(undefined, {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZone:timezone})}</span></div>
+          <div className="notif-item-actions">
+            {n.onMarkRead ? <button type="button" onClick={n.onMarkRead}>Mark read</button> : <span className="footer-note" style={{margin:0}}>Read</span>}
+            {n.link && <Link to={n.link} onClick={() => setNotifOpen(false)}>View</Link>}
+          </div>
+        </div>)}
+      </div>
+      {(seesSodBell || unreadTotal > 0) && <div className="notif-dropdown-foot">
+        {seesSodBell ? <Link to="/admin/sod/configuration" onClick={() => setNotifOpen(false)}>Open SoD Configuration</Link> : <span/>}
+        {unreadTotal > 0 && <button type="button" onClick={markAllNotifRead}>Mark all as read</button>}
+      </div>}
+    </div>}
+  </div> : <Bell size={17} color="#718088"/>;
+  return <div className="app"><aside className="sidebar"><Link to="/dashboard" className="brand"><span className="brand-mark"><img src={branding?.internal_logo || logo} alt="AccessPilot" /></span> AccessPilot</Link>{visible.map((item, index) => { const I = item.icon; const previous = visible[index - 1]; return <div key={item.to}>{item.section && item.section !== previous?.section && <div className="nav-label">{item.section}</div>}<Link className={`nav-item ${path === item.to || (item.to !== '/dashboard' && path.startsWith(item.to)) ? 'active' : ''}`} to={item.to}><I />{item.label}</Link></div> })}<div className="sidebar-foot"><div>ACCESSPILOT CONSOLE</div><div style={{marginTop:5}}>v0.1.0 · Mock environment</div><div className="sidebar-credit">by <span>{branding?.powered_by_text || 'Clover‑X'}</span></div></div></aside><main className="main"><header className="topbar"><button className="mobile-menu" aria-label="Open navigation"><Menu size={20}/></button><div className="crumb">Workspace / <strong>{role === 'admin' ? 'Administration' : 'Self-service'}</strong></div><div className="top-actions">{auth.authConfigured ? <button className="btn" onClick={() => (auth.account || auth.breakglassActive) ? auth.signOut() : auth.signIn()}>{(auth.account || auth.breakglassActive) ? 'Sign out' : 'Sign in'}</button> : <div className="role-switch" aria-label="Development role switcher"><button className={role === 'user' ? 'active' : ''} onClick={() => { setRole('user'); navigate('/dashboard'); }}>User</button><button className={role === 'admin' ? 'active' : ''} onClick={() => { setRole('admin'); navigate('/dashboard'); }}>Admin</button></div>}{notifBell}<div className="profile"><span>{auth.account?.name || (auth.breakglassActive ? `Break-Glass (${auth.breakglassUsername})` : currentUser.name)}</span><span className="avatar">{currentUser.initials}</span></div></div></header>{children}</main></div>;
 }
 function Page({ eyebrow, title, subtitle, action, children }: { eyebrow?: string; title: string; subtitle?: string; action?: React.ReactNode; children: React.ReactNode }) { return <div className="content"><div className="page-head"><div>{eyebrow && <div className="eyebrow">{eyebrow}</div>}<h1>{title}</h1>{subtitle && <p className="subtitle">{subtitle}</p>}</div>{action}</div>{children}</div>; }
 interface UserDashboardStats { active: number; eligible: number; pending: number; expiringSoon: number; }
@@ -617,6 +728,7 @@ function PieChart({ segments, onSliceClick }: { segments: { key: string; label: 
 function Dashboard({ role }: { role: Role }) {
   const admin = role === 'admin';
   const auth = useAuth();
+  const timezone = useAppTimezone();
   const navigate = useNavigate();
   const { data: dashboard, error, loading, reload: reloadDashboard } = useApiResource<DashboardAdmin>('/api/v1/dashboard/admin', admin);
   const { data: recentAudit, reload: reloadAudit } = useApiResource<ApiAuditLog[]>('/api/v1/audit-logs', admin);
@@ -630,7 +742,7 @@ function Dashboard({ role }: { role: Role }) {
   const { data: sodViolations } = useApiResource<ApiSodViolation[]>('/api/v1/sod/violations', seesSod);
   const { data: sodActivity } = useApiResource<ApiSodActivityEntry[]>('/api/v1/sod/activity', seesSod);
   const greetingName = auth.account?.name || (auth.authConfigured ? '' : currentUser.name);
-  const lastSyncLabel = dashboard?.lastSync?.completedAt ? new Date(dashboard.lastSync.completedAt).toLocaleString() : dashboard?.lastSync ? 'In progress' : 'Never synced';
+  const lastSyncLabel = dashboard?.lastSync?.completedAt ? formatDateTime(dashboard.lastSync.completedAt, timezone) : dashboard?.lastSync ? 'In progress' : 'Never synced';
 
   const userStats: UserDashboardStats | null = myAssignments ? {
     active: myAssignments.filter(a => a.status === 'ACTIVE').length,
@@ -665,7 +777,7 @@ function Dashboard({ role }: { role: Role }) {
       <div className="detail-section"><div className="user-cell"><span className="stat-icon" style={{background: sodViolations && sodViolations.length > 0 ? '#fdecea' : '#e8f6ec', color: sodViolations && sodViolations.length > 0 ? '#8c2b21' : '#1c7c3f'}}><ShieldAlert size={16}/></span><div><div className="user-name">{sodViolations ? `${sodViolations.length} current violation${sodViolations.length === 1 ? '' : 's'}` : 'Loading...'}</div><div className="user-email">{sodViolations && sodViolations.length > 0 ? 'One or more users hold both sides of a conflicting-access rule.' : 'No user currently holds both sides of an active rule.'}</div></div></div>
         {sodActivity && sodActivity.length > 0 && <div style={{marginTop:16,paddingTop:14,borderTop:'1px solid #eef1f2'}}>
           <div className="subtitle" style={{marginBottom:8,fontWeight:600}}>Recent SoD activity</div>
-          {sodActivity.slice(0,3).map(entry => <div key={entry.id} className="activity-row" style={{padding:'6px 0'}}><span className="activity-dot"/><div className="activity-copy"><strong>{entry.action.replace(/_/g,' ')}</strong><small>{entry.actor_display_name || 'System'}{entry.target_user_display_name ? ` · ${entry.target_user_display_name}` : ''} · {summarizeSodActivity(entry)} · {new Date(entry.timestamp).toLocaleString()}</small></div></div>)}
+          {sodActivity.slice(0,3).map(entry => <div key={entry.id} className="activity-row" style={{padding:'6px 0'}}><span className="activity-dot"/><div className="activity-copy"><strong>{entry.action.replace(/_/g,' ')}</strong><small>{entry.actor_display_name || 'System'}{entry.target_user_display_name ? ` · ${entry.target_user_display_name}` : ''} · {summarizeSodActivity(entry)} · {formatDateTime(entry.timestamp, timezone)}</small></div></div>)}
         </div>}
       </div>
     </div>}
@@ -675,7 +787,7 @@ function Dashboard({ role }: { role: Role }) {
         <div className="table-wrap">{membersLoading ? <div className="empty">Loading users...</div> : !segmentMembers || segmentMembers.length === 0 ? <div className="empty">No users in this segment.</div> : <table><thead><tr><th>User</th><th>Email</th></tr></thead><tbody>{segmentMembers.map(m => <tr key={m.id}><td className="user-name">{m.display_name}</td><td>{m.email}</td></tr>)}</tbody></table>}</div>
       </div>
     </div>}
-    <div className="grid-2"><section className="panel"><div className="panel-head"><h2>{admin ? 'Recent access requests' : 'Recent activity'}</h2><Link to={admin ? '/admin/audit' : '/my-requests'} className="panel-link">View all <ChevronRight size={12}/></Link></div>{admin ? (!recentAudit || recentAudit.length === 0 ? <div className="empty">No recent activity.</div> : recentAudit.slice(0,6).map(entry => <div className="activity" key={entry.id}><div className="activity-row"><span className="activity-dot"/><div className="activity-copy"><strong>{entry.action}</strong><small>{entry.actor_display_name || 'System'}{entry.target_user_display_name ? ` · ${entry.target_user_display_name}` : ''} · {new Date(entry.timestamp).toLocaleString()}</small></div><StatusBadge status={entry.result}/></div></div>)) : (myRecentActivity.length === 0 ? <div className="empty">No activity yet.</div> : myRecentActivity.map(item => <div className="activity" key={item.id}><div className="activity-row"><span className="activity-dot"/><div className="activity-copy"><strong>{item.resource_display_name || item.resource_type}{item.package_name ? ` (${item.package_name})` : ''}</strong><small>{item.resource_type} · {new Date(item.activated_at || item.created_at).toLocaleString()}</small></div><StatusBadge status={item.status}/></div></div>))}</section><section className="panel"><div className="panel-head"><h2>{admin ? 'Provider status' : 'Current active access'}</h2>{admin && <StatusBadge status={dashboard?.provider?.status || 'NOT_CONFIGURED'}/>}</div>{admin ? <div className="detail-section"><div className="user-cell"><span className="avatar" style={{background:'#e4f1f5',color:'#33758a'}}><Cloud size={15}/></span><div><div className="user-name">{dashboard?.provider?.name || 'No provider configured'}</div><div className="user-email">{dashboard?.provider ? `${dashboard.provider.status} · Last sync ${lastSyncLabel}` : 'Configure a provider to begin syncing.'}</div></div></div><div className="key-grid" style={{marginTop:24}}><div className="key"><span>Users synced</span><strong>{dashboard ? dashboard.users : '—'}</strong></div><div className="key"><span>Groups synced</span><strong>{dashboard ? dashboard.groups : '—'}</strong></div><div className="key"><span>Directory roles</span><strong>{dashboard ? dashboard.roles : '—'}</strong></div><div className="key"><span>Last sync</span><strong>{lastSyncLabel}</strong></div></div></div> : (myActiveAccess.length === 0 ? <div className="detail-section"><div className="empty">No active access right now. Check My Access for anything eligible to activate.</div></div> : <div className="table-wrap"><table><thead><tr><th>Resource</th><th>Type</th><th>Expires</th></tr></thead><tbody>{myActiveAccess.map(item => <tr key={item.id}><td className="user-name">{item.resource_display_name || item.resource_type}{item.package_name ? <div className="user-email">{item.package_name}</div> : null}</td><td>{item.resource_type}</td><td>{item.expiration_time ? new Date(item.expiration_time).toLocaleString() : 'Permanent'}</td></tr>)}</tbody></table></div>)}</section></div></Page>; }
+    <div className="grid-2"><section className="panel"><div className="panel-head"><h2>{admin ? 'Recent access requests' : 'Recent activity'}</h2><Link to={admin ? '/admin/audit' : '/my-requests'} className="panel-link">View all <ChevronRight size={12}/></Link></div>{admin ? (!recentAudit || recentAudit.length === 0 ? <div className="empty">No recent activity.</div> : recentAudit.slice(0,6).map(entry => <div className="activity" key={entry.id}><div className="activity-row"><span className="activity-dot"/><div className="activity-copy"><strong>{entry.action}</strong><small>{entry.actor_display_name || 'System'}{entry.target_user_display_name ? ` · ${entry.target_user_display_name}` : ''} · {formatDateTime(entry.timestamp, timezone)}</small></div><StatusBadge status={entry.result}/></div></div>)) : (myRecentActivity.length === 0 ? <div className="empty">No activity yet.</div> : myRecentActivity.map(item => <div className="activity" key={item.id}><div className="activity-row"><span className="activity-dot"/><div className="activity-copy"><strong>{item.resource_display_name || item.resource_type}{item.package_name ? ` (${item.package_name})` : ''}</strong><small>{item.resource_type} · {formatDateTime(item.activated_at || item.created_at, timezone)}</small></div><StatusBadge status={item.status}/></div></div>))}</section><section className="panel"><div className="panel-head"><h2>{admin ? 'Provider status' : 'Current active access'}</h2>{admin && <StatusBadge status={dashboard?.provider?.status || 'NOT_CONFIGURED'}/>}</div>{admin ? <div className="detail-section"><div className="user-cell"><span className="avatar" style={{background:'#e4f1f5',color:'#33758a'}}><Cloud size={15}/></span><div><div className="user-name">{dashboard?.provider?.name || 'No provider configured'}</div><div className="user-email">{dashboard?.provider ? `${dashboard.provider.status} · Last sync ${lastSyncLabel}` : 'Configure a provider to begin syncing.'}</div></div></div><div className="key-grid" style={{marginTop:24}}><div className="key"><span>Users synced</span><strong>{dashboard ? dashboard.users : '—'}</strong></div><div className="key"><span>Groups synced</span><strong>{dashboard ? dashboard.groups : '—'}</strong></div><div className="key"><span>Directory roles</span><strong>{dashboard ? dashboard.roles : '—'}</strong></div><div className="key"><span>Last sync</span><strong>{lastSyncLabel}</strong></div></div></div> : (myActiveAccess.length === 0 ? <div className="detail-section"><div className="empty">No active access right now. Check My Access for anything eligible to activate.</div></div> : <div className="table-wrap"><table><thead><tr><th>Resource</th><th>Type</th><th>Expires</th></tr></thead><tbody>{myActiveAccess.map(item => <tr key={item.id}><td className="user-name">{item.resource_display_name || item.resource_type}{item.package_name ? <div className="user-email">{item.package_name}</div> : null}</td><td>{item.resource_type}</td><td>{item.expiration_time ? formatDateTime(item.expiration_time, timezone) : 'Permanent'}</td></tr>)}</tbody></table></div>)}</section></div></Page>; }
 function StatusBadge({ status }: { status: string }) { const cls = ['APPROVED','ACTIVE','COMPLETED','CONNECTED','ELIGIBLE','SUCCESS','Healthy','Active'].includes(status) ? 'success' : ['PENDING','PENDING_APPROVAL','SCHEDULED','RUNNING','PARTIAL','Medium'].includes(status) ? 'warning' : ['REJECTED','EXPIRED','REVOKED','FAILED','Disabled','High'].includes(status) ? 'danger' : 'neutral'; return <span className={`badge ${cls}`}>{status}</span>; }
 function TablePanel({ children, toolbar }: { children: React.ReactNode; toolbar?: React.ReactNode }) { return <><div className="toolbar">{toolbar}</div><section className="panel"><div className="table-wrap">{children}</div></section></>; }
 interface FilterOption { value: string; label: string; }
@@ -683,6 +795,21 @@ function Toolbar({ placeholder = 'Search', searchValue, onSearchChange, filterLa
   return <><div className="toolbar-left">{onSearchChange && <div className="search-box"><Search size={15}/><input className="search" placeholder={placeholder} value={searchValue ?? ''} onChange={event => onSearchChange(event.target.value)}/></div>}{filterOptions && <select className="select" value={filterValue} onChange={event => onFilterChange?.(event.target.value)}><option value="">{filterLabel}</option>{filterOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select>}</div></>;
 }
 function initialsFor(name: string) { const parts = name.trim().split(/\s+/); return ((parts[0]?.[0] || '') + (parts[parts.length - 1]?.[0] || '')).toUpperCase() || '?'; }
+// Plain toLocaleString()/toLocaleDateString() renders a time with no indication of which timezone it's in —
+// confusing for SoD exception expiry specifically, since the backend's own notification text always states UTC
+// explicitly (see services/sod.py) while an unlabeled local-time display could easily be mistaken for the same
+// moment shown differently. Always showing the zone (via Intl's timeZoneName) makes either representation
+// self-explanatory instead of ambiguous, without forcing every display onto the same one.
+// dateStyle/timeStyle cannot be combined with timeZoneName or timeZone per the Intl spec — some engines throw
+// "Invalid option : option" for it (confirmed live, crashed the whole SoD page). Explicit component fields
+// (year/month/day/hour/minute) are the valid way to get a zone label alongside a formatted date and time.
+// Every display-only date/time render in the app goes through these two so every viewer sees the same admin-
+// configured timezone (useAppTimezone()) regardless of their own browser/OS locale — inputs are unaffected,
+// they still use each user's own browser-local time.
+function formatWithZone(iso: string | number, timezone: string): string { return new Date(iso).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short', timeZone: timezone }); }
+function formatDateTime(iso: string | number, timezone: string): string { return new Date(iso).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: timezone }); }
+function formatDate(iso: string | number, timezone: string): string { return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', timeZone: timezone }); }
+function formatTime(iso: string | number, timezone: string): string { return new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', timeZone: timezone }); }
 function sourceLabel(user: ApiUser, providers: ApiProvider[] | null): { label: string; detail: string } {
   const provider = providers?.find(p => p.id === user.provider_id);
   const connector = provider ? `${provider.provider_type === 'ENTRA' ? 'Microsoft Entra ID' : provider.provider_type === 'OKTA' ? 'Okta' : provider.name} · ${user.external_id}` : user.external_id;
@@ -691,6 +818,7 @@ function sourceLabel(user: ApiUser, providers: ApiProvider[] | null): { label: s
 }
 function UsersPage() {
   const auth = useAuth();
+  const timezone = useAppTimezone();
   const { data: users, error, loading, reload } = useApiResource<ApiUser[]>('/api/v1/users');
   const { data: providers } = useApiResource<ApiProvider[]>('/api/v1/providers');
   const [searchParams, setSearchParams] = useSearchParams();
@@ -730,11 +858,12 @@ function UsersPage() {
   return <Page eyebrow="ADMINISTRATION" title="Users" subtitle="Directory identities and their AccessPilot entitlements." action={<button className="btn btn-primary" onClick={() => { setOpen(true); setFormMessage(''); }}><Plus size={14}/> Add user</button>}>
     {createdPassword && <div className="notice" style={{marginBottom:14}}>User created. Temporary password (shown once, share it securely): <strong>{createdPassword}</strong></div>}
     {open && <form role="dialog" aria-modal="true" className="panel" style={{maxWidth:640,marginBottom:18}} onSubmit={submit}><div className="panel-head"><h2>Add user</h2><button type="button" className="btn" aria-label="Close" onClick={() => setOpen(false)}><X size={14}/></button></div><div className="detail-section"><div className="key-grid">{([['display_name','Display name'],['user_principal_name','Email / UPN'],['department','Department'],['job_title','Job title']] as const).map(([key,label]) => <label className="key" key={key}><span>{label}</span><input className="select" value={form[key]} onChange={event => setForm({...form, [key]: event.target.value})}/></label>)}</div>{formMessage && <div className="notice" style={{marginTop:14}}>{formMessage}</div>}</div><div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setOpen(false)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Creating...' : 'Create user'}</button></div></form>}
-    <TablePanel toolbar={<Toolbar placeholder="Search users by name or email" searchValue={search} onSearchChange={setSearch} filterLabel="All statuses" filterValue={statusFilter} onFilterChange={setStatusFilter} filterOptions={statusOptions}/>}>{loading ? <div className="empty">Loading users...</div> : error ? <div className="empty">{error}</div> : !users || users.length === 0 ? <div className="empty">No users found.</div> : filteredUsers.length === 0 ? <div className="empty">No users match this filter.</div> : <table><thead><tr><th>User</th><th>Department</th><th>Job title</th><th>Source</th><th>Status</th><th>Last synced</th><th></th></tr></thead><tbody>{filteredUsers.map(u => { const source = sourceLabel(u, providers); return <tr key={u.id}><td><Link to={`/admin/users/${u.id}`} className="user-cell"><span className="avatar">{initialsFor(u.display_name)}</span><span><span className="user-name">{u.display_name}</span><span className="user-email">{u.email}</span></span></Link></td><td>{u.department || '—'}</td><td>{u.job_title || '—'}</td><td><span className="badge neutral" title={source.detail}>{source.label}</span></td><td><StatusBadge status={u.status}/></td><td>{u.last_synced_at ? new Date(u.last_synced_at).toLocaleString() : 'Never'}</td><td><ChevronRight size={15} color="#829198"/></td></tr>; })}</tbody></table>}</TablePanel>
+    <TablePanel toolbar={<Toolbar placeholder="Search users by name or email" searchValue={search} onSearchChange={setSearch} filterLabel="All statuses" filterValue={statusFilter} onFilterChange={setStatusFilter} filterOptions={statusOptions}/>}>{loading ? <div className="empty">Loading users...</div> : error ? <div className="empty">{error}</div> : !users || users.length === 0 ? <div className="empty">No users found.</div> : filteredUsers.length === 0 ? <div className="empty">No users match this filter.</div> : <table><thead><tr><th>User</th><th>Department</th><th>Job title</th><th>Source</th><th>Status</th><th>Last synced</th><th></th></tr></thead><tbody>{filteredUsers.map(u => { const source = sourceLabel(u, providers); return <tr key={u.id}><td><Link to={`/admin/users/${u.id}`} className="user-cell"><span className="avatar">{initialsFor(u.display_name)}</span><span><span className="user-name">{u.display_name}</span><span className="user-email">{u.email}</span></span></Link></td><td>{u.department || '—'}</td><td>{u.job_title || '—'}</td><td><span className="badge neutral" title={source.detail}>{source.label}</span></td><td><StatusBadge status={u.status}/></td><td>{u.last_synced_at ? formatDateTime(u.last_synced_at, timezone) : 'Never'}</td><td><ChevronRight size={15} color="#829198"/></td></tr>; })}</tbody></table>}</TablePanel>
     {users && users.length > 0 && <p className="footer-note">Showing {filteredUsers.length} of {users.length} users</p>}
   </Page>;
 }
 function UserDetail() {
+  const timezone = useAppTimezone();
   const { id } = useParams();
   const { data: user, error, loading } = useApiResource<ApiUser>(`/api/v1/users/${id}`);
   const { data: providers } = useApiResource<ApiProvider[]>('/api/v1/providers');
@@ -753,7 +882,7 @@ function UserDetail() {
     });
     return Array.from(map.entries());
   }, [access]);
-  const renderAccessItem = (item: ApiUserAccessItem, index: number) => <div key={item.id || `${item.resource_type}-${index}`} className="timeline-item"><strong>{item.resource_display_name || item.resource_type}</strong><small>{item.source === 'DIRECT_IN_ENTRA' ? 'Added directly in Entra' : item.assignment_type}{item.expiration_time ? ` · expires ${new Date(item.expiration_time).toLocaleString()}` : ''}</small><div style={{marginTop:5}}><StatusBadge status={item.status}/></div></div>;
+  const renderAccessItem = (item: ApiUserAccessItem, index: number) => <div key={item.id || `${item.resource_type}-${index}`} className="timeline-item"><strong>{item.resource_display_name || item.resource_type}</strong><small>{item.source === 'DIRECT_IN_ENTRA' ? 'Added directly in Entra' : item.assignment_type}{item.expiration_time ? ` · expires ${formatDateTime(item.expiration_time, timezone)}` : ''}</small><div style={{marginTop:5}}><StatusBadge status={item.status}/></div></div>;
   const [copied, setCopied] = useState(false);
   const copyEmail = async () => {
     if (!user) return;
@@ -764,7 +893,7 @@ function UserDetail() {
   const provider = providers?.find(p => p.id === user.provider_id);
   const connectorName = provider ? (provider.provider_type === 'ENTRA' ? 'Microsoft Entra ID' : provider.provider_type === 'OKTA' ? 'Okta' : provider.name) : 'Unknown connector';
   const isCsvOnly = provider?.provider_type === 'CSV';
-  return <Page eyebrow="USER DIRECTORY" title={user.display_name} subtitle={user.email} action={<button className="btn" aria-label="Refresh" onClick={() => reloadAccess()}><RefreshCw size={14}/></button>}><div className="detail-layout"><section className="panel"><div className="detail-section"><div className="user-cell"><span className="avatar" style={{width:45,height:45}}>{initialsFor(user.display_name)}</span><div><h2>{user.job_title || 'No job title on file'}</h2><p className="subtitle">{user.department || 'No department on file'} · {user.status}</p></div></div></div><div className="detail-section"><div className="detail-title"><h2>Overview</h2><StatusBadge status={user.status}/></div><div className="key-grid"><div className="key"><span>Email</span><strong style={{display:'flex',alignItems:'center',gap:8}}>{user.email}<button type="button" className="btn" aria-label="Copy email" onClick={() => void copyEmail()} style={{padding:'2px 7px'}}><Copy size={12}/></button>{copied && <span className="footer-note">Copied</span>}</strong></div><div className="key"><span>Given name</span><strong>{user.given_name || '—'}</strong></div><div className="key"><span>Surname</span><strong>{user.surname || '—'}</strong></div><div className="key"><span>Last synced</span><strong>{user.last_synced_at ? new Date(user.last_synced_at).toLocaleString() : 'Never'}</strong></div><div className="key"><span>Groups</span><strong>{accessLoading ? '…' : groupCount}</strong></div><div className="key"><span>Applications</span><strong>{accessLoading ? '…' : applicationCount}</strong></div></div></div><div className="detail-section"><div className="detail-title"><h2>Identity source</h2>{isCsvOnly && <span className="badge warning">No real account yet</span>}</div><div className="key-grid">
+  return <Page eyebrow="USER DIRECTORY" title={user.display_name} subtitle={user.email} action={<button className="btn" aria-label="Refresh" onClick={() => reloadAccess()}><RefreshCw size={14}/></button>}><div className="detail-layout"><section className="panel"><div className="detail-section"><div className="user-cell"><span className="avatar" style={{width:45,height:45}}>{initialsFor(user.display_name)}</span><div><h2>{user.job_title || 'No job title on file'}</h2><p className="subtitle">{user.department || 'No department on file'} · {user.status}</p></div></div></div><div className="detail-section"><div className="detail-title"><h2>Overview</h2><StatusBadge status={user.status}/></div><div className="key-grid"><div className="key"><span>Email</span><strong style={{display:'flex',alignItems:'center',gap:8}}>{user.email}<button type="button" className="btn" aria-label="Copy email" onClick={() => void copyEmail()} style={{padding:'2px 7px'}}><Copy size={12}/></button>{copied && <span className="footer-note">Copied</span>}</strong></div><div className="key"><span>Given name</span><strong>{user.given_name || '—'}</strong></div><div className="key"><span>Surname</span><strong>{user.surname || '—'}</strong></div><div className="key"><span>Last synced</span><strong>{user.last_synced_at ? formatDateTime(user.last_synced_at, timezone) : 'Never'}</strong></div><div className="key"><span>Groups</span><strong>{accessLoading ? '…' : groupCount}</strong></div><div className="key"><span>Applications</span><strong>{accessLoading ? '…' : applicationCount}</strong></div></div></div><div className="detail-section"><div className="detail-title"><h2>Identity source</h2>{isCsvOnly && <span className="badge warning">No real account yet</span>}</div><div className="key-grid">
     <div className="key"><span>Onboarded via</span><strong>{user.source === 'CSV_ONBOARDING' ? 'CSV Onboarding' : 'Directory sync'}</strong></div>
     {user.employee_id && <div className="key"><span>Employee ID (from CSV)</span><strong>{user.employee_id}</strong></div>}
     <div className="key"><span>Connector</span><strong>{connectorName}</strong></div>
@@ -783,6 +912,7 @@ function UserDetail() {
   </aside></div></Page>;
 }
 function Requests({ mine = false }: { mine?: boolean }) {
+  const timezone = useAppTimezone();
   const { requests: items } = useMockState();
   const update = (id: string, status: RequestStatus) => { if (status === 'REJECTED' && !window.confirm('Reject this access request?')) return; mockService.transitionRequest(id, status); };
 
@@ -810,7 +940,7 @@ function Requests({ mine = false }: { mine?: boolean }) {
 
   if (mine) {
     return <Page eyebrow="SELF-SERVICE" title="My requests" subtitle="Every package you've requested, and what happened to it — including rejections." action={<><button className="btn" aria-label="Refresh" onClick={() => reloadHistory()}><RefreshCw size={14}/></button><Link to="/request-packages" className="btn btn-primary"><Plus size={14}/> New request</Link></>}>
-      <TablePanel toolbar={undefined}>{historyLoading ? <div className="empty">Loading your requests...</div> : historyError ? <div className="empty">{historyError}</div> : requestHistory.length === 0 ? <div className="empty">You haven't requested any packages yet.</div> : <table><thead><tr><th>Package</th><th>Requested</th><th>Status</th></tr></thead><tbody>{requestHistory.map(row => <tr key={row.batchId}><td className="user-name">{row.packageName}</td><td>{new Date(row.requestedAt).toLocaleString()}</td><td><StatusBadge status={row.status}/></td></tr>)}</tbody></table>}</TablePanel>
+      <TablePanel toolbar={undefined}>{historyLoading ? <div className="empty">Loading your requests...</div> : historyError ? <div className="empty">{historyError}</div> : requestHistory.length === 0 ? <div className="empty">You haven't requested any packages yet.</div> : <table><thead><tr><th>Package</th><th>Requested</th><th>Status</th></tr></thead><tbody>{requestHistory.map(row => <tr key={row.batchId}><td className="user-name">{row.packageName}</td><td>{formatDateTime(row.requestedAt, timezone)}</td><td><StatusBadge status={row.status}/></td></tr>)}</tbody></table>}</TablePanel>
     </Page>;
   }
 
@@ -829,6 +959,7 @@ function formatRemaining(expirationTime: string | null): string {
 type MyAccessRow = { kind: 'single'; assignment: ApiAssignment } | { kind: 'batch'; batch: ApiPackageBatch; assignments: ApiAssignment[] };
 function MyAccess() {
   const auth = useAuth();
+  const timezone = useAppTimezone();
   const { data: assignments, error, loading, reload } = useApiResource<ApiAssignment[]>('/api/v1/assignments/mine');
   const { data: policy } = useApiResource<ApiActivationPolicy>('/api/v1/assignments/activation-policy');
   const { data: batches } = useApiResource<ApiPackageBatch[]>('/api/v1/packages/my-package-batches');
@@ -888,6 +1019,16 @@ function MyAccess() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [eligibleIds]);
 
+  // Live: without this, a row an SoD exception auto-revoked in the background (see workers/sod_expiry.py) or a
+  // conflict that just resolved itself would keep showing here — stale eligibility, a stale "⚠ SoD conflict"
+  // badge, or both — until the user happened to click the manual refresh button. 30s matches the self-service
+  // Dashboard's own polling cadence for the same /assignments/mine data.
+  useEffect(() => {
+    const id = setInterval(() => reload(), 30000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const openActivate = (ids: string[], label: string) => { setActivateTarget({ ids, label }); setDurationHours(String(maxHours)); setActivateJustification(''); setActivateMessage(''); };
 
   const submitActivate = async () => {
@@ -922,7 +1063,7 @@ function MyAccess() {
           const warnings = row.kind === 'single' ? (sodWarnings[row.assignment.id] || []) : Array.from(new Set(row.assignments.flatMap(a => sodWarnings[a.id] || [])));
           const warningTitle = warnings.length > 0 ? `Activating this may conflict with Separation-of-Duties polic${warnings.length === 1 ? 'y' : 'ies'}: ${warnings.join(', ')}` : undefined;
           return row.kind === 'single'
-          ? <div key={row.assignment.id} className="activity-row"><span className="avatar"><Shield size={14}/></span><div className="activity-copy"><strong>{row.assignment.resource_display_name || row.assignment.resource_id}</strong><small>{row.assignment.resource_type}{row.assignment.package_name ? ` · ${row.assignment.package_name}` : ''} · {row.assignment.assignment_type === 'TEMPORARY' && row.assignment.expiration_time ? `Activate by ${new Date(row.assignment.expiration_time).toLocaleString()}` : 'No activation deadline'}</small></div>{warnings.length > 0 && <span className="badge danger" title={warningTitle} style={{marginRight:8}}>⚠ SoD conflict</span>}<button className="btn btn-primary" onClick={() => openActivate([row.assignment.id], row.assignment.resource_display_name || 'this access')}>Activate <ArrowRight size={13}/></button></div>
+          ? <div key={row.assignment.id} className="activity-row"><span className="avatar"><Shield size={14}/></span><div className="activity-copy"><strong>{row.assignment.resource_display_name || row.assignment.resource_id}</strong><small>{row.assignment.resource_type}{row.assignment.package_name ? ` · ${row.assignment.package_name}` : ''} · {row.assignment.assignment_type === 'TEMPORARY' && row.assignment.expiration_time ? `Activate by ${formatDateTime(row.assignment.expiration_time, timezone)}` : row.assignment.sod_exception_expires_at ? `Eligible until the SoD exception expires (${formatDateTime(row.assignment.sod_exception_expires_at, timezone)})` : 'No activation deadline'}</small></div>{warnings.length > 0 && <span className="badge danger" title={warningTitle} style={{marginRight:8}}>⚠ SoD conflict</span>}<button className="btn btn-primary" onClick={() => openActivate([row.assignment.id], row.assignment.resource_display_name || 'this access')}>Activate <ArrowRight size={13}/></button></div>
           : <div key={row.batch.package_id} className="activity-row"><span className="avatar">📦</span><div className="activity-copy"><strong>{row.batch.package_name}</strong><small>PACKAGE · {row.assignments.length} items</small></div>{warnings.length > 0 && <span className="badge danger" title={warningTitle} style={{marginRight:8}}>⚠ SoD conflict</span>}<button className="btn btn-primary" onClick={() => openActivate(row.assignments.map(a => a.id), `"${row.batch.package_name}" (${row.assignments.length} items)`)}>Activate all <ArrowRight size={13}/></button></div>;
         })}
       </div>
@@ -937,8 +1078,8 @@ function MyAccess() {
       <div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setActivateTarget(null)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={activateSaving}>{activateSaving ? 'Activating...' : 'Activate'}</button></div>
     </form>}
     <TablePanel toolbar={undefined}>{loading ? <div className="empty">Loading access...</div> : error ? <div className="empty">{error}</div> : activeRows.length === 0 ? <div className="empty">No active access.</div> : <table><thead><tr><th>Resource</th><th>Type</th><th>Package</th><th>Activated</th><th>Expires</th><th>Remaining</th><th></th></tr></thead><tbody>{activeRows.map(row => row.kind === 'single'
-      ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.resource_display_name || row.assignment.resource_id}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.package_name || '—'}</td><td>{row.assignment.activated_at ? new Date(row.assignment.activated_at).toLocaleString() : '—'}</td><td>{row.assignment.expiration_time ? new Date(row.assignment.expiration_time).toLocaleString() : 'Never'}</td><td>{row.assignment.expiration_time ? formatRemaining(row.assignment.expiration_time) : '—'}</td><td>{row.assignment.bypass_activation ? <span className="footer-note">Assigned by admin</span> : <button className="btn" disabled={busyIds === row.assignment.id} onClick={() => void deactivate([row.assignment.id], row.assignment.resource_display_name || 'this access')}>Deactivate</button>}</td></tr>
-      : <tr key={row.batch.package_id}><td className="user-name">📦 {row.batch.package_name}</td><td>PACKAGE ({row.assignments.length})</td><td>{row.batch.package_name}</td><td>{row.assignments[0]?.activated_at ? new Date(row.assignments[0].activated_at!).toLocaleString() : '—'}</td><td>{row.assignments[0]?.expiration_time ? new Date(row.assignments[0].expiration_time!).toLocaleString() : 'Never'}</td><td>{row.assignments[0]?.expiration_time ? formatRemaining(row.assignments[0].expiration_time) : '—'}</td><td><button className="btn" disabled={busyIds === row.assignments.map(a => a.id).join(',')} onClick={() => void deactivate(row.assignments.map(a => a.id), `"${row.batch.package_name}" (${row.assignments.length} items)`)}>Deactivate all</button></td></tr>
+      ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.resource_display_name || row.assignment.resource_id}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.package_name || '—'}</td><td>{row.assignment.activated_at ? formatDateTime(row.assignment.activated_at, timezone) : '—'}</td><td>{row.assignment.expiration_time ? formatDateTime(row.assignment.expiration_time, timezone) : 'Never'}</td><td>{row.assignment.expiration_time ? formatRemaining(row.assignment.expiration_time) : '—'}</td><td>{row.assignment.bypass_activation ? <span className="footer-note">Assigned by admin</span> : <button className="btn" disabled={busyIds === row.assignment.id} onClick={() => void deactivate([row.assignment.id], row.assignment.resource_display_name || 'this access')}>Deactivate</button>}</td></tr>
+      : <tr key={row.batch.package_id}><td className="user-name">📦 {row.batch.package_name}</td><td>PACKAGE ({row.assignments.length})</td><td>{row.batch.package_name}</td><td>{row.assignments[0]?.activated_at ? formatDateTime(row.assignments[0].activated_at!, timezone) : '—'}</td><td>{row.assignments[0]?.expiration_time ? formatDateTime(row.assignments[0].expiration_time!, timezone) : 'Never'}</td><td>{row.assignments[0]?.expiration_time ? formatRemaining(row.assignments[0].expiration_time) : '—'}</td><td><button className="btn" disabled={busyIds === row.assignments.map(a => a.id).join(',')} onClick={() => void deactivate(row.assignments.map(a => a.id), `"${row.batch.package_name}" (${row.assignments.length} items)`)}>Deactivate all</button></td></tr>
     )}</tbody></table>}</TablePanel>
   </Page>;
 }
@@ -1027,12 +1168,13 @@ function RequestPackagesPage() {
     <TablePanel toolbar={undefined}>{loading ? <div className="empty">Loading packages...</div> : error ? <div className="empty">{error}</div> : !packages || packages.length === 0 ? <div className="empty">No access packages are available for you to request.</div> : <table><thead><tr><th>Name</th><th>Description</th><th>Includes</th><th></th></tr></thead><tbody>{packages.map(p => <tr key={p.id}><td className="user-name">{p.name}</td><td>{p.description || '—'}</td><td>{p.items.map(i => i.resource_display_name || i.resource_id).join(', ')}</td><td><button className="btn btn-primary" onClick={() => openRequest(p)}>Request</button></td></tr>)}</tbody></table>}</TablePanel>
   </Page>;
 }
-interface ApiAssignment { id: string; user_id: string; user_display_name: string | null; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; assignment_type: string; status: string; start_time: string | null; expiration_time: string | null; justification: string | null; requested_by: string | null; approved_by: string | null; bypass_activation: boolean; activated_at: string | null; created_at: string; package_name: string | null; }
+interface ApiAssignment { id: string; user_id: string; user_display_name: string | null; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; assignment_type: string; status: string; start_time: string | null; expiration_time: string | null; justification: string | null; requested_by: string | null; approved_by: string | null; bypass_activation: boolean; activated_at: string | null; created_at: string; package_name: string | null; sod_exception_expires_at: string | null; }
 interface ApiActivationPolicy { max_self_activation_hours: number; }
 function todayDateValue(date: Date) { const pad = (n: number) => String(n).padStart(2, '0'); return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`; }
 const emptyAssignmentForm = { user_id: '', resource_type: 'GROUP', resource_id: '', app_role_external_id: '', assignment_type: 'PERMANENT', start_date: '', start_clock: '', end_date: '', end_clock: '', approver_id: '', bypass_activation: false, justification: '' };
 function AssignmentsInteractive() {
   const auth = useAuth();
+  const timezone = useAppTimezone();
   const { data: assignmentList, error, loading, reload } = useApiResource<ApiAssignment[]>('/api/v1/assignments');
   const { data: users, reload: reloadUsers } = useApiResource<ApiUser[]>('/api/v1/users');
   const { data: groups, reload: reloadGroups } = useApiResource<ApiGroup[]>('/api/v1/groups');
@@ -1054,6 +1196,9 @@ function AssignmentsInteractive() {
   const [formMessage, setFormMessage] = useState('');
   const [actioningId, setActioningId] = useState<string | null>(null);
   const [expandedBatches, setExpandedBatches] = useState<Set<string>>(new Set());
+  const [sodBlock, setSodBlock] = useState<{ conflicts: { policy_id: string; policy_name: string; severity: string }[]; user_id: string; resource_type: string; resource_id: string; app_role_external_id?: string } | null>(null);
+  const [requestingException, setRequestingException] = useState(false);
+  const [exceptionRequestMessage, setExceptionRequestMessage] = useState('');
   const targets = form.resource_type === 'GROUP' ? (groups || []) : form.resource_type === 'ROLE' ? (roles || []) : form.resource_type === 'APPLICATION' ? (applications || []) : (packages || []).filter(p => p.status === 'ACTIVE');
   const selectedApplication = form.resource_type === 'APPLICATION' ? (applications || []).find(a => a.id === form.resource_id) : undefined;
   const today = todayDateValue(new Date());
@@ -1096,7 +1241,7 @@ function AssignmentsInteractive() {
     if (form.resource_type === 'APPLICATION' && !form.app_role_external_id) { setFormMessage('Select an application role.'); return; }
     if (form.assignment_type === 'TEMPORARY' && !form.end_date && !form.end_clock) { setFormMessage('Set an end date/time for a time-bound assignment.'); return; }
     if (form.justification.trim().length < 3) { setFormMessage('A justification (at least 3 characters) for this assignment is required.'); return; }
-    setSaving(true); setFormMessage('');
+    setSaving(true); setFormMessage(''); setSodBlock(null); setExceptionRequestMessage('');
     try {
       const isPackage = form.resource_type === 'PACKAGE';
       const payload: Record<string, unknown> = isPackage
@@ -1110,10 +1255,31 @@ function AssignmentsInteractive() {
       const endpoint = isPackage ? `/api/v1/packages/${form.resource_id}/assign` : '/api/v1/assignments';
       const response = await auth.apiRequest(endpoint, { method: 'POST', body: JSON.stringify(payload) });
       if (response.status === 201) { setOpen(false); setForm(emptyAssignmentForm); reload(); }
-      else { const errorBody = await response.json().catch(() => null); setFormMessage(errorBody?.error?.message || 'Unable to create assignment.'); }
+      else {
+        const errorBody = await response.json().catch(() => null);
+        setFormMessage(errorBody?.error?.message || 'Unable to create assignment.');
+        if (!isPackage && response.status === 409 && errorBody?.error?.code === 'SOD_CONFLICT' && Array.isArray(errorBody?.error?.details?.conflicts)) {
+          setSodBlock({ conflicts: errorBody.error.details.conflicts, user_id: form.user_id, resource_type: form.resource_type, resource_id: form.resource_id, app_role_external_id: form.resource_type === 'APPLICATION' ? form.app_role_external_id : undefined });
+        }
+      }
     } catch (err) {
       setFormMessage(err instanceof Error && err.message === 'AUTHENTICATION_REQUIRED' ? 'Please sign in to continue.' : 'Unable to create assignment.');
     } finally { setSaving(false); }
+  };
+
+  const requestSodException = async () => {
+    if (!sodBlock) return;
+    setRequestingException(true); setExceptionRequestMessage('');
+    try {
+      // Carries the rest of the originally-blocked attempt's shape (approver, duration) so that granting can
+      // recreate it faithfully — including routing through the same approver — instead of only ever landing on
+      // a bare no-approver ELIGIBLE row. Read live off `form`, which still holds the blocked attempt's values.
+      const expiration_time = form.assignment_type === 'TEMPORARY' && (form.end_date || form.end_clock) ? new Date(`${form.end_date || today}T${form.end_clock || '23:59'}`).toISOString() : undefined;
+      const responses = await Promise.all(sodBlock.conflicts.map(c => auth.apiRequest('/api/v1/sod/exception-requests', { method: 'POST', body: JSON.stringify({ sod_policy_id: c.policy_id, user_id: sodBlock.user_id, justification: form.justification.trim(), resource_type: sodBlock.resource_type, resource_id: sodBlock.resource_id, app_role_external_id: sodBlock.app_role_external_id || undefined, approver_id: form.approver_id || undefined, assignment_type: form.assignment_type, expiration_time }) })));
+      if (responses.every(r => r.ok)) { setExceptionRequestMessage('Exception request sent to the SoD Admin — once granted, the user becomes eligible automatically (or routes to your chosen approver, if one was set); no need to redo this yourself.'); setSodBlock(null); }
+      else setExceptionRequestMessage('Unable to submit the exception request for one or more conflicting policies.');
+    } catch { setExceptionRequestMessage('Unable to reach the backend.'); }
+    finally { setRequestingException(false); }
   };
 
   const decide = async (assignmentId: string, decision: 'approve' | 'reject') => {
@@ -1169,9 +1335,9 @@ function AssignmentsInteractive() {
     } finally { setActioningId(null); }
   };
 
-  return <Page eyebrow="ACCESS MANAGEMENT" title="Assignments" subtitle="Assign group, role, application, or package access to users, with optional approval and time-bound expiration." action={<><button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button><button className="btn btn-primary" onClick={() => { setOpen(true); setFormMessage(''); reloadUsers(); reloadGroups(); reloadRoles(); reloadApplications(); reloadPackages(); }}><Plus size={14}/> Add assignment</button></>}>
+  return <Page eyebrow="ACCESS MANAGEMENT" title="Assignments" subtitle="Assign group, role, application, or package access to users, with optional approval and time-bound expiration." action={<><button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button><button className="btn btn-primary" onClick={() => { setOpen(true); setFormMessage(''); setSodBlock(null); setExceptionRequestMessage(''); reloadUsers(); reloadGroups(); reloadRoles(); reloadApplications(); reloadPackages(); }}><Plus size={14}/> Add assignment</button></>}>
     {open && <form role="dialog" aria-modal="true" className="panel" style={{maxWidth:720,marginBottom:18}} onSubmit={submit}>
-      <div className="panel-head"><h2>Add assignment</h2><button type="button" className="btn" aria-label="Close" onClick={() => setOpen(false)}><X size={14}/></button></div>
+      <div className="panel-head"><h2>Add assignment</h2><button type="button" className="btn" aria-label="Close" onClick={() => { setOpen(false); setSodBlock(null); }}><X size={14}/></button></div>
       <div className="detail-section"><div className="key-grid">
         <label className="key"><span>User</span><select className="select" value={form.user_id} onChange={event => setForm({...form, user_id: event.target.value})}><option value="">Select a user</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name} ({u.email})</option>)}</select></label>
         <label className="key"><span>Target type</span><select className="select" value={form.resource_type} onChange={event => setForm({...form, resource_type: event.target.value, resource_id: '', app_role_external_id: ''})}><option value="GROUP">Group</option><option value="ROLE">Role</option><option value="APPLICATION">Application</option><option value="PACKAGE">Package</option></select></label>
@@ -1197,22 +1363,24 @@ function AssignmentsInteractive() {
         </div>
       </div>}
       <label className="key" style={{display:'block',marginTop:14}}><span>Justification — why are you assigning this? (required)</span><input className="select" style={{width:'100%'}} required value={form.justification} onChange={event => setForm({...form, justification: event.target.value})}/></label>
-      {formMessage && <div className="notice" style={{marginTop:14}}>{formMessage}</div>}</div>
+      {formMessage && <div className="notice" style={{marginTop:14}}>{formMessage}</div>}
+      {sodBlock && <div style={{marginTop:10,display:'flex',alignItems:'center',gap:10}}><button type="button" className="btn" disabled={requestingException} onClick={() => void requestSodException()}>{requestingException ? 'Sending...' : 'Request SoD Exception'}</button><span className="footer-note">Notifies the SoD Admin — granting it makes the user eligible automatically, no retry needed.</span></div>}
+      {exceptionRequestMessage && <div className="notice" style={{marginTop:10}}>{exceptionRequestMessage}</div>}</div>
       <div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setOpen(false)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Creating...' : 'Create assignment'}</button></div>
     </form>}
     <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12}}><label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:'#52656d',cursor:'pointer'}}><input type="checkbox" checked={expiringFilter === '24h'} onChange={event => setExpiringFilter(event.target.checked)}/> Expiring within 24 hours</label></div>
-    <TablePanel toolbar={<Toolbar placeholder="Search assignments" searchValue={search} onSearchChange={setSearch} filterLabel="All statuses" filterValue={statusFilter} onFilterChange={setStatusFilter} filterOptions={statusOptions}/>}>{loading ? <div className="empty">Loading assignments...</div> : error ? <div className="empty">{error}</div> : !assignmentList || assignmentList.length === 0 ? <div className="empty">No assignments found.</div> : groupedRows.length === 0 ? <div className="empty">No assignments match this filter.</div> : <table><thead><tr><th>User</th><th>Resource</th><th>Type</th><th>Duration</th><th>Status</th><th>Start</th><th>Expiration</th><th></th></tr></thead><tbody>{groupedRows.map(row => row.kind === 'single' ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.user_display_name || row.assignment.user_id}</td><td>{row.assignment.resource_display_name || row.assignment.resource_id}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.assignment_type}</td><td><StatusBadge status={row.assignment.status}/></td><td>{row.assignment.start_time ? new Date(row.assignment.start_time).toLocaleString() : '—'}</td><td>{row.assignment.expiration_time ? new Date(row.assignment.expiration_time).toLocaleString() : '—'}</td><td>{isRevocable(row.assignment.status) ? <span style={{display:'flex',gap:5}}>{row.assignment.status === 'PENDING_APPROVAL' && <><button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'approve')} aria-label="Approve"><Check size={14}/></button><button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'reject')} aria-label="Reject"><X size={14}/></button></>}<button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void revoke(row.assignment.id, row.assignment.resource_display_name || 'this assignment')} aria-label="Revoke">Revoke</button></span> : <span className="footer-note">No actions</span>}</td></tr> : <>
+    <TablePanel toolbar={<Toolbar placeholder="Search assignments" searchValue={search} onSearchChange={setSearch} filterLabel="All statuses" filterValue={statusFilter} onFilterChange={setStatusFilter} filterOptions={statusOptions}/>}>{loading ? <div className="empty">Loading assignments...</div> : error ? <div className="empty">{error}</div> : !assignmentList || assignmentList.length === 0 ? <div className="empty">No assignments found.</div> : groupedRows.length === 0 ? <div className="empty">No assignments match this filter.</div> : <table><thead><tr><th>User</th><th>Resource</th><th>Type</th><th>Duration</th><th>Status</th><th>Start</th><th>Expiration</th><th></th></tr></thead><tbody>{groupedRows.map(row => row.kind === 'single' ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.user_display_name || row.assignment.user_id}</td><td>{row.assignment.resource_display_name || row.assignment.resource_id}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.assignment_type}</td><td><StatusBadge status={row.assignment.status}/></td><td>{row.assignment.start_time ? formatDateTime(row.assignment.start_time, timezone) : '—'}</td><td>{row.assignment.expiration_time ? formatDateTime(row.assignment.expiration_time, timezone) : '—'}</td><td>{isRevocable(row.assignment.status) ? <span style={{display:'flex',gap:5}}>{row.assignment.status === 'PENDING_APPROVAL' && <><button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'approve')} aria-label="Approve"><Check size={14}/></button><button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'reject')} aria-label="Reject"><X size={14}/></button></>}<button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void revoke(row.assignment.id, row.assignment.resource_display_name || 'this assignment')} aria-label="Revoke">Revoke</button></span> : <span className="footer-note">No actions</span>}</td></tr> : <>
       <tr key={row.batch.package_assignment_id} style={{cursor:'pointer'}} onClick={() => toggleBatch(row.batch.package_assignment_id)}>
         <td className="user-name">{row.assignments[0]?.user_display_name || row.batch.user_id}</td>
         <td>📦 {row.batch.package_name} <span className="footer-note">({row.assignments.length} items)</span></td>
         <td>PACKAGE</td>
         <td>{row.assignments[0]?.assignment_type}</td>
         <td><StatusBadge status={new Set(row.assignments.map(a => a.status)).size === 1 ? row.assignments[0].status : 'MIXED'}/></td>
-        <td>{row.assignments[0]?.start_time ? new Date(row.assignments[0].start_time!).toLocaleString() : '—'}</td>
-        <td>{row.assignments[0]?.expiration_time ? new Date(row.assignments[0].expiration_time!).toLocaleString() : '—'}</td>
+        <td>{row.assignments[0]?.start_time ? formatDateTime(row.assignments[0].start_time!, timezone) : '—'}</td>
+        <td>{row.assignments[0]?.expiration_time ? formatDateTime(row.assignments[0].expiration_time!, timezone) : '—'}</td>
         <td>{row.assignments.some(a => isRevocable(a.status)) ? <span style={{display:'flex',gap:5}} onClick={event => event.stopPropagation()}>{row.assignments.some(a => a.status === 'PENDING_APPROVAL') && <><button className="btn" disabled={actioningId === row.batch.package_assignment_id} onClick={() => void decideBatch(row.batch, 'approve')} aria-label="Approve all"><Check size={14}/></button><button className="btn" disabled={actioningId === row.batch.package_assignment_id} onClick={() => void decideBatch(row.batch, 'reject')} aria-label="Reject all"><X size={14}/></button></>}<button className="btn" disabled={actioningId === row.batch.package_assignment_id} onClick={() => void revokeBatch(row.batch)} aria-label="Revoke all">Revoke all</button></span> : <span className="footer-note">No actions</span>}</td>
       </tr>
-      {expandedBatches.has(row.batch.package_assignment_id) && row.assignments.map(a => <tr key={a.id} style={{opacity:0.8}}><td className="user-name">↳</td><td>{a.resource_display_name || a.resource_id}</td><td>{a.resource_type}</td><td>{a.assignment_type}</td><td><StatusBadge status={a.status}/></td><td>{a.start_time ? new Date(a.start_time).toLocaleString() : '—'}</td><td>{a.expiration_time ? new Date(a.expiration_time).toLocaleString() : '—'}</td><td>{isRevocable(a.status) ? <span style={{display:'flex',gap:5}}>{a.status === 'PENDING_APPROVAL' && <><button className="btn" disabled={actioningId === a.id} onClick={() => void decide(a.id, 'approve')} aria-label="Approve"><Check size={14}/></button><button className="btn" disabled={actioningId === a.id} onClick={() => void decide(a.id, 'reject')} aria-label="Reject"><X size={14}/></button></>}<button className="btn" disabled={actioningId === a.id} onClick={() => void revoke(a.id, a.resource_display_name || 'this assignment')} aria-label="Revoke">Revoke</button></span> : <span className="footer-note">No actions</span>}</td></tr>)}
+      {expandedBatches.has(row.batch.package_assignment_id) && row.assignments.map(a => <tr key={a.id} style={{opacity:0.8}}><td className="user-name">↳</td><td>{a.resource_display_name || a.resource_id}</td><td>{a.resource_type}</td><td>{a.assignment_type}</td><td><StatusBadge status={a.status}/></td><td>{a.start_time ? formatDateTime(a.start_time, timezone) : '—'}</td><td>{a.expiration_time ? formatDateTime(a.expiration_time, timezone) : '—'}</td><td>{isRevocable(a.status) ? <span style={{display:'flex',gap:5}}>{a.status === 'PENDING_APPROVAL' && <><button className="btn" disabled={actioningId === a.id} onClick={() => void decide(a.id, 'approve')} aria-label="Approve"><Check size={14}/></button><button className="btn" disabled={actioningId === a.id} onClick={() => void decide(a.id, 'reject')} aria-label="Reject"><X size={14}/></button></>}<button className="btn" disabled={actioningId === a.id} onClick={() => void revoke(a.id, a.resource_display_name || 'this assignment')} aria-label="Revoke">Revoke</button></span> : <span className="footer-note">No actions</span>}</td></tr>)}
     </>)}</tbody></table>}</TablePanel>
   </Page>;
 }
@@ -1469,6 +1637,7 @@ function AccessPackagesInteractive() {
 }
 function MyApprovalsPage() {
   const auth = useAuth();
+  const timezone = useAppTimezone();
   const { data: items, error, loading, reload } = useApiResource<ApiAssignment[]>('/api/v1/assignments/pending-approval');
   // Self-scoped: returns only batches where the caller is the designated approver, so it works for any
   // authenticated user (not just Admins) — same access model as /assignments/pending-approval above.
@@ -1527,35 +1696,36 @@ function MyApprovalsPage() {
   return <Page eyebrow="ACCESS MANAGEMENT" title="Approvals" subtitle="Access assignments where you are the designated approver." action={<button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button>}>
     {message && <div className="detail-section" style={{marginBottom:14}}><div className="notice">{message}</div></div>}
     <TablePanel toolbar={undefined}>{loading ? <div className="empty">Loading approvals...</div> : error ? <div className="empty">{error}</div> : !items || items.length === 0 ? <div className="empty">No assignments are waiting on your approval.</div> : <table><thead><tr><th>User</th><th>Resource</th><th>Type</th><th>Duration</th><th>Status</th><th>Requested</th><th></th></tr></thead><tbody>
-      {pendingRows.map(row => row.kind === 'single' ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.user_display_name || row.assignment.user_id}</td><td>{row.assignment.resource_display_name || row.assignment.resource_id}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.assignment_type}</td><td><StatusBadge status={row.assignment.status}/></td><td>{new Date(row.assignment.created_at).toLocaleString()}</td><td><span style={{display:'flex',gap:5}}><button className="btn btn-primary" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'approve')} aria-label="Approve"><Check size={14}/> Approve</button><button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'reject')} aria-label="Reject"><X size={14}/> Reject</button></span></td></tr> : <>
+      {pendingRows.map(row => row.kind === 'single' ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.user_display_name || row.assignment.user_id}</td><td>{row.assignment.resource_display_name || row.assignment.resource_id}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.assignment_type}</td><td><StatusBadge status={row.assignment.status}/></td><td>{formatDateTime(row.assignment.created_at, timezone)}</td><td><span style={{display:'flex',gap:5}}><button className="btn btn-primary" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'approve')} aria-label="Approve"><Check size={14}/> Approve</button><button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'reject')} aria-label="Reject"><X size={14}/> Reject</button></span></td></tr> : <>
         <tr key={row.batch.package_assignment_id} style={{cursor:'pointer'}} onClick={() => toggleBatch(row.batch.package_assignment_id)}>
           <td className="user-name">{row.assignments[0]?.user_display_name || row.batch.user_id}</td>
           <td>📦 {row.batch.package_name} <span className="footer-note">({row.assignments.length} items)</span></td>
           <td>PACKAGE</td>
           <td>{row.assignments[0]?.assignment_type}</td>
           <td><StatusBadge status="PENDING_APPROVAL"/></td>
-          <td>{new Date(row.assignments[0].created_at).toLocaleString()}</td>
+          <td>{formatDateTime(row.assignments[0].created_at, timezone)}</td>
           <td><span style={{display:'flex',gap:5}} onClick={event => event.stopPropagation()}><button className="btn btn-primary" disabled={actioningId === row.batch.package_assignment_id} onClick={() => void decideBatch(row.batch, 'approve')} aria-label="Approve all"><Check size={14}/> Approve all</button><button className="btn" disabled={actioningId === row.batch.package_assignment_id} onClick={() => void decideBatch(row.batch, 'reject')} aria-label="Reject all"><X size={14}/> Reject all</button></span></td>
         </tr>
-        {expandedBatches.has(row.batch.package_assignment_id) && row.assignments.map(a => <tr key={a.id} style={{opacity:0.8}}><td className="user-name">↳</td><td>{a.resource_display_name || a.resource_id}</td><td>{a.resource_type}</td><td>{a.assignment_type}</td><td><StatusBadge status={a.status}/></td><td>{new Date(a.created_at).toLocaleString()}</td><td></td></tr>)}
+        {expandedBatches.has(row.batch.package_assignment_id) && row.assignments.map(a => <tr key={a.id} style={{opacity:0.8}}><td className="user-name">↳</td><td>{a.resource_display_name || a.resource_id}</td><td>{a.resource_type}</td><td>{a.assignment_type}</td><td><StatusBadge status={a.status}/></td><td>{formatDateTime(a.created_at, timezone)}</td><td></td></tr>)}
       </>)}
-      {decidedRows.map(row => row.kind === 'single' ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.user_display_name || row.assignment.user_id}</td><td>{row.assignment.resource_display_name || row.assignment.resource_id}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.assignment_type}</td><td><StatusBadge status={row.assignment.status}/></td><td>{new Date(row.assignment.created_at).toLocaleString()}</td><td><span className="footer-note">Decided</span></td></tr> : <>
+      {decidedRows.map(row => row.kind === 'single' ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.user_display_name || row.assignment.user_id}</td><td>{row.assignment.resource_display_name || row.assignment.resource_id}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.assignment_type}</td><td><StatusBadge status={row.assignment.status}/></td><td>{formatDateTime(row.assignment.created_at, timezone)}</td><td><span className="footer-note">Decided</span></td></tr> : <>
         <tr key={row.batch.package_assignment_id} style={{cursor:'pointer'}} onClick={() => toggleBatch(row.batch.package_assignment_id)}>
           <td className="user-name">{row.assignments[0]?.user_display_name || row.batch.user_id}</td>
           <td>📦 {row.batch.package_name} <span className="footer-note">({row.assignments.length} items)</span></td>
           <td>PACKAGE</td>
           <td>{row.assignments[0]?.assignment_type}</td>
           <td><StatusBadge status={new Set(row.assignments.map(a => a.status)).size === 1 ? row.assignments[0].status : 'MIXED'}/></td>
-          <td>{new Date(row.assignments[0].created_at).toLocaleString()}</td>
+          <td>{formatDateTime(row.assignments[0].created_at, timezone)}</td>
           <td><span className="footer-note">Decided</span></td>
         </tr>
-        {expandedBatches.has(row.batch.package_assignment_id) && row.assignments.map(a => <tr key={a.id} style={{opacity:0.8}}><td className="user-name">↳</td><td>{a.resource_display_name || a.resource_id}</td><td>{a.resource_type}</td><td>{a.assignment_type}</td><td><StatusBadge status={a.status}/></td><td>{new Date(a.created_at).toLocaleString()}</td><td></td></tr>)}
+        {expandedBatches.has(row.batch.package_assignment_id) && row.assignments.map(a => <tr key={a.id} style={{opacity:0.8}}><td className="user-name">↳</td><td>{a.resource_display_name || a.resource_id}</td><td>{a.resource_type}</td><td>{a.assignment_type}</td><td><StatusBadge status={a.status}/></td><td>{formatDateTime(a.created_at, timezone)}</td><td></td></tr>)}
       </>)}
     </tbody></table>}</TablePanel>
   </Page>;
 }
 function GroupsPage() {
   const auth = useAuth();
+  const timezone = useAppTimezone();
   const { data: groups, error, loading, reload } = useApiResource<ApiGroup[]>('/api/v1/groups');
   const [searchParams, setSearchParams] = useSearchParams();
   const search = searchParams.get('q') || '';
@@ -1582,7 +1752,7 @@ function GroupsPage() {
   };
   return <Page eyebrow="ADMINISTRATION" title="Groups" subtitle="Directory groups and membership governance." action={<button className="btn btn-primary" onClick={() => { setOpen(true); setFormMessage(''); }}><Plus size={14}/> Add group</button>}>
     {open && <form role="dialog" aria-modal="true" className="panel" style={{maxWidth:640,marginBottom:18}} onSubmit={submit}><div className="panel-head"><h2>Add group</h2><button type="button" className="btn" aria-label="Close" onClick={() => setOpen(false)}><X size={14}/></button></div><div className="detail-section"><label className="key" style={{display:'block'}}><span>Group name</span><input className="select" style={{width:'100%'}} value={form.display_name} onChange={event => setForm({...form, display_name: event.target.value})}/></label><label className="key" style={{display:'block',marginTop:14}}><span>Description</span><input className="select" style={{width:'100%'}} value={form.description} onChange={event => setForm({...form, description: event.target.value})}/></label>{formMessage && <div className="notice" style={{marginTop:14}}>{formMessage}</div>}</div><div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setOpen(false)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Creating...' : 'Create group'}</button></div></form>}
-    <TablePanel toolbar={<Toolbar placeholder="Search groups" searchValue={search} onSearchChange={setSearch} filterLabel="All groups" filterValue={privilegedFilter} onFilterChange={setPrivilegedFilter} filterOptions={[{value:'true',label:'Privileged'},{value:'false',label:'Standard'}]}/>}>{loading ? <div className="empty">Loading groups...</div> : error ? <div className="empty">{error}</div> : !groups || groups.length === 0 ? <div className="empty">No groups found.</div> : filteredGroups.length === 0 ? <div className="empty">No groups match this filter.</div> : <table><thead><tr><th>Name</th><th>Description</th><th>Privileged</th><th>Status</th><th>Last synced</th></tr></thead><tbody>{filteredGroups.map(g => <tr key={g.id}><td className="user-name">{g.name}</td><td>{g.description || '—'}</td><td><span className={`risk ${g.is_privileged ? 'risk-high' : 'risk-low'}`}>{g.is_privileged ? 'Privileged' : 'Standard'}</span></td><td><StatusBadge status={g.status}/></td><td>{g.last_synced_at ? new Date(g.last_synced_at).toLocaleString() : 'Never'}</td></tr>)}</tbody></table>}</TablePanel>
+    <TablePanel toolbar={<Toolbar placeholder="Search groups" searchValue={search} onSearchChange={setSearch} filterLabel="All groups" filterValue={privilegedFilter} onFilterChange={setPrivilegedFilter} filterOptions={[{value:'true',label:'Privileged'},{value:'false',label:'Standard'}]}/>}>{loading ? <div className="empty">Loading groups...</div> : error ? <div className="empty">{error}</div> : !groups || groups.length === 0 ? <div className="empty">No groups found.</div> : filteredGroups.length === 0 ? <div className="empty">No groups match this filter.</div> : <table><thead><tr><th>Name</th><th>Description</th><th>Privileged</th><th>Status</th><th>Last synced</th></tr></thead><tbody>{filteredGroups.map(g => <tr key={g.id}><td className="user-name">{g.name}</td><td>{g.description || '—'}</td><td><span className={`risk ${g.is_privileged ? 'risk-high' : 'risk-low'}`}>{g.is_privileged ? 'Privileged' : 'Standard'}</span></td><td><StatusBadge status={g.status}/></td><td>{g.last_synced_at ? formatDateTime(g.last_synced_at, timezone) : 'Never'}</td></tr>)}</tbody></table>}</TablePanel>
   </Page>;
 }
 function RolesPage() {
@@ -1674,6 +1844,7 @@ function PoliciesPage() {
 }
 interface ApiAuditLog { id: string; timestamp: string; actor_user_id: string | null; actor_display_name: string | null; action: string; target_type: string; target_id: string | null; provider_id: string | null; provider_name: string | null; request_id: string; result: string; target_user_display_name: string | null; target_user_email: string | null; }
 function AuditPage() {
+  const timezone = useAppTimezone();
   const { data: logs, error, loading, reload } = useApiResource<ApiAuditLog[]>('/api/v1/audit-logs');
   const [searchParams, setSearchParams] = useSearchParams();
   const search = searchParams.get('q') || '';
@@ -1682,13 +1853,14 @@ function AuditPage() {
   const setResultFilter = (value: string) => setSearchParams(prev => { const next = new URLSearchParams(prev); if (value) next.set('result', value); else next.delete('result'); return next; });
   const resultOptions = useMemo(() => Array.from(new Set((logs || []).map(l => l.result))).sort().map(r => ({ value: r, label: r })), [logs]);
   const filteredLogs = (logs || []).filter(l => (!resultFilter || l.result === resultFilter) && (!search || `${l.action} ${l.actor_display_name || ''} ${l.target_type} ${l.target_user_display_name || ''}`.toLowerCase().includes(search.toLowerCase())));
-  return <Page eyebrow="GOVERNANCE" title="Audit logs" subtitle="A tamper-evident record of identity and access activity." action={<button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button>}><TablePanel toolbar={<Toolbar placeholder="Search audit events" searchValue={search} onSearchChange={setSearch} filterLabel="All results" filterValue={resultFilter} onFilterChange={setResultFilter} filterOptions={resultOptions}/>}>{loading ? <div className="empty">Loading audit logs...</div> : error ? <div className="empty">{error}</div> : !logs || logs.length === 0 ? <div className="empty">No audit events found.</div> : filteredLogs.length === 0 ? <div className="empty">No audit events match this filter.</div> : <table><thead><tr><th>Timestamp</th><th>Actor</th><th>Action</th><th>Target</th><th>User</th><th>Provider</th><th>Result</th><th>Request ID</th></tr></thead><tbody>{filteredLogs.map(entry => <tr key={entry.id}><td>{new Date(entry.timestamp).toLocaleString()}</td><td className="user-name">{entry.actor_display_name || 'System'}</td><td>{entry.action}</td><td>{entry.target_type}</td><td>{entry.target_user_display_name ? `${entry.target_user_display_name}${entry.target_user_email ? ` (${entry.target_user_email})` : ''}` : '—'}</td><td>{entry.provider_name || '—'}</td><td><StatusBadge status={entry.result}/></td><td>{entry.request_id}</td></tr>)}</tbody></table>}</TablePanel></Page>;
+  return <Page eyebrow="GOVERNANCE" title="Audit logs" subtitle="A tamper-evident record of identity and access activity." action={<button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button>}><TablePanel toolbar={<Toolbar placeholder="Search audit events" searchValue={search} onSearchChange={setSearch} filterLabel="All results" filterValue={resultFilter} onFilterChange={setResultFilter} filterOptions={resultOptions}/>}>{loading ? <div className="empty">Loading audit logs...</div> : error ? <div className="empty">{error}</div> : !logs || logs.length === 0 ? <div className="empty">No audit events found.</div> : filteredLogs.length === 0 ? <div className="empty">No audit events match this filter.</div> : <table><thead><tr><th>Timestamp</th><th>Actor</th><th>Action</th><th>Target</th><th>User</th><th>Provider</th><th>Result</th><th>Request ID</th></tr></thead><tbody>{filteredLogs.map(entry => <tr key={entry.id}><td>{formatDateTime(entry.timestamp, timezone)}</td><td className="user-name">{entry.actor_display_name || 'System'}</td><td>{entry.action}</td><td>{entry.target_type}</td><td>{entry.target_user_display_name ? `${entry.target_user_display_name}${entry.target_user_email ? ` (${entry.target_user_email})` : ''}` : '—'}</td><td>{entry.provider_name || '—'}</td><td><StatusBadge status={entry.result}/></td><td>{entry.request_id}</td></tr>)}</tbody></table>}</TablePanel></Page>;
 }
 function ProvidersPage() { return <ProviderConfiguration />; }
 interface ApiProvider { id: string; name: string; provider_type: string; status: string; sync_interval_minutes: number | null; last_sync_at: string | null; max_self_activation_hours: number; }
 interface ApiSyncRun { id: string; status: string; started_at: string; completed_at: string | null; users_processed: number; groups_processed: number; roles_processed: number; errors_count: number; }
 function SyncPage() {
   const auth = useAuth();
+  const timezone = useAppTimezone();
   const { data: providers, loading: providersLoading, reload: reloadProviders } = useApiResource<ApiProvider[]>('/api/v1/providers');
   const provider = providers?.find(p => p.provider_type === 'ENTRA') || providers?.[0] || null;
   const { data: runs, error, loading, reload } = useApiResource<ApiSyncRun[]>(provider ? `/api/v1/providers/${provider.id}/sync-runs` : '', Boolean(provider));
@@ -1722,14 +1894,15 @@ function SyncPage() {
   };
   return <Page eyebrow="SYSTEM" title="Sync history" subtitle="Provider synchronization runs and reconciliation results." action={<button className="btn btn-primary" disabled={!provider || syncing} onClick={() => void runSync()}><RefreshCw size={14}/> {syncing ? 'Syncing...' : 'Sync now'}</button>}>
     {message && <div className="detail-section" style={{marginBottom:14}}><div className="notice">{message}</div></div>}
-    {provider && <section className="panel" style={{marginBottom:18}}><div className="panel-head"><h2>Scheduled sync</h2><span className="badge neutral">{provider.sync_interval_minutes ? `Every ${provider.sync_interval_minutes} min` : 'Not scheduled'}</span></div><div className="detail-section"><div className="key-grid" style={{marginBottom:14}}><div className="key"><span>Current schedule</span><strong>{provider.sync_interval_minutes ? `Every ${provider.sync_interval_minutes} minutes` : 'Manual only'}</strong></div><div className="key"><span>Last sync</span><strong>{provider.last_sync_at ? new Date(provider.last_sync_at).toLocaleString() : 'Never'}</strong></div></div><div style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap'}}><label className="key"><span>Run every (minutes)</span><input className="select" type="number" min={1} max={10080} placeholder="e.g. 60" value={intervalValue} onChange={event => setIntervalValue(event.target.value)}/></label><button className="btn btn-primary" disabled={scheduleSaving || !intervalValue} onClick={() => void saveSchedule(Number(intervalValue))}><Clock3 size={14}/> {scheduleSaving ? 'Saving...' : 'Schedule sync'}</button>{provider.sync_interval_minutes && <button className="btn" disabled={scheduleSaving} onClick={() => void saveSchedule(null)}>Disable schedule</button>}</div>{scheduleMessage && <div className="notice" style={{marginTop:12}}>{scheduleMessage}</div>}</div></section>}
+    {provider && <section className="panel" style={{marginBottom:18}}><div className="panel-head"><h2>Scheduled sync</h2><span className="badge neutral">{provider.sync_interval_minutes ? `Every ${provider.sync_interval_minutes} min` : 'Not scheduled'}</span></div><div className="detail-section"><div className="key-grid" style={{marginBottom:14}}><div className="key"><span>Current schedule</span><strong>{provider.sync_interval_minutes ? `Every ${provider.sync_interval_minutes} minutes` : 'Manual only'}</strong></div><div className="key"><span>Last sync</span><strong>{provider.last_sync_at ? formatDateTime(provider.last_sync_at, timezone) : 'Never'}</strong></div></div><div style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap'}}><label className="key"><span>Run every (minutes)</span><input className="select" type="number" min={1} max={10080} placeholder="e.g. 60" value={intervalValue} onChange={event => setIntervalValue(event.target.value)}/></label><button className="btn btn-primary" disabled={scheduleSaving || !intervalValue} onClick={() => void saveSchedule(Number(intervalValue))}><Clock3 size={14}/> {scheduleSaving ? 'Saving...' : 'Schedule sync'}</button>{provider.sync_interval_minutes && <button className="btn" disabled={scheduleSaving} onClick={() => void saveSchedule(null)}>Disable schedule</button>}</div>{scheduleMessage && <div className="notice" style={{marginTop:12}}>{scheduleMessage}</div>}</div></section>}
     <div className="notice" style={{marginBottom:18}}>Looking for the self-activation time limit (PIM)? That's now under <strong>Policies</strong> in the Governance section.</div>
-    <TablePanel toolbar={<Toolbar placeholder="" filterLabel="All statuses" filterValue={statusFilter} onFilterChange={setStatusFilter} filterOptions={statusOptions}/>}>{providersLoading || loading ? <div className="empty">Loading sync history...</div> : !provider ? <div className="empty">No identity provider is configured.</div> : error ? <div className="empty">{error}</div> : !runs || runs.length === 0 ? <div className="empty">No sync runs yet.</div> : filteredRuns.length === 0 ? <div className="empty">No sync runs match this filter.</div> : <table><thead><tr><th>Started</th><th>Completed</th><th>Users</th><th>Groups</th><th>Roles</th><th>Errors</th><th>Status</th></tr></thead><tbody>{filteredRuns.map(run => <tr key={run.id}><td className="user-name">{new Date(run.started_at).toLocaleString()}</td><td>{run.completed_at ? new Date(run.completed_at).toLocaleString() : '—'}</td><td>{run.users_processed}</td><td>{run.groups_processed}</td><td>{run.roles_processed}</td><td>{run.errors_count}</td><td><StatusBadge status={run.status}/></td></tr>)}</tbody></table>}</TablePanel>
+    <TablePanel toolbar={<Toolbar placeholder="" filterLabel="All statuses" filterValue={statusFilter} onFilterChange={setStatusFilter} filterOptions={statusOptions}/>}>{providersLoading || loading ? <div className="empty">Loading sync history...</div> : !provider ? <div className="empty">No identity provider is configured.</div> : error ? <div className="empty">{error}</div> : !runs || runs.length === 0 ? <div className="empty">No sync runs yet.</div> : filteredRuns.length === 0 ? <div className="empty">No sync runs match this filter.</div> : <table><thead><tr><th>Started</th><th>Completed</th><th>Users</th><th>Groups</th><th>Roles</th><th>Errors</th><th>Status</th></tr></thead><tbody>{filteredRuns.map(run => <tr key={run.id}><td className="user-name">{formatDateTime(run.started_at, timezone)}</td><td>{run.completed_at ? formatDateTime(run.completed_at, timezone) : '—'}</td><td>{run.users_processed}</td><td>{run.groups_processed}</td><td>{run.roles_processed}</td><td>{run.errors_count}</td><td><StatusBadge status={run.status}/></td></tr>)}</tbody></table>}</TablePanel>
   </Page>;
 }
 function actionBadgeClass(action: string): string { return action === 'CREATE' || action === 'UPDATE' ? 'success' : action === 'DISABLE' ? 'warning' : action === 'ERROR' ? 'danger' : 'neutral'; }
 function OnboardingPage() {
   const auth = useAuth();
+  const timezone = useAppTimezone();
   const { data: imports, loading: importsLoading, error: importsError, reload: reloadImports } = useApiResource<ApiOnboardingImport[]>('/api/v1/onboarding/imports');
   const [fileName, setFileName] = useState('');
   const [csvContent, setCsvContent] = useState('');
@@ -1819,7 +1992,7 @@ function OnboardingPage() {
 
     <section className="panel" style={{marginBottom:18}}>
       <div className="panel-head"><h2>Past imports</h2></div>
-      <div className="table-wrap">{importsLoading ? <div className="empty">Loading...</div> : importsError ? <div className="empty">{importsError}</div> : !imports || imports.length === 0 ? <div className="empty">No imports yet.</div> : <table><thead><tr><th>Filename</th><th>Status</th><th>Rows</th><th>Created</th><th>Updated</th><th>Disabled</th><th>Errors</th><th>Uploaded</th></tr></thead><tbody>{imports.map(imp => <tr key={imp.id}><td className="user-name">{imp.filename}</td><td><StatusBadge status={imp.status}/></td><td>{imp.total_records}</td><td>{imp.created_count}</td><td>{imp.updated_count}</td><td>{imp.disabled_count}</td><td>{imp.failed_count}</td><td>{new Date(imp.created_at).toLocaleString()}</td></tr>)}</tbody></table>}</div>
+      <div className="table-wrap">{importsLoading ? <div className="empty">Loading...</div> : importsError ? <div className="empty">{importsError}</div> : !imports || imports.length === 0 ? <div className="empty">No imports yet.</div> : <table><thead><tr><th>Filename</th><th>Status</th><th>Rows</th><th>Created</th><th>Updated</th><th>Disabled</th><th>Errors</th><th>Uploaded</th></tr></thead><tbody>{imports.map(imp => <tr key={imp.id}><td className="user-name">{imp.filename}</td><td><StatusBadge status={imp.status}/></td><td>{imp.total_records}</td><td>{imp.created_count}</td><td>{imp.updated_count}</td><td>{imp.disabled_count}</td><td>{imp.failed_count}</td><td>{formatDateTime(imp.created_at, timezone)}</td></tr>)}</tbody></table>}</div>
     </section>
 
     <section className="panel">
@@ -1839,13 +2012,18 @@ function OnboardingPage() {
 }
 function Profile() {
   const auth = useAuth();
+  const timezone = useAppTimezone();
   const signedIn = Boolean(auth.account) || auth.breakglassActive;
   const { data: me, reload: reloadMe } = useApiResource<ApiCurrentUser>('/api/v1/me', signedIn);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshMessage, setRefreshMessage] = useState('');
   const handleRefresh = async () => {
     setRefreshing(true); setRefreshMessage('');
-    try { await auth.refreshAccess(); reloadMe(); setRefreshMessage('Refreshed — your roles and permissions are now up to date.'); }
+    try {
+      const ok = await auth.refreshAccess();
+      if (ok) { reloadMe(); setRefreshMessage('Refreshed — your roles and permissions are now up to date.'); }
+      else setRefreshMessage('Could not get a fresh session just now — your role may not have changed on the identity provider yet, or this needs a moment. Try again shortly, or sign out and back in if it persists.');
+    }
     catch { setRefreshMessage('Unable to refresh right now.'); }
     finally { setRefreshing(false); }
   };
@@ -1855,7 +2033,7 @@ function Profile() {
   const jobTitle = me?.jobTitle || (!auth.authConfigured ? currentUser.title : null);
   const roleLabel = auth.role === 'admin' ? 'AccessPilot.Admin' : 'AccessPilot.User';
   const providerLabel = auth.breakglassActive ? 'Break-Glass (emergency access)' : auth.authConfigured ? 'Microsoft Entra ID' : 'Local (mock/dev mode)';
-  const sessionStarted = signedIn && auth.sessionStartedAt ? new Date(auth.sessionStartedAt).toLocaleString() : '—';
+  const sessionStarted = signedIn && auth.sessionStartedAt ? formatDateTime(auth.sessionStartedAt, timezone) : '—';
   const initials = initialsFor(displayName || 'AccessPilot User');
   return <Page eyebrow="SELF-SERVICE" title="Profile" subtitle="Your AccessPilot identity and application role.">
     <div className="detail-layout">

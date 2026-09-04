@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from uuid import UUID
 
 import pytest
 import pytest_asyncio
@@ -8,9 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
-from app.models import AccessAssignment, AccessPackage, AccessPackageItem, Application, Group, IdentityProvider, Role, SodAdmin, User, UserGroup
+from app.models import AccessAssignment, AccessPackage, AccessPackageItem, Application, Group, IdentityProvider, Role, SodException, User, UserGroup
 from app.security.auth import AuthenticatedUser, require_authenticated_user
-from app.services.sod import is_sod_admin
+from app.services.sod import revoke_lapsed_sod_exceptions
 from app.workers.activation import activate_due_assignments
 
 
@@ -174,9 +175,10 @@ async def test_role_vs_application_role_conflict_is_detected(db_override):
 
 @pytest.mark.asyncio
 async def test_self_activation_of_an_application_role_is_blocked_by_a_group_conflict(db_override):
-    """Mirrors the normal (non-bypass) Admin/end-user flow: request the application role (lands ELIGIBLE, no
-    approver), then self-activate it — this is the enforcement point most real usage actually exercises, unlike
-    the bypass-create tests above."""
+    """Verifies activate_assignment()'s OWN independent SoD gate specifically — distinct from create_assignment's
+    now-stricter check_sod_at_creation gate (see test_admin_creation_of_a_conflicting_assignment_is_now_blocked_
+    immediately below). The eligible row is seeded directly at the DB layer, bypassing create_assignment
+    entirely, precisely so this test exercises only the activation-time gate, not the creation-time one."""
     ids = await _seed_directory_all_entity_types(db_override.factory)
     authenticate_as("AccessPilot.SoDAdmin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -190,17 +192,116 @@ async def test_self_activation_of_an_application_role_is_blocked_by_a_group_conf
 
         authenticate_as("AccessPilot.Admin")
         await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Side A group."})
-        eligible = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": str(ids["application_id"]), "app_role_external_id": "approle-approver", "assignment_type": "PERMANENT", "justification": "Requesting the conflicting application role."})
-        print("REQUEST APPLICATION ROLE (non-bypass)", eligible.status_code, eligible.json())
-        assert eligible.status_code == 201
-        assert eligible.json()["status"] == "ELIGIBLE"
-        assignment_id = eligible.json()["id"]
 
+    async with db_override.factory() as session:
+        eligible_assignment = AccessAssignment(provider_id=ids["provider_id"], user_id=ids["user_id"], resource_type="APPLICATION", resource_id=ids["application_id"], app_role_external_id="approle-approver", assignment_type="PERMANENT", status="ELIGIBLE")
+        session.add(eligible_assignment)
+        await session.commit()
+        assignment_id = str(eligible_assignment.id)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         authenticate_as("AccessPilot.User", subject="target-user")
         activation = await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 1, "justification": "Need it now."})
         print("SELF-ACTIVATE APPLICATION ROLE", activation.status_code, activation.json())
     assert activation.status_code == 409
     assert activation.json()["error"]["code"] == "SOD_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_admin_creation_of_a_conflicting_assignment_is_now_blocked_immediately(db_override):
+    """The new, stricter gate the user explicitly asked for: an admin-initiated assignment that would conflict
+    is blocked at creation time, not left to sit ELIGIBLE until someone tries to activate it. Self-service
+    package requests are deliberately NOT affected — see test_self_service_package_request_is_not_blocked_at_
+    creation_time below."""
+    ids = await _seed_directory_all_entity_types(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/sod/policies", json={
+            "name": "Group vs Application role (creation-time)",
+            "entities": [
+                {"conflict_side": "A", "entity_type": "GROUP", "entity_id": str(ids["group_a_id"])},
+                {"conflict_side": "B", "entity_type": "APPLICATION", "entity_id": str(ids["application_id"]), "app_role_external_id": "approle-approver"},
+            ],
+        })
+
+        authenticate_as("AccessPilot.Admin")
+        await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Side A group."})
+        blocked = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "APPLICATION", "resource_id": str(ids["application_id"]), "app_role_external_id": "approle-approver", "assignment_type": "PERMANENT", "justification": "Requesting the conflicting application role, no bypass."})
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "SOD_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_admin_creating_two_merely_eligible_conflicting_items_is_blocked(db_override):
+    """The exact gap the user reported: an ELIGIBLE-but-not-yet-activated item is still a standing grant that can
+    be turned real at any moment with no further review, so two conflicting items both sitting ELIGIBLE for the
+    same user must be caught at creation time too — not just an ACTIVE-vs-ACTIVE conflict. Side A here is never
+    activated or bypassed; it lands ordinary ELIGIBLE, and that alone must be enough to block Side B."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+
+        authenticate_as("AccessPilot.Admin")
+        side_a = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "justification": "Side A, no bypass, no approver."})
+        assert side_a.status_code == 201
+        assert side_a.json()["status"] == "ELIGIBLE"
+
+        blocked = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_b_id"]), "assignment_type": "PERMANENT", "justification": "Side B, also no bypass — still must be blocked."})
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "SOD_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_violations_scan_finds_a_conflict_between_two_merely_eligible_items(db_override):
+    """The detective-scan counterpart of the test above — two ELIGIBLE (never activated) conflicting items for
+    the same user must show up in the live violations scan too, not just an ACTIVE-vs-ACTIVE pair."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+
+        authenticate_as("AccessPilot.Admin")
+        side_a = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "justification": "Side A, no bypass."})
+        assert side_a.json()["status"] == "ELIGIBLE"
+        side_b = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_b_id"]), "assignment_type": "PERMANENT", "override_sod": True, "justification": "Side B, no bypass, admin override to seed the eligible-vs-eligible state."})
+        assert side_b.json()["status"] == "ELIGIBLE"
+
+        authenticate_as("AccessPilot.SoDAdmin")
+        violations = await client.get("/api/v1/sod/violations")
+    assert violations.status_code == 200
+    body = violations.json()
+    assert len(body) == 1
+    assert body[0]["user_id"] == str(ids["user_id"])
+    assert {h["resource_id"] for h in body[0]["side_a_holdings"]} == {str(ids["group_a_id"])}
+    assert {h["resource_id"] for h in body[0]["side_b_holdings"]} == {str(ids["group_b_id"])}
+
+
+@pytest.mark.asyncio
+async def test_self_service_package_request_is_not_blocked_at_creation_time(db_override):
+    """The flip side of the previous test: check_sod_at_creation is deliberately False for request_package(), so
+    a self-service request for a doomed-to-conflict item still lands ELIGIBLE (as it always has) — SoD is only
+    enforced when the user later tries to self-activate it. Admin-initiated grants are the only thing made
+    stricter by this feature."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+
+        authenticate_as("AccessPilot.Admin")
+        await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Side A."})
+
+        package = await client.post("/api/v1/packages", json={"name": "Side B Package", "items": [{"resource_type": "GROUP", "resource_id": str(ids["group_b_id"])}]})
+        package_id = package.json()["id"]
+        eligibility = await client.put(f"/api/v1/packages/{package_id}/eligibility", json={"principals": [{"principal_type": "USER", "principal_id": str(ids["user_id"])}]})
+        assert eligibility.status_code == 200
+
+        authenticate_as("AccessPilot.User", subject="target-user")
+        requested = await client.post(f"/api/v1/packages/{package_id}/request", json={"assignment_type": "PERMANENT", "justification": "Requesting side B for myself."})
+    assert requested.status_code == 201
+    body = requested.json()
+    assert body["results"][0]["status"] == "CREATED"
+    assert body["results"][0]["assignment"]["status"] == "ELIGIBLE"
 
 
 async def _seed_directory_entra(factory):
@@ -387,6 +488,50 @@ async def test_sodadmin_can_create_a_policy_but_plain_admin_cannot(db_override):
 
 
 @pytest.mark.asyncio
+async def test_deleting_a_policy_with_no_history_removes_it_entirely(db_override):
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+        policy_id = created.json()["id"]
+
+        deleted = await client.delete(f"/api/v1/sod/policies/{policy_id}")
+        assert deleted.status_code == 200
+        assert deleted.json() == {"deleted": True, "id": policy_id}
+
+        listing = await client.get("/api/v1/sod/policies")
+    assert all(p["id"] != policy_id for p in listing.json())
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_policy_with_exception_history_disables_it_instead(db_override):
+    """Real bug caught live: sod_exceptions/sod_notifications/sod_exception_requests are all deliberately
+    permanent, full-history tables with a real FK to sod_policy_id and no cascade — a policy that has ever had
+    an exception granted (or a notification fired) against it can never be hard-deleted at all. Confirmed against
+    the real Postgres FK constraint (SQLite's test DB doesn't enforce it, so this needs an explicit test here to
+    stay caught)."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+        policy_id = created.json()["id"]
+        future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+        exception = await client.post("/api/v1/sod/exceptions", json={"sod_policy_id": policy_id, "user_id": str(ids["user_id"]), "justification": "Has real history now.", "expires_at": future})
+        assert exception.status_code == 201
+
+        deleted = await client.delete(f"/api/v1/sod/policies/{policy_id}")
+        assert deleted.status_code == 200
+        body = deleted.json()
+        assert body["id"] == policy_id
+        assert body["status"] == "DISABLED"
+
+        listing = await client.get("/api/v1/sod/policies")
+    matching = [p for p in listing.json() if p["id"] == policy_id]
+    assert len(matching) == 1
+    assert matching[0]["status"] == "DISABLED"
+
+
+@pytest.mark.asyncio
 async def test_creating_a_policy_dedupes_a_repeated_entity_instead_of_erroring(db_override):
     ids = await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.SoDAdmin")
@@ -430,15 +575,15 @@ async def test_updating_a_policy_to_put_the_same_entity_on_both_sides_is_also_re
 
 
 @pytest.mark.asyncio
-async def test_admin_can_read_violations_and_manage_roster_but_not_rules(db_override):
+async def test_admin_can_read_violations_but_not_manage_rules(db_override):
+    """AccessPilot.SoDAdmin is sourced exclusively from a real Entra App Role now — there is deliberately no
+    in-app path for a plain Admin to grant or manage it at all (see security/auth.py's PERMISSIONS comment), on
+    top of the pre-existing restriction that an Admin can never edit SoD rules directly either."""
     ids = await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         violations = await client.get("/api/v1/sod/violations")
         assert violations.status_code == 200
-        roster = await client.post("/api/v1/sod/admins", json={"user_id": str(ids["user_id"])})
-        assert roster.status_code == 201
-        assert roster.json()["user_display_name"] == "Target User"
         manage_denied = await client.patch("/api/v1/sod/policies/00000000-0000-0000-0000-000000000000", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
         assert manage_denied.status_code == 403
 
@@ -465,6 +610,9 @@ async def test_bypass_create_is_blocked_by_an_active_conflict_and_can_be_overrid
 
 @pytest.mark.asyncio
 async def test_self_activation_is_blocked_by_a_conflict_but_admin_override_succeeds(db_override):
+    """Eligible row seeded directly at the DB layer — going through POST /assignments would now be blocked at
+    creation time (see test_admin_creation_of_a_conflicting_assignment_is_now_blocked_immediately), which is a
+    different enforcement point than the one this test targets (activate_assignment's own gate + override)."""
     ids = await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.SoDAdmin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -472,10 +620,14 @@ async def test_self_activation_is_blocked_by_a_conflict_but_admin_override_succe
 
         authenticate_as("AccessPilot.Admin")
         await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Initiator access."})
-        eligible = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_b_id"]), "assignment_type": "PERMANENT", "justification": "Requesting approver access too."})
-        assert eligible.status_code == 201
-        assignment_id = eligible.json()["id"]
 
+    async with db_override.factory() as session:
+        eligible_assignment = AccessAssignment(provider_id=ids["provider_id"], user_id=ids["user_id"], resource_type="GROUP", resource_id=ids["group_b_id"], assignment_type="PERMANENT", status="ELIGIBLE")
+        session.add(eligible_assignment)
+        await session.commit()
+        assignment_id = str(eligible_assignment.id)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         authenticate_as("AccessPilot.User", subject="target-user")
         self_activate = await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 1, "justification": "Need it now."})
         assert self_activate.status_code == 409
@@ -485,6 +637,67 @@ async def test_self_activation_is_blocked_by_a_conflict_but_admin_override_succe
         admin_override = await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 1, "justification": "Approved exception.", "override_sod": True})
         assert admin_override.status_code == 200
         assert admin_override.json()["status"] == "ACTIVE"
+
+
+@pytest.mark.asyncio
+async def test_cooldown_blocks_the_deactivate_then_activate_opposite_side_cycle(db_override):
+    """The anti-gaming fix: without a cooldown, a user could deactivate side A and immediately activate side B
+    (no live conflict at that instant), then flip back later — never simultaneously holding both, but never
+    really giving up either. With cooldown_enabled, a recent ASSIGNMENT_REVOKED/DEACTIVATED audit entry for the
+    opposite side within the window blocks the activation just as if it were still held."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+        settings_update = await client.patch("/api/v1/sod/notification-settings", json={"notify_on_new_violation": True, "notify_on_exception_expiring": True, "exception_expiring_warning_days": 7, "notify_on_exception_requested": True, "cooldown_enabled": True, "cooldown_hours": 24})
+        assert settings_update.status_code == 200
+
+        authenticate_as("AccessPilot.Admin")
+        granted = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Initiator access."})
+        assignment_id = granted.json()["id"]
+        revoked = await client.post(f"/api/v1/assignments/{assignment_id}/revoke", json={"justification": "Rotating off initiator duties."})
+        assert revoked.status_code == 200
+
+    async with db_override.factory() as session:
+        eligible_assignment = AccessAssignment(provider_id=ids["provider_id"], user_id=ids["user_id"], resource_type="GROUP", resource_id=ids["group_b_id"], assignment_type="PERMANENT", status="ELIGIBLE")
+        session.add(eligible_assignment)
+        await session.commit()
+        eligible_id = str(eligible_assignment.id)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        authenticate_as("AccessPilot.User", subject="target-user")
+        self_activate = await client.post(f"/api/v1/assignments/{eligible_id}/activate", json={"duration_hours": 1, "justification": "Need it now."})
+    assert self_activate.status_code == 409
+    assert self_activate.json()["error"]["code"] == "SOD_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_cooldown_disabled_by_default_does_not_block_the_same_cycle(db_override):
+    """Same deactivate-then-activate-opposite-side sequence as the cooldown test above, but with cooldown left at
+    its default (disabled) — proves the block above is genuinely caused by the cooldown feature, not some other
+    side effect of revoking the first assignment."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+
+        authenticate_as("AccessPilot.Admin")
+        granted = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Initiator access."})
+        assignment_id = granted.json()["id"]
+        revoked = await client.post(f"/api/v1/assignments/{assignment_id}/revoke", json={"justification": "Rotating off initiator duties."})
+        assert revoked.status_code == 200
+
+    async with db_override.factory() as session:
+        eligible_assignment = AccessAssignment(provider_id=ids["provider_id"], user_id=ids["user_id"], resource_type="GROUP", resource_id=ids["group_b_id"], assignment_type="PERMANENT", status="ELIGIBLE")
+        session.add(eligible_assignment)
+        await session.commit()
+        eligible_id = str(eligible_assignment.id)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        authenticate_as("AccessPilot.User", subject="target-user")
+        self_activate = await client.post(f"/api/v1/assignments/{eligible_id}/activate", json={"duration_hours": 1, "justification": "Need it now."})
+    assert self_activate.status_code == 200
+    assert self_activate.json()["status"] == "ACTIVE"
 
 
 @pytest.mark.asyncio
@@ -606,15 +819,15 @@ async def test_dangling_package_reference_resolves_as_unresolved_not_an_error(db
 
 
 @pytest.mark.asyncio
-async def test_is_sod_admin_reflects_the_roster(db_override):
+async def test_a_real_entra_role_grants_sod_admin_with_no_local_grant_needed(db_override):
+    """AccessPilot.SoDAdmin is recognized purely from the token's own roles claim now — authenticate_as(...)
+    simulates exactly that (a real Entra app role assignment showing up in the JWT), with no local table
+    involved at all. This is the regression test replacing the old roster-driven is_sod_admin() check."""
     ids = await _seed_directory(db_override.factory)
-    async with db_override.factory() as session:
-        assert await is_sod_admin(session, "target-user") is False
-        session.add(SodAdmin(user_id=ids["user_id"]))
-        await session.commit()
-    async with db_override.factory() as session:
-        assert await is_sod_admin(session, "target-user") is True
-        assert await is_sod_admin(session, "breakglass:unrelated") is False
+    authenticate_as("AccessPilot.SoDAdmin", subject="target-user")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+    assert response.status_code == 201
 
 
 @pytest.mark.asyncio
@@ -797,6 +1010,306 @@ async def test_revoking_an_exception_makes_the_next_grant_blocked_again(db_overr
 
 
 @pytest.mark.asyncio
+async def test_disabling_exception_requested_notifications_stops_generating_them(db_override):
+    """The dedicated toggle for the EXCEPTION_REQUESTED notification — distinct from notify_on_new_violation,
+    since this notification is fired eagerly at request time, not by the reconciliation pass. Turning it off
+    must not affect the request itself (still created, still gates a retry the same way) — only the notification
+    that would have pinged the SoDAdmin about it."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        policy = await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+        policy_id = policy.json()["id"]
+        settings_update = await client.patch("/api/v1/sod/notification-settings", json={"notify_on_new_violation": True, "notify_on_exception_expiring": True, "exception_expiring_warning_days": 7, "notify_on_exception_requested": False, "cooldown_enabled": False, "cooldown_hours": 24})
+        assert settings_update.status_code == 200
+        assert settings_update.json()["notify_on_exception_requested"] is False
+
+        authenticate_as("AccessPilot.Admin")
+        await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Side A."})
+        request_response = await client.post("/api/v1/sod/exception-requests", json={"sod_policy_id": policy_id, "user_id": str(ids["user_id"]), "justification": "Asking anyway, notifications muted.", "resource_type": "GROUP", "resource_id": str(ids["group_b_id"])})
+        assert request_response.status_code == 201
+        assert request_response.json()["status"] == "PENDING"
+
+        authenticate_as("AccessPilot.SoDAdmin")
+        notifications = await client.get("/api/v1/sod/notifications")
+    assert notifications.status_code == 200
+    assert all(n["notification_type"] != "EXCEPTION_REQUESTED" for n in notifications.json())
+
+
+@pytest.mark.asyncio
+async def test_exception_request_workflow_grant_lets_a_retry_succeed(db_override):
+    """The full bridge the user asked for: an admin's blocked assignment attempt -> a request the SoDAdmin sees
+    as a notification -> a grant -> a real exception the admin can now use to retry the same grant. The grant
+    deliberately does NOT auto-replay the original assignment — the admin must retry it themselves."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        policy = await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+        policy_id = policy.json()["id"]
+
+        authenticate_as("AccessPilot.Admin")
+        first = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Side A."})
+        assert first.status_code == 201
+        blocked = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_b_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Side B, expect blocked."})
+        assert blocked.status_code == 409
+
+        request_response = await client.post("/api/v1/sod/exception-requests", json={"sod_policy_id": policy_id, "user_id": str(ids["user_id"]), "justification": "Business needs both roles for the Q3 close.", "resource_type": "GROUP", "resource_id": str(ids["group_b_id"])})
+        assert request_response.status_code == 201
+        request_body = request_response.json()
+        assert request_body["status"] == "PENDING"
+        request_id = request_body["id"]
+
+        authenticate_as("AccessPilot.SoDAdmin")
+        notifications = await client.get("/api/v1/sod/notifications")
+        matching = [n for n in notifications.json() if n["notification_type"] == "EXCEPTION_REQUESTED" and n["sod_policy_id"] == policy_id]
+        assert len(matching) == 1
+        assert matching[0]["resolved_at"] is None
+
+        future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+        granted = await client.post(f"/api/v1/sod/exception-requests/{request_id}/grant", json={"expires_at": future})
+        assert granted.status_code == 200
+        granted_body = granted.json()
+        assert granted_body["status"] == "GRANTED"
+        assert granted_body["sod_exception_id"] is not None
+
+        notifications_after = await client.get("/api/v1/sod/notifications")
+        matching_after = [n for n in notifications_after.json() if n["notification_type"] == "EXCEPTION_REQUESTED" and n["sod_policy_id"] == policy_id]
+        assert len(matching_after) == 1
+        assert matching_after[0]["resolved_at"] is not None
+
+        authenticate_as("AccessPilot.Admin")
+        retried = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_b_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Side B, retrying now that an exception was granted."})
+        assert retried.status_code == 201
+
+        # Closes the loop back to the requesting admin specifically — the general, per-user notification system
+        # (backend/app/services/notifications.py), not the shared SoD-only log above.
+        general_notifications = await client.get("/api/v1/notifications")
+    matching_general = [n for n in general_notifications.json() if n["notification_type"] == "EXCEPTION_REQUEST_GRANTED"]
+    assert len(matching_general) == 1
+    assert "granted" in matching_general[0]["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_granting_an_exception_request_makes_the_user_eligible_without_a_retry(db_override):
+    """The user's explicit ask: granting must actually create the ELIGIBLE assignment for the target user, not
+    just clear the way for the admin to redo it manually."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        policy = await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+        policy_id = policy.json()["id"]
+
+        authenticate_as("AccessPilot.Admin")
+        await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Side A."})
+        blocked = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_b_id"]), "assignment_type": "PERMANENT", "justification": "Side B, expect blocked."})
+        assert blocked.status_code == 409
+
+        request_response = await client.post("/api/v1/sod/exception-requests", json={"sod_policy_id": policy_id, "user_id": str(ids["user_id"]), "justification": "Business need.", "resource_type": "GROUP", "resource_id": str(ids["group_b_id"])})
+        request_id = request_response.json()["id"]
+
+        authenticate_as("AccessPilot.SoDAdmin")
+        future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+        granted = await client.post(f"/api/v1/sod/exception-requests/{request_id}/grant", json={"expires_at": future})
+        assert granted.status_code == 200
+
+        # No retry by the admin at all — granting alone must be enough.
+        authenticate_as("AccessPilot.Admin")
+        assignments = await client.get("/api/v1/assignments")
+        general_notifications = await client.get("/api/v1/notifications")
+    matching = [a for a in assignments.json() if a["user_id"] == str(ids["user_id"]) and a["resource_id"] == str(ids["group_b_id"]) and a["status"] == "ELIGIBLE"]
+    assert len(matching) == 1
+    matching_notif = [n for n in general_notifications.json() if n["notification_type"] == "EXCEPTION_REQUEST_GRANTED"]
+    assert "now has eligible access" in matching_notif[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_granting_an_exception_request_with_an_approver_routes_through_approval(db_override):
+    """The user's specific follow-up ask: if the originally-blocked assignment had an approver configured,
+    granting must route it through that same approver — not skip straight to ELIGIBLE — and only the approver's
+    own decision makes it eligible for the end user."""
+    ids = await _seed_directory(db_override.factory)
+    async with db_override.factory() as session:
+        approver = User(provider_id=ids["provider_id"], external_id="approver-oid", email="approver@x.com", display_name="Approver User", status="ACTIVE")
+        session.add(approver)
+        await session.commit()
+        approver_id = approver.id
+
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        policy = await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+        policy_id = policy.json()["id"]
+
+        authenticate_as("AccessPilot.Admin")
+        await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Side A."})
+        blocked = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_b_id"]), "assignment_type": "PERMANENT", "approver_id": str(approver_id), "justification": "Side B, needs approval, expect blocked."})
+        assert blocked.status_code == 409
+
+        request_response = await client.post("/api/v1/sod/exception-requests", json={"sod_policy_id": policy_id, "user_id": str(ids["user_id"]), "justification": "Business need.", "resource_type": "GROUP", "resource_id": str(ids["group_b_id"]), "approver_id": str(approver_id)})
+        assert request_response.status_code == 201
+        request_id = request_response.json()["id"]
+
+        authenticate_as("AccessPilot.SoDAdmin")
+        future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+        granted = await client.post(f"/api/v1/sod/exception-requests/{request_id}/grant", json={"expires_at": future})
+        assert granted.status_code == 200
+
+        # Nothing should be ELIGIBLE yet — it must be sitting PENDING_APPROVAL for the configured approver.
+        authenticate_as("AccessPilot.Admin")
+        assignments_after_grant = await client.get("/api/v1/assignments")
+        pending = [a for a in assignments_after_grant.json() if a["user_id"] == str(ids["user_id"]) and a["resource_id"] == str(ids["group_b_id"])]
+        assert len(pending) == 1
+        assert pending[0]["status"] == "PENDING_APPROVAL"
+        assignment_id = pending[0]["id"]
+
+        general_notifications = await client.get("/api/v1/notifications")
+        matching = [n for n in general_notifications.json() if n["notification_type"] == "EXCEPTION_REQUEST_GRANTED"]
+        assert len(matching) == 1
+        assert "pending" in matching[0]["message"].lower()
+
+        # Only the approver's own decision makes it eligible for the end user.
+        authenticate_as("AccessPilot.User", subject="approver-oid")
+        approved = await client.post(f"/api/v1/assignments/{assignment_id}/approve", json={"justification": "Looks fine."})
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "ELIGIBLE"
+
+
+@pytest.mark.asyncio
+async def test_granting_only_one_of_two_conflicting_policies_does_not_yet_create_the_assignment(db_override):
+    """Real edge case: a single blocked attempt can be caught by more than one policy at once (the frontend files
+    one exception request per conflicting policy). Granting only one must not create the assignment while another,
+    ungranted conflict still applies — the requester's notification must say so, not falsely claim success."""
+    ids = await _seed_directory(db_override.factory)
+    async with db_override.factory() as session:
+        group_c = Group(provider_id=ids["provider_id"], external_id="gc", name="Third Group", status="ACTIVE", is_privileged=False)
+        session.add(group_c)
+        await session.commit()
+        group_c_id = group_c.id
+
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        policy_1 = await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"], name="Policy One"))
+        policy_1_id = policy_1.json()["id"]
+        policy_2 = await client.post("/api/v1/sod/policies", json={
+            "name": "Policy Two",
+            "entities": [
+                {"conflict_side": "A", "entity_type": "GROUP", "entity_id": str(group_c_id)},
+                {"conflict_side": "B", "entity_type": "GROUP", "entity_id": str(ids["group_b_id"])},
+            ],
+        })
+        policy_2_id = policy_2.json()["id"]
+
+        authenticate_as("AccessPilot.Admin")
+        await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Side A of policy one."})
+        await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(group_c_id), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Side A of policy two."})
+
+        blocked = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_b_id"]), "assignment_type": "PERMANENT", "justification": "Conflicts with both."})
+        assert blocked.status_code == 409
+        assert len(blocked.json()["error"]["details"]["conflicts"]) == 2
+
+        request_1 = await client.post("/api/v1/sod/exception-requests", json={"sod_policy_id": policy_1_id, "user_id": str(ids["user_id"]), "justification": "For policy one.", "resource_type": "GROUP", "resource_id": str(ids["group_b_id"])})
+        request_1_id = request_1.json()["id"]
+        request_2 = await client.post("/api/v1/sod/exception-requests", json={"sod_policy_id": policy_2_id, "user_id": str(ids["user_id"]), "justification": "For policy two.", "resource_type": "GROUP", "resource_id": str(ids["group_b_id"])})
+        request_2_id = request_2.json()["id"]
+
+        authenticate_as("AccessPilot.SoDAdmin")
+        future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+        grant_1 = await client.post(f"/api/v1/sod/exception-requests/{request_1_id}/grant", json={"expires_at": future})
+        assert grant_1.status_code == 200
+
+        authenticate_as("AccessPilot.Admin")
+        assignments_after_one = await client.get("/api/v1/assignments")
+        still_missing = [a for a in assignments_after_one.json() if a["user_id"] == str(ids["user_id"]) and a["resource_id"] == str(ids["group_b_id"])]
+        assert len(still_missing) == 0
+        general_notifications = await client.get("/api/v1/notifications")
+        matching_partial = [n for n in general_notifications.json() if n["notification_type"] == "EXCEPTION_REQUEST_GRANTED"]
+        assert "still blocked by another" in matching_partial[0]["message"].lower()
+
+        authenticate_as("AccessPilot.SoDAdmin")
+        grant_2 = await client.post(f"/api/v1/sod/exception-requests/{request_2_id}/grant", json={"expires_at": future})
+        assert grant_2.status_code == 200
+
+        authenticate_as("AccessPilot.Admin")
+        assignments_after_both = await client.get("/api/v1/assignments")
+    matching_final = [a for a in assignments_after_both.json() if a["user_id"] == str(ids["user_id"]) and a["resource_id"] == str(ids["group_b_id"]) and a["status"] == "ELIGIBLE"]
+    assert len(matching_final) == 1
+
+
+@pytest.mark.asyncio
+async def test_denying_an_exception_request_notifies_the_requesting_admin(db_override):
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        policy = await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+        policy_id = policy.json()["id"]
+
+        authenticate_as("AccessPilot.Admin")
+        await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Side A."})
+        request_response = await client.post("/api/v1/sod/exception-requests", json={"sod_policy_id": policy_id, "user_id": str(ids["user_id"]), "justification": "Asking anyway.", "resource_type": "GROUP", "resource_id": str(ids["group_b_id"])})
+        request_id = request_response.json()["id"]
+
+        authenticate_as("AccessPilot.SoDAdmin")
+        denied = await client.post(f"/api/v1/sod/exception-requests/{request_id}/deny", json={"reason": "Not justified."})
+        assert denied.status_code == 200
+
+        authenticate_as("AccessPilot.Admin")
+        general_notifications = await client.get("/api/v1/notifications")
+    matching = [n for n in general_notifications.json() if n["notification_type"] == "EXCEPTION_REQUEST_DENIED"]
+    assert len(matching) == 1
+    assert "not justified" in matching[0]["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_denying_an_exception_request_leaves_the_grant_blocked(db_override):
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        policy = await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+        policy_id = policy.json()["id"]
+
+        authenticate_as("AccessPilot.Admin")
+        await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Side A."})
+        request_response = await client.post("/api/v1/sod/exception-requests", json={"sod_policy_id": policy_id, "user_id": str(ids["user_id"]), "justification": "Asking anyway.", "resource_type": "GROUP", "resource_id": str(ids["group_b_id"])})
+        request_id = request_response.json()["id"]
+
+        authenticate_as("AccessPilot.SoDAdmin")
+        denied = await client.post(f"/api/v1/sod/exception-requests/{request_id}/deny", json={"reason": "Not justified — same person cannot hold both roles."})
+        assert denied.status_code == 200
+        denied_body = denied.json()
+        assert denied_body["status"] == "DENIED"
+        assert denied_body["sod_exception_id"] is None
+
+        notifications = await client.get("/api/v1/sod/notifications")
+        matching = [n for n in notifications.json() if n["notification_type"] == "EXCEPTION_REQUESTED" and n["sod_policy_id"] == policy_id]
+        assert len(matching) == 1
+        assert matching[0]["resolved_at"] is not None
+
+        authenticate_as("AccessPilot.Admin")
+        still_blocked = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_b_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Side B, still blocked after denial."})
+    assert still_blocked.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_plain_admin_cannot_grant_or_deny_an_exception_request(db_override):
+    """SOD_MANAGE-gated, same reasoning as granting a direct exception — an Admin deciding their own exception
+    request would defeat the whole point of routing it through the SoDAdmin."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        policy = await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+        policy_id = policy.json()["id"]
+
+        authenticate_as("AccessPilot.Admin")
+        request_response = await client.post("/api/v1/sod/exception-requests", json={"sod_policy_id": policy_id, "user_id": str(ids["user_id"]), "justification": "Trying to self-serve.", "resource_type": "GROUP", "resource_id": str(ids["group_b_id"])})
+        request_id = request_response.json()["id"]
+
+        future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+        grant_denied = await client.post(f"/api/v1/sod/exception-requests/{request_id}/grant", json={"expires_at": future})
+        assert grant_denied.status_code == 403
+        deny_denied = await client.post(f"/api/v1/sod/exception-requests/{request_id}/deny", json={"reason": "Trying to self-serve."})
+    assert deny_denied.status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_violations_scan_flags_an_excepted_conflict_instead_of_hiding_it(db_override):
     ids = await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.SoDAdmin")
@@ -892,7 +1405,7 @@ async def test_disabling_new_violation_notifications_stops_generating_them(db_ov
     authenticate_as("AccessPilot.SoDAdmin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
-        settings_update = await client.patch("/api/v1/sod/notification-settings", json={"notify_on_new_violation": False, "notify_on_exception_expiring": True, "exception_expiring_warning_days": 7})
+        settings_update = await client.patch("/api/v1/sod/notification-settings", json={"notify_on_new_violation": False, "notify_on_exception_expiring": True, "exception_expiring_warning_days": 7, "notify_on_exception_requested": True, "cooldown_enabled": False, "cooldown_hours": 24})
         assert settings_update.status_code == 200
         assert settings_update.json()["notify_on_new_violation"] is False
 
@@ -910,7 +1423,7 @@ async def test_disabling_new_violation_notifications_stops_generating_them(db_ov
 async def test_plain_admin_cannot_change_notification_settings(db_override):
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.patch("/api/v1/sod/notification-settings", json={"notify_on_new_violation": False, "notify_on_exception_expiring": False, "exception_expiring_warning_days": 3})
+        response = await client.patch("/api/v1/sod/notification-settings", json={"notify_on_new_violation": False, "notify_on_exception_expiring": False, "exception_expiring_warning_days": 3, "notify_on_exception_requested": True, "cooldown_enabled": False, "cooldown_hours": 24})
     assert response.status_code == 403
 
 
@@ -951,6 +1464,63 @@ async def test_revoking_an_exception_resolves_its_expiring_notification(db_overr
 
 
 @pytest.mark.asyncio
+async def test_an_expired_but_still_violating_exception_generates_a_notification(db_override):
+    """The user's report: setting a time period on an exception did nothing once it lapsed — the underlying real
+    access was never automatically revoked (deliberately — an exception is scoped to (policy, user), not a
+    specific resource, so there's nothing a general worker could safely revoke on its own) but nothing told
+    anyone either. This is the notify-only fix: EXCEPTION_EXPIRED fires once expires_at has passed, nothing has
+    replaced it, and the conflict it was covering is still real."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        policy = await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+        policy_id = policy.json()["id"]
+
+    async with db_override.factory() as session:
+        session.add(AccessAssignment(provider_id=ids["provider_id"], user_id=ids["user_id"], resource_type="GROUP", resource_id=ids["group_a_id"], assignment_type="PERMANENT", status="ACTIVE"))
+        session.add(AccessAssignment(provider_id=ids["provider_id"], user_id=ids["user_id"], resource_type="GROUP", resource_id=ids["group_b_id"], assignment_type="PERMANENT", status="ACTIVE"))
+        past = datetime.now(timezone.utc) - timedelta(days=1)
+        session.add(SodException(sod_policy_id=UUID(policy_id), user_id=ids["user_id"], justification="Expired already.", expires_at=past))
+        await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        notifications = await client.get("/api/v1/sod/notifications")
+    matching = [n for n in notifications.json() if n["notification_type"] == "EXCEPTION_EXPIRED"]
+    assert len(matching) == 1
+    assert matching[0]["resolved_at"] is None
+    assert "wasn't automatically revoked" in matching[0]["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_exception_resolves_the_expired_notification_for_the_old_one(db_override):
+    """If a new exception is granted covering the same policy/user pair after the old one expired, the old
+    EXCEPTION_EXPIRED notification must resolve — a fresh exception now covers it, nothing left to flag."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        policy = await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+        policy_id = policy.json()["id"]
+
+        async with db_override.factory() as session:
+            session.add(AccessAssignment(provider_id=ids["provider_id"], user_id=ids["user_id"], resource_type="GROUP", resource_id=ids["group_a_id"], assignment_type="PERMANENT", status="ACTIVE"))
+            session.add(AccessAssignment(provider_id=ids["provider_id"], user_id=ids["user_id"], resource_type="GROUP", resource_id=ids["group_b_id"], assignment_type="PERMANENT", status="ACTIVE"))
+            past = datetime.now(timezone.utc) - timedelta(days=1)
+            session.add(SodException(sod_policy_id=UUID(policy_id), user_id=ids["user_id"], justification="Expired already.", expires_at=past))
+            await session.commit()
+
+        first_check = await client.get("/api/v1/sod/notifications")
+        assert len([n for n in first_check.json() if n["notification_type"] == "EXCEPTION_EXPIRED"]) == 1
+
+        future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+        fresh = await client.post("/api/v1/sod/exceptions", json={"sod_policy_id": policy_id, "user_id": str(ids["user_id"]), "justification": "Renewed acceptance.", "expires_at": future})
+        assert fresh.status_code == 201
+
+        second_check = await client.get("/api/v1/sod/notifications")
+    still_open = [n for n in second_check.json() if n["notification_type"] == "EXCEPTION_EXPIRED" and n["resolved_at"] is None]
+    assert len(still_open) == 0
+
+
+@pytest.mark.asyncio
 async def test_marking_a_notification_read_and_mark_all_read(db_override):
     ids = await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.SoDAdmin")
@@ -971,3 +1541,271 @@ async def test_marking_a_notification_read_and_mark_all_read(db_override):
         assert mark_all.status_code == 204
         after_all = await client.get("/api/v1/sod/notifications")
     assert all(n["read_at"] is not None for n in after_all.json())
+
+
+@pytest.mark.asyncio
+async def test_revoking_an_exception_also_revokes_the_eligible_assignment_it_covered(db_override):
+    """The user's explicit follow-up ask after testing the grant/revoke flow themselves: "revoke means revoke
+    from eligible and active both, it doesn't matter" — revoking the risk acceptance must also end the specific
+    access it was granted to cover, not just block future grants while the one already let through keeps
+    sitting there untouched."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        policy = await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+        policy_id = policy.json()["id"]
+
+        authenticate_as("AccessPilot.Admin")
+        await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Side A."})
+        blocked = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_b_id"]), "assignment_type": "PERMANENT", "justification": "Side B, expect blocked."})
+        assert blocked.status_code == 409
+
+        request_response = await client.post("/api/v1/sod/exception-requests", json={"sod_policy_id": policy_id, "user_id": str(ids["user_id"]), "justification": "Business need.", "resource_type": "GROUP", "resource_id": str(ids["group_b_id"])})
+        request_id = request_response.json()["id"]
+
+        authenticate_as("AccessPilot.SoDAdmin")
+        future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+        granted = await client.post(f"/api/v1/sod/exception-requests/{request_id}/grant", json={"expires_at": future})
+        exception_id = granted.json()["sod_exception_id"]
+
+        authenticate_as("AccessPilot.Admin")
+        assignments = await client.get("/api/v1/assignments")
+        eligible = next(a for a in assignments.json() if a["user_id"] == str(ids["user_id"]) and a["resource_id"] == str(ids["group_b_id"]))
+        assert eligible["status"] == "ELIGIBLE"
+
+        authenticate_as("AccessPilot.SoDAdmin")
+        revoke = await client.delete(f"/api/v1/sod/exceptions/{exception_id}")
+        assert revoke.status_code == 204
+
+        authenticate_as("AccessPilot.Admin")
+        after = await client.get("/api/v1/assignments")
+        revoked = next(a for a in after.json() if a["id"] == eligible["id"])
+        assert revoked["status"] == "REVOKED"
+
+        authenticate_as("AccessPilot.User", subject="target-user")
+        target_notifications = await client.get("/api/v1/notifications")
+    matching = [n for n in target_notifications.json() if n["notification_type"] == "SOD_EXCEPTION_LAPSED"]
+    assert len(matching) == 1
+    assert "was revoked" in matching[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_revoking_an_exception_revokes_the_right_assignment_not_an_old_unrelated_one(db_override):
+    """Real bug found live testing this feature: an old, wholly unrelated ELIGIBLE assignment for the exact same
+    (user, resource) target — left over from before this policy or exception ever existed — could be picked
+    instead of the one this exception actually covers, because the original match had no ordering/tiebreaker at
+    all. Confirmed live against real Postgres: a leftover row from weeks earlier got silently revoked instead of
+    the actually-relevant one. _find_exception_granted_assignment now filters to assignments created at/after the
+    exception request (with a small grace window for ordinary clock jitter between the two writes), so the old
+    row must be left completely untouched and the new one revoked."""
+    ids = await _seed_directory(db_override.factory)
+    async with db_override.factory() as session:
+        # created_at is set explicitly, days in the past, rather than left to just-now — a test run creates
+        # everything within milliseconds of real wall-clock time, which would otherwise fall inside the fix's
+        # own grace window (meant for ordinary clock jitter of a few seconds, not to distinguish two rows created
+        # in the same test). This mirrors the real live bug: a leftover row from weeks earlier, not microseconds.
+        stale_leftover = AccessAssignment(provider_id=ids["provider_id"], user_id=ids["user_id"], resource_type="GROUP", resource_id=ids["group_b_id"], assignment_type="PERMANENT", status="ELIGIBLE", created_at=datetime.now(timezone.utc) - timedelta(days=10))
+        session.add(stale_leftover)
+        await session.commit()
+        stale_leftover_id = str(stale_leftover.id)
+
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        policy = await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+        policy_id = policy.json()["id"]
+
+        authenticate_as("AccessPilot.Admin")
+        await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Side A."})
+
+        request_response = await client.post("/api/v1/sod/exception-requests", json={"sod_policy_id": policy_id, "user_id": str(ids["user_id"]), "justification": "Business need.", "resource_type": "GROUP", "resource_id": str(ids["group_b_id"])})
+        request_id = request_response.json()["id"]
+
+        authenticate_as("AccessPilot.SoDAdmin")
+        future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+        granted = await client.post(f"/api/v1/sod/exception-requests/{request_id}/grant", json={"expires_at": future})
+        exception_id = granted.json()["sod_exception_id"]
+
+        authenticate_as("AccessPilot.Admin")
+        assignments = await client.get("/api/v1/assignments")
+        candidates = [a for a in assignments.json() if a["user_id"] == str(ids["user_id"]) and a["resource_id"] == str(ids["group_b_id"]) and a["status"] == "ELIGIBLE"]
+        assert len(candidates) == 2  # the stale leftover plus the one this grant just created
+        newly_granted_id = next(a["id"] for a in candidates if a["id"] != stale_leftover_id)
+
+        authenticate_as("AccessPilot.SoDAdmin")
+        revoke = await client.delete(f"/api/v1/sod/exceptions/{exception_id}")
+        assert revoke.status_code == 204
+
+        authenticate_as("AccessPilot.Admin")
+        after = await client.get("/api/v1/assignments")
+    by_id = {a["id"]: a for a in after.json()}
+    assert by_id[newly_granted_id]["status"] == "REVOKED"
+    assert by_id[stale_leftover_id]["status"] == "ELIGIBLE"
+
+
+@pytest.mark.asyncio
+async def test_revoking_an_exception_also_revokes_the_active_assignment_it_covered(db_override):
+    """Same as the ELIGIBLE case above, but for real ACTIVE access — "it doesn't matter" which status it's in."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        policy = await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+        policy_id = policy.json()["id"]
+
+        authenticate_as("AccessPilot.Admin")
+        await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Side A."})
+        blocked = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_b_id"]), "assignment_type": "PERMANENT", "justification": "Side B, expect blocked."})
+        assert blocked.status_code == 409
+
+        request_response = await client.post("/api/v1/sod/exception-requests", json={"sod_policy_id": policy_id, "user_id": str(ids["user_id"]), "justification": "Business need.", "resource_type": "GROUP", "resource_id": str(ids["group_b_id"])})
+        request_id = request_response.json()["id"]
+
+        authenticate_as("AccessPilot.SoDAdmin")
+        future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+        granted = await client.post(f"/api/v1/sod/exception-requests/{request_id}/grant", json={"expires_at": future})
+        exception_id = granted.json()["sod_exception_id"]
+
+        authenticate_as("AccessPilot.Admin")
+        assignments = await client.get("/api/v1/assignments")
+        eligible = next(a for a in assignments.json() if a["user_id"] == str(ids["user_id"]) and a["resource_id"] == str(ids["group_b_id"]))
+        assignment_id = eligible["id"]
+
+        authenticate_as("AccessPilot.User", subject="target-user")
+        activated = await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 3, "justification": "Need it now."})
+        assert activated.status_code == 200
+        assert activated.json()["status"] == "ACTIVE"
+
+        authenticate_as("AccessPilot.SoDAdmin")
+        revoke = await client.delete(f"/api/v1/sod/exceptions/{exception_id}")
+        assert revoke.status_code == 204
+
+        authenticate_as("AccessPilot.Admin")
+        after = await client.get("/api/v1/assignments")
+    revoked = next(a for a in after.json() if a["id"] == assignment_id)
+    assert revoked["status"] == "REVOKED"
+
+
+@pytest.mark.asyncio
+async def test_an_expired_exception_is_auto_revoked_by_the_background_worker(db_override):
+    """The user's other explicit ask: "Active is 3 hr time and grant is 4 min then it must revoke in 4 min" — an
+    exception's own expiry, not the assignment's activation duration, is what should end real access once it's
+    reached. revoke_lapsed_sod_exceptions() is the service function the new sod_exception_expiry_worker_loop
+    background worker polls every 60s (see workers/sod_expiry.py) — this exercises it directly, the same way the
+    pre-existing activation-worker tests call activate_due_assignments() directly rather than sleeping for real."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        policy = await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+        policy_id = policy.json()["id"]
+
+        authenticate_as("AccessPilot.Admin")
+        await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Side A."})
+        blocked = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_b_id"]), "assignment_type": "PERMANENT", "justification": "Side B, expect blocked."})
+        assert blocked.status_code == 409
+
+        request_response = await client.post("/api/v1/sod/exception-requests", json={"sod_policy_id": policy_id, "user_id": str(ids["user_id"]), "justification": "Business need.", "resource_type": "GROUP", "resource_id": str(ids["group_b_id"])})
+        request_id = request_response.json()["id"]
+
+        authenticate_as("AccessPilot.SoDAdmin")
+        future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+        granted = await client.post(f"/api/v1/sod/exception-requests/{request_id}/grant", json={"expires_at": future})
+        exception_id = granted.json()["sod_exception_id"]
+
+        authenticate_as("AccessPilot.Admin")
+        assignments = await client.get("/api/v1/assignments")
+        eligible = next(a for a in assignments.json() if a["user_id"] == str(ids["user_id"]) and a["resource_id"] == str(ids["group_b_id"]))
+        assignment_id = eligible["id"]
+
+        authenticate_as("AccessPilot.User", subject="target-user")
+        activated = await client.post(f"/api/v1/assignments/{assignment_id}/activate", json={"duration_hours": 3, "justification": "Need it now."})
+        assert activated.status_code == 200
+
+    # Simulate the exception's 4-minute grant window having elapsed, well before the assignment's own 3-hour
+    # activation window would naturally end.
+    async with db_override.factory() as session:
+        exception = await session.get(SodException, UUID(exception_id))
+        exception.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        await session.commit()
+
+        revoked_count = await revoke_lapsed_sod_exceptions(session)
+        assert revoked_count == 1
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        authenticate_as("AccessPilot.Admin")
+        after = await client.get("/api/v1/assignments")
+        revoked = next(a for a in after.json() if a["id"] == assignment_id)
+        assert revoked["status"] == "REVOKED"
+
+        authenticate_as("AccessPilot.User", subject="target-user")
+        target_notifications = await client.get("/api/v1/notifications")
+    matching = [n for n in target_notifications.json() if n["notification_type"] == "SOD_EXCEPTION_LAPSED"]
+    assert len(matching) == 1
+    assert "expired" in matching[0]["message"]
+
+    # Idempotent: a second poll finds nothing left to do for the same, already-revoked exception.
+    async with db_override.factory() as session:
+        second_pass_count = await revoke_lapsed_sod_exceptions(session)
+    assert second_pass_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_directly_granted_exception_with_no_linked_request_has_nothing_to_auto_revoke(db_override):
+    """An exception granted via the older, untargeted POST /sod/exceptions path has no specific resource behind
+    it (see SodException's own docstring — scoped to (policy, user), not a resource) — revoking or expiring it
+    must not crash looking for something to revoke, and correctly finds nothing."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        policy = await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+        policy_id = policy.json()["id"]
+        soon = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+        created = await client.post("/api/v1/sod/exceptions", json={"sod_policy_id": policy_id, "user_id": str(ids["user_id"]), "justification": "Untargeted.", "expires_at": soon})
+        exception_id = created.json()["id"]
+
+        revoke = await client.delete(f"/api/v1/sod/exceptions/{exception_id}")
+        assert revoke.status_code == 204
+
+    async with db_override.factory() as session:
+        exception = await session.get(SodException, UUID(exception_id))
+        exception.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        await session.commit()
+        revoked_count = await revoke_lapsed_sod_exceptions(session)
+    assert revoked_count == 0
+
+
+@pytest.mark.asyncio
+async def test_an_eligible_assignment_covered_by_a_live_exception_shows_its_expiry(db_override):
+    """The user's ask after seeing "No activation deadline" on an eligible row that was, in fact, time-boxed by
+    an SoD exception: the assignment response should surface that real ceiling (sod_exception_expires_at) so the
+    frontend can show it instead of implying there's no deadline at all."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        policy = await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+        policy_id = policy.json()["id"]
+
+        authenticate_as("AccessPilot.Admin")
+        await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Side A."})
+
+        request_response = await client.post("/api/v1/sod/exception-requests", json={"sod_policy_id": policy_id, "user_id": str(ids["user_id"]), "justification": "Business need.", "resource_type": "GROUP", "resource_id": str(ids["group_b_id"])})
+        request_id = request_response.json()["id"]
+
+        authenticate_as("AccessPilot.SoDAdmin")
+        future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+        await client.post(f"/api/v1/sod/exception-requests/{request_id}/grant", json={"expires_at": future})
+
+        authenticate_as("AccessPilot.Admin")
+        assignments = await client.get("/api/v1/assignments")
+    eligible = next(a for a in assignments.json() if a["user_id"] == str(ids["user_id"]) and a["resource_id"] == str(ids["group_b_id"]))
+    assert eligible["status"] == "ELIGIBLE"
+    assert eligible["sod_exception_expires_at"] is not None
+    assert eligible["sod_exception_expires_at"][:10] == future[:10]
+
+
+@pytest.mark.asyncio
+async def test_a_plain_assignment_with_no_covering_exception_has_a_null_sod_field(db_override):
+    """An ordinary assignment never touched by the exception-request workflow must not show any exception ceiling."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "justification": "Plain, unrelated grant."})
+    assert created.json()["sod_exception_expires_at"] is None

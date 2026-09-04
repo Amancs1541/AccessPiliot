@@ -188,13 +188,19 @@ async def delete_package(session: AsyncSession, package_id: UUID, actor_subject:
 
     for item in list((await session.scalars(select(AccessPackageItem).where(AccessPackageItem.package_id == package_id))).all()):
         await session.delete(item)
+    # No ORM relationship() exists between AccessPackage and AccessPackageItem, so SQLAlchemy has no dependency
+    # info to order these two deletes — an explicit flush forces the item deletes to actually execute before the
+    # package delete is issued. Without it, Postgres's real FK constraint can reject the package delete as
+    # "still referenced" (confirmed live via the identical bug in delete_sod_policy — SQLite's test DB never
+    # enforces this, so it never surfaced in the test suite).
+    await session.flush()
     await session.delete(package)
     await record_audit(session, action="PACKAGE_DELETED", target_type="PACKAGE", target_id=package_id, actor_user_id=actor_id, request_id=request_id)
     await session.commit()
     return None
 
 
-async def _assign_package_to_user(session: AsyncSession, package_id: UUID, items: list[AccessPackageItem], user_id: UUID, data: PackageAssignCreate, actor_subject: str, request_id: str) -> tuple[PackageAssignMemberResult, int]:
+async def _assign_package_to_user(session: AsyncSession, package_id: UUID, items: list[AccessPackageItem], user_id: UUID, data: PackageAssignCreate, actor_subject: str, request_id: str, check_sod_at_creation: bool = False) -> tuple[PackageAssignMemberResult, int]:
     batch_id = uuid4()
     results: list[PackageAssignItemResult] = []
     created_count = 0
@@ -211,7 +217,7 @@ async def _assign_package_to_user(session: AsyncSession, package_id: UUID, items
             approver_id=data.approver_id, fallback_approver_id=fallback_approver_id, fallback_unlock_hours=fallback_unlock_hours, justification=data.justification,
         )
         try:
-            assignment, hydrated = await create_assignment(session, payload, actor_subject, request_id)
+            assignment, hydrated = await create_assignment(session, payload, actor_subject, request_id, check_sod_at_creation=check_sod_at_creation)
         except AccessPilotError as exc:
             results.append(PackageAssignItemResult(package_item_id=item.id, resource_type=item.resource_type, resource_id=item.resource_id, status="FAILED", error_code=exc.code, error_message=exc.message))
             continue
@@ -244,7 +250,10 @@ async def assign_package(session: AsyncSession, package_id: UUID, data: PackageA
     member_results: list[PackageAssignMemberResult] = []
     total_created = total_failed = 0
     for user_id in member_ids:
-        member_result, created_count = await _assign_package_to_user(session, package_id, items, user_id, data, actor_subject, request_id)
+        # assign_package() is Admin-only (PACKAGE_MANAGE) — check_sod_at_creation=True so a doomed-to-conflict
+        # item is caught immediately rather than sitting ELIGIBLE. request_package() (self-service) below
+        # deliberately leaves this False, unaffected.
+        member_result, created_count = await _assign_package_to_user(session, package_id, items, user_id, data, actor_subject, request_id, check_sod_at_creation=True)
         member_results.append(member_result)
         total_created += created_count
         total_failed += len(member_result.results) - created_count
