@@ -279,6 +279,13 @@ class SodExceptionRequest(Base):
     decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     denial_reason: Mapped[Optional[str]] = mapped_column(Text)
     sod_exception_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("sod_exceptions.id"))
+    # Set once, at the moment this request is granted, to the exact AccessAssignment create_assignment() produced
+    # (see grant_sod_exception_request). Exists so services.sod._find_exception_granted_assignment can look this
+    # up directly instead of re-deriving it by matching (user, resource, created_at) — a heuristic that a real
+    # live bug proved unsafe: an old, already-fully-handled request's heuristic match could reach forward in time
+    # and grab a much later, wholly unrelated assignment for the same target once its own original assignment had
+    # already been revoked, since the heuristic had a lower time bound but no upper one.
+    granted_assignment_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("access_assignments.id"))
     created_at: Mapped[datetime] = created_at()
 
 

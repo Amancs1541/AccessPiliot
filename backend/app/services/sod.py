@@ -229,21 +229,25 @@ async def get_sod_exception_covering_assignment(session: AsyncSession, assignmen
     ELIGIBLE row from an exception that's gone — see §9b of docs/19_SOD_ENGINE.md for why that can still exist
     momentarily even with the auto-revoke worker running).
 
-    Same ambiguity risk as the reverse lookup, mirrored: the request must have existed at or before this
-    assignment was created (a request can't grant an assignment that predates it), so ordering by created_at
-    DESC and taking the most recent request at-or-before this assignment's own created_at deterministically finds
-    the one that actually produced it, not an older, unrelated request for the same target."""
+    Looks up SodExceptionRequest.granted_assignment_id == assignment.id first — an exact match, since that column
+    is set once, at grant time, to precisely this assignment's own id (see grant_sod_exception_request), so there
+    is no ambiguity to resolve at all. Falls back to the older, timing-based heuristic (request created at/before
+    this assignment) only for requests granted before that column existed. See _find_exception_granted_assignment
+    for why the heuristic alone is not safe to rely on going forward."""
     if assignment.status not in ("ELIGIBLE", "ACTIVE"):
         return None
-    conditions = [
-        SodExceptionRequest.user_id == assignment.user_id,
-        SodExceptionRequest.resource_type == assignment.resource_type,
-        SodExceptionRequest.resource_id == assignment.resource_id,
-        SodExceptionRequest.sod_exception_id.isnot(None),
-        SodExceptionRequest.created_at <= assignment.created_at,
-        SodExceptionRequest.app_role_external_id == assignment.app_role_external_id if assignment.app_role_external_id else SodExceptionRequest.app_role_external_id.is_(None),
-    ]
-    request = (await session.scalars(select(SodExceptionRequest).where(*conditions).order_by(SodExceptionRequest.created_at.desc()))).first()
+    request = (await session.scalars(select(SodExceptionRequest).where(SodExceptionRequest.granted_assignment_id == assignment.id))).first()
+    if request is None:
+        conditions = [
+            SodExceptionRequest.user_id == assignment.user_id,
+            SodExceptionRequest.resource_type == assignment.resource_type,
+            SodExceptionRequest.resource_id == assignment.resource_id,
+            SodExceptionRequest.sod_exception_id.isnot(None),
+            SodExceptionRequest.granted_assignment_id.is_(None),
+            SodExceptionRequest.created_at <= assignment.created_at,
+            SodExceptionRequest.app_role_external_id == assignment.app_role_external_id if assignment.app_role_external_id else SodExceptionRequest.app_role_external_id.is_(None),
+        ]
+        request = (await session.scalars(select(SodExceptionRequest).where(*conditions).order_by(SodExceptionRequest.created_at.desc()))).first()
     if request is None or request.sod_exception_id is None:
         return None
     # The expiry comparison is done in SQL, not Python, deliberately — SQLite (this test suite's DB) stores
@@ -512,19 +516,28 @@ async def _find_exception_granted_assignment(session: AsyncSession, exception: S
     SodExceptionRequest it was granted from (SodExceptionRequest.sod_exception_id links back to it), not stored
     directly on SodException itself (which stays scoped to (policy, user) per its own docstring, not to a
     specific resource). Returns None for an exception granted through the older, untargeted
-    POST /sod/exceptions path (no request behind it, nothing specific to automatically revoke).
+    POST /sod/exceptions path (no request behind it, nothing specific to automatically revoke), or once the
+    assignment it covered is no longer ELIGIBLE/ACTIVE (already handled — see the background worker's own
+    idempotency note).
 
-    Real bug found via live testing and fixed here: matching purely on (user, resource_type, resource_id,
-    app_role_external_id, status) with no ordering is ambiguous whenever an older, wholly unrelated ELIGIBLE/
-    ACTIVE assignment for the exact same target already exists (e.g. a leftover row from an earlier, unrelated
-    grant of the same group) — `.first()` on an unordered query can pick that stale row instead of the one this
-    exception actually covers, silently revoking the wrong assignment. `create_assignment()` always creates the
-    real assignment at essentially the same instant as the request that led to it, so filtering to
-    `created_at >= request.created_at` and taking the EARLIEST such match deterministically picks the one this
-    specific grant produced, never an older coincidental match."""
+    Uses SodExceptionRequest.granted_assignment_id — set once, at grant time, to the exact assignment
+    create_assignment() produced (see grant_sod_exception_request) — as an exact, unambiguous lookup, not a
+    heuristic. A REAL BUG was found and fixed here: an earlier revision matched purely on (user, resource_type,
+    resource_id, app_role_external_id, status, created_at >= request.created_at), with no UPPER time bound — this
+    worked for the immediate case but broke the moment the SAME target was granted again later, independently:
+    once this exception's own original assignment had already been revoked (e.g. by this exact worker, on a
+    prior tick), the heuristic would happily match the *next* ELIGIBLE/ACTIVE assignment for that target it could
+    find — even one created by a brand new, unrelated grant days later — and revoke that one too. Confirmed live:
+    granting a fresh HR-Team exception for the same user got auto-revoked within a minute, because a much older,
+    already-once-handled exception's still-non-revoked row kept getting rechecked by the 60s worker forever (see
+    revoke_lapsed_sod_exceptions) and re-matched the brand new assignment as if it were its own. The old
+    (user, resource, timing) match is kept as a fallback purely for requests granted before this column existed."""
     request = (await session.execute(select(SodExceptionRequest).where(SodExceptionRequest.sod_exception_id == exception.id))).scalars().first()
     if request is None:
         return None
+    if request.granted_assignment_id is not None:
+        assignment = await session.get(AccessAssignment, request.granted_assignment_id)
+        return assignment if assignment is not None and assignment.status in ("ELIGIBLE", "ACTIVE") else None
     conditions = [
         AccessAssignment.user_id == request.user_id,
         AccessAssignment.resource_type == request.resource_type,
@@ -532,7 +545,10 @@ async def _find_exception_granted_assignment(session: AsyncSession, exception: S
         AccessAssignment.status.in_(("ELIGIBLE", "ACTIVE")),
         # A small grace window, not an exact >=, because the request and the assignment created_assignment()
         # produces from it are timestamped independently a moment apart — comparing them exactly risks a false
-        # negative from ordinary clock/storage-precision jitter between the two writes.
+        # negative from ordinary clock/storage-precision jitter between the two writes. No upper bound exists
+        # here deliberately to preserve old behavior for legacy rows — this fallback path is only ever reached
+        # for a request granted before granted_assignment_id existed, and carries the same known limitation the
+        # bug above describes; new grants never take this path at all.
         AccessAssignment.created_at >= request.created_at - timedelta(seconds=5),
         AccessAssignment.app_role_external_id == request.app_role_external_id if request.app_role_external_id else AccessAssignment.app_role_external_id.is_(None),
     ]
@@ -714,7 +730,8 @@ async def grant_sod_exception_request(session: AsyncSession, exception_request_i
             justification=exception_request.justification,
         )
         try:
-            await create_assignment(session, payload, requester.external_id, request_id, check_sod_at_creation=True)
+            created_assignment, _ = await create_assignment(session, payload, requester.external_id, request_id, check_sod_at_creation=True)
+            exception_request.granted_assignment_id = created_assignment.id
             outcome = "CREATED"
         except AccessPilotError as exc:
             outcome = "BLOCKED" if exc.code == "SOD_CONFLICT" else "FAILED"

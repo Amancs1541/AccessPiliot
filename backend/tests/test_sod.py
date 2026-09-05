@@ -1748,6 +1748,68 @@ async def test_an_expired_exception_is_auto_revoked_by_the_background_worker(db_
 
 
 @pytest.mark.asyncio
+async def test_a_later_unrelated_grant_for_the_same_target_survives_the_old_exceptions_worker_tick(db_override):
+    """Real bug found live, right after the previous fix shipped: the user granted a FRESH exception for
+    Test-Admin/HR-Team, and it was auto-revoked within about a minute — even though its own expiry was a month
+    out. Root cause: an earlier, unrelated exception for the exact same (user, resource) target had already
+    expired and been processed (its own assignment correctly revoked), but nothing ever marks an expired
+    SodException as "done" — revoke_lapsed_sod_exceptions() re-scans every non-revoked, past-expiry exception on
+    every single 60s tick, forever. The old heuristic match (user, resource, created_at >= request.created_at,
+    no upper bound) then happily re-matched the BRAND NEW assignment from the second, wholly unrelated grant,
+    since it was now the only ELIGIBLE/ACTIVE row left for that target. granted_assignment_id (set once, at
+    grant time, to the exact assignment produced) fixes this: the old exception's request now points at its own,
+    already-revoked assignment specifically, and _find_exception_granted_assignment correctly finds nothing left
+    to do for it — it can never wander over to a different, later assignment again."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        policy = await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+        policy_id = policy.json()["id"]
+
+        authenticate_as("AccessPilot.Admin")
+        await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Side A."})
+
+        # First grant: request, grant with a short-lived expiry, let the worker process it once.
+        first_request = await client.post("/api/v1/sod/exception-requests", json={"sod_policy_id": policy_id, "user_id": str(ids["user_id"]), "justification": "First, short-lived grant.", "resource_type": "GROUP", "resource_id": str(ids["group_b_id"])})
+        authenticate_as("AccessPilot.SoDAdmin")
+        soon = (datetime.now(timezone.utc) + timedelta(minutes=4)).isoformat()
+        first_grant = await client.post(f"/api/v1/sod/exception-requests/{first_request.json()['id']}/grant", json={"expires_at": soon})
+        assert first_grant.status_code == 200
+
+    async with db_override.factory() as session:
+        first_exception = await session.get(SodException, UUID(first_grant.json()["sod_exception_id"]))
+        first_exception.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        await session.commit()
+        first_pass_count = await revoke_lapsed_sod_exceptions(session)
+        assert first_pass_count == 1
+
+    # Second, wholly independent grant for the SAME (user, resource) target — a month-long acceptance this time.
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        second_request = await client.post("/api/v1/sod/exception-requests", json={"sod_policy_id": policy_id, "user_id": str(ids["user_id"]), "justification": "Second, unrelated month-long grant.", "resource_type": "GROUP", "resource_id": str(ids["group_b_id"])})
+        authenticate_as("AccessPilot.SoDAdmin")
+        far_future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+        second_grant = await client.post(f"/api/v1/sod/exception-requests/{second_request.json()['id']}/grant", json={"expires_at": far_future})
+        assert second_grant.status_code == 200
+
+        authenticate_as("AccessPilot.Admin")
+        assignments = await client.get("/api/v1/assignments")
+    fresh = next(a for a in assignments.json() if a["user_id"] == str(ids["user_id"]) and a["resource_id"] == str(ids["group_b_id"]) and a["status"] == "ELIGIBLE")
+
+    # Simulate the next 60s worker tick — the OLD, already-handled exception is still sitting there non-revoked
+    # (nothing ever marks a naturally-expired exception "done"), so it gets re-scanned again.
+    async with db_override.factory() as session:
+        second_pass_count = await revoke_lapsed_sod_exceptions(session)
+        assert second_pass_count == 0
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        authenticate_as("AccessPilot.Admin")
+        after = await client.get("/api/v1/assignments")
+    still_eligible = next(a for a in after.json() if a["id"] == fresh["id"])
+    assert still_eligible["status"] == "ELIGIBLE"
+
+
+@pytest.mark.asyncio
 async def test_a_directly_granted_exception_with_no_linked_request_has_nothing_to_auto_revoke(db_override):
     """An exception granted via the older, untargeted POST /sod/exceptions path has no specific resource behind
     it (see SodException's own docstring — scoped to (policy, user), not a resource) — revoking or expiring it
