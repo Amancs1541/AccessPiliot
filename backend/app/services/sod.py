@@ -537,7 +537,19 @@ async def _find_exception_granted_assignment(session: AsyncSession, exception: S
         return None
     if request.granted_assignment_id is not None:
         assignment = await session.get(AccessAssignment, request.granted_assignment_id)
-        return assignment if assignment is not None and assignment.status in ("ELIGIBLE", "ACTIVE") else None
+        if assignment is not None and assignment.status in ("ELIGIBLE", "ACTIVE"):
+            return assignment
+        # The originally-linked assignment is gone (e.g. separately revoked, as a real user action independent
+        # of this exception) — but an active exception is scoped to (policy, user), not to that one assignment
+        # (see SodException's own docstring), so it also unblocks any LATER, ordinary grant to the exact same
+        # conflicting target made while it was still active, with no link back to this exception request at all.
+        # Fall back to the live violation scan itself (get_sod_violations, the same trusted computation the
+        # violations table and the SOC dashboard's card both already use): only if this user is CURRENTLY a real
+        # violator of THIS policy do we look for a holding matching the original request's exact target, and
+        # revoke only that. This can never over-reach the way the old (user, resource, timing)-only heuristic
+        # bug did — that one revoked a later grant regardless of whether it still formed part of any real
+        # violation; this one only fires when get_sod_violations() independently confirms one still exists.
+        return await _current_violating_holding_assignment(session, exception, request)
     conditions = [
         AccessAssignment.user_id == request.user_id,
         AccessAssignment.resource_type == request.resource_type,
@@ -553,6 +565,37 @@ async def _find_exception_granted_assignment(session: AsyncSession, exception: S
         AccessAssignment.app_role_external_id == request.app_role_external_id if request.app_role_external_id else AccessAssignment.app_role_external_id.is_(None),
     ]
     return (await session.scalars(select(AccessAssignment).where(*conditions).order_by(AccessAssignment.created_at.asc()))).first()
+
+
+async def _current_violating_holding_assignment(session: AsyncSession, exception: SodException, request: SodExceptionRequest) -> Optional[AccessAssignment]:
+    """Only reached once the exact granted_assignment_id link has gone stale (see the caller's comment above).
+    Confirms via the real live scan that this (policy, user) pair is still an actual violation right now, then
+    returns whichever current holding matches the original request's exact target — never a timing guess, and
+    never anything at all once the conflict has genuinely resolved on its own (e.g. the other side was removed
+    independently, so holding this target alone is no longer a violation of anything).
+
+    Critical guard, confirmed against the exact scenario test_a_later_unrelated_grant_for_the_same_target_survives
+    covers: if some OTHER exception (not this one) is currently active for this same (policy, user) pair, that
+    other exception is what's legitimately covering the conflict right now — do nothing, exactly like the exact-
+    link fast path already does when it finds an unrelated, still-valid grant. Without this, this exception's own
+    (now stale) request could end up revoking a completely independent later grant that a DIFFERENT, still-active
+    exception was actually protecting — reintroducing the exact bug the no-upper-bound heuristic caused before."""
+    covering_exception = await get_active_sod_exception(session, exception.sod_policy_id, exception.user_id)
+    if covering_exception is not None and covering_exception.id != exception.id:
+        return None
+    violations = await get_sod_violations(session, policy_id=exception.sod_policy_id)
+    violation = next((v for v in violations if v.user_id == exception.user_id), None)
+    if violation is None:
+        return None
+    for holding in violation.side_a_holdings + violation.side_b_holdings:
+        if holding.assignment_id is None or holding.resource_type != request.resource_type or holding.resource_id != request.resource_id:
+            continue
+        if (holding.app_role_external_id or None) != (request.app_role_external_id or None):
+            continue
+        assignment = await session.get(AccessAssignment, holding.assignment_id)
+        if assignment is not None and assignment.status in ("ELIGIBLE", "ACTIVE"):
+            return assignment
+    return None
 
 
 async def _revoke_assignment_for_lapsed_exception(session: AsyncSession, assignment: AccessAssignment, policy_name: str, reason_phrase: str, actor_id: Optional[UUID], request_id: str) -> bool:

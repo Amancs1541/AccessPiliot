@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_sod.py -q)",
+      "Bash(taskkill //F //PID 4056)",
+      "Bash(nohup .venv/Scripts/python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8001)",
+      "Bash(.venv/Scripts/python.exe -m app.cli emergency-url)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_sod.py::test_revoking_an_exception_also_revokes_a_later_re_grant_the_exact_link_no_longer_covers -q)",
+      "Bash(taskkill //F //PID 29144)",
+      "Bash(cd \"C:/Users/Aman Amarjeet Varma/.claude/projects/c--Users-Aman-Amarjeet-Varma-Downloads-AccessPiliot/memory\" && wc -l project_accesspilot_status.md)",
+      "Read(//c/Users/Aman Amarjeet Varma/.claude/projects/c--Users-Aman-Amarjeet-Varma-Downloads-AccessPiliot/memory/**)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_server_health.py -q)",
+      "Bash(taskkill //F //PID 10716)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://127.0.0.1:8001/api/v1/server-health)",
+      "Bash(taskkill //F //PID 29608)",
+      "Bash(curl -s -o /dev/null http://127.0.0.1:8001/api/v1/health)",
+      "Bash(grep -n \"sh-status-grid { grid-template-columns:repeat\\(2,1fr\\); } }\" src/styles.css)",
+      "Bash(.venv/Scripts/python.exe -m pytest -q -k \"troubleshooting\")",
+      "Bash(.venv/Scripts/python.exe -m pytest -q -p no:randomly)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/ -q --tb=no)",
+      "Bash(taskkill //F //PID 36356)",
+      "Bash(taskkill //F //PID 34288)",
+      "Bash(python3 -c ' *)"
+    ]
+  }
+}

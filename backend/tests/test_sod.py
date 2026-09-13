@@ -575,15 +575,17 @@ async def test_updating_a_policy_to_put_the_same_entity_on_both_sides_is_also_re
 
 
 @pytest.mark.asyncio
-async def test_admin_can_read_violations_but_not_manage_rules(db_override):
-    """AccessPilot.SoDAdmin is sourced exclusively from a real Entra App Role now — there is deliberately no
-    in-app path for a plain Admin to grant or manage it at all (see security/auth.py's PERMISSIONS comment), on
-    top of the pre-existing restriction that an Admin can never edit SoD rules directly either."""
+async def test_a_plain_admin_is_denied_separation_of_duties_entirely(db_override):
+    """AccessPilot.SoDAdmin is sourced exclusively from a real Entra App Role — there is deliberately no in-app
+    path for a plain Admin to grant or manage it at all (see security/auth.py's PERMISSIONS comment). A plain
+    Admin used to retain read-only oversight of SoD (SOD_READ), but per explicit request this section is now
+    fully excluded from Admin, the same as the Security Operations dashboard already is — an Admin sees nothing
+    here at all, not even violations, until they're granted the real Entra role."""
     ids = await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         violations = await client.get("/api/v1/sod/violations")
-        assert violations.status_code == 200
+        assert violations.status_code == 403
         manage_denied = await client.patch("/api/v1/sod/policies/00000000-0000-0000-0000-000000000000", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
         assert manage_denied.status_code == 403
 
@@ -1807,6 +1809,64 @@ async def test_a_later_unrelated_grant_for_the_same_target_survives_the_old_exce
         after = await client.get("/api/v1/assignments")
     still_eligible = next(a for a in after.json() if a["id"] == fresh["id"])
     assert still_eligible["status"] == "ELIGIBLE"
+
+
+@pytest.mark.asyncio
+async def test_revoking_an_exception_also_revokes_a_later_re_grant_the_exact_link_no_longer_covers(db_override):
+    """Real bug found live: the exception's own granted_assignment_id points at the ONE assignment created at
+    grant time — but an active exception unblocks ANY later grant to the same target too (it's scoped to
+    (policy, user), not one assignment). If that original assignment is separately revoked (e.g. an admin
+    manually revoking it for an unrelated reason) and someone then grants the same conflicting target again while
+    the exception is still active, that new assignment has no link back to this exception at all. Revoking the
+    exception must still catch and revoke it — the violation it was covering is still real — not leave it sitting
+    there ELIGIBLE/ACTIVE with the violations table showing it as "Open" forever."""
+    ids = await _seed_directory(db_override.factory)
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        policy = await client.post("/api/v1/sod/policies", json=_policy_payload(ids["group_a_id"], ids["group_b_id"]))
+        policy_id = policy.json()["id"]
+
+        authenticate_as("AccessPilot.Admin")
+        await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Side A."})
+
+        request_response = await client.post("/api/v1/sod/exception-requests", json={"sod_policy_id": policy_id, "user_id": str(ids["user_id"]), "justification": "Business need.", "resource_type": "GROUP", "resource_id": str(ids["group_b_id"])})
+        request_id = request_response.json()["id"]
+
+        authenticate_as("AccessPilot.SoDAdmin")
+        future = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+        granted = await client.post(f"/api/v1/sod/exception-requests/{request_id}/grant", json={"expires_at": future})
+        exception_id = granted.json()["sod_exception_id"]
+
+        authenticate_as("AccessPilot.Admin")
+        assignments = await client.get("/api/v1/assignments")
+        original = next(a for a in assignments.json() if a["user_id"] == str(ids["user_id"]) and a["resource_id"] == str(ids["group_b_id"]))
+
+        # An unrelated admin action revokes the exception-granted assignment directly (nothing to do with the
+        # exception itself lapsing) — mirrors the real live sequence exactly.
+        revoked_directly = await client.post(f"/api/v1/assignments/{original['id']}/revoke", json={"justification": "Unrelated cleanup."})
+        assert revoked_directly.status_code == 200
+
+        # The exception is STILL active (30 days out), so a brand new, ordinary grant to the exact same
+        # conflicting target goes through unblocked — with no exception-request link behind it at all.
+        regrant = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_b_id"]), "assignment_type": "PERMANENT", "justification": "Re-granting, exception still covers it."})
+        assert regrant.status_code == 201
+        regranted_id = regrant.json()["id"]
+
+        authenticate_as("AccessPilot.SoDAdmin")
+        violations_before = await client.get(f"/api/v1/sod/violations?policy_id={policy_id}")
+        assert len(violations_before.json()) == 1
+        assert violations_before.json()[0]["exception_active"] is True
+
+        revoke = await client.delete(f"/api/v1/sod/exceptions/{exception_id}")
+        assert revoke.status_code == 204
+        violations_after = await client.get(f"/api/v1/sod/violations?policy_id={policy_id}")
+
+        authenticate_as("AccessPilot.Admin")
+        after = await client.get("/api/v1/assignments")
+        by_id = {a["id"]: a for a in after.json()}
+    assert by_id[regranted_id]["status"] == "REVOKED"
+    assert by_id[original["id"]]["status"] == "REVOKED"  # unaffected, was already revoked
+    assert violations_after.json() == []
 
 
 @pytest.mark.asyncio

@@ -28,6 +28,7 @@ async def update_security_settings(session: AsyncSession, data: SecuritySettings
     settings.logout_enabled = data.logout_enabled
     settings.logout_after_minutes = data.logout_after_minutes
     settings.timezone = data.timezone
+    settings.support_contact_email = data.support_contact_email
     await session.commit()
     await session.refresh(settings)
     return settings

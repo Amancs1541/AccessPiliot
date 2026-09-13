@@ -35,15 +35,15 @@ def _get_jwks_client(jwks_url: str) -> PyJWKClient:
         _jwks_client_url = jwks_url
     return _jwks_client
 
-VALID_ROLES = {"AccessPilot.User", "AccessPilot.Admin", "AccessPilot.BreakGlassAdmin", "AccessPilot.SoDAdmin"}
+VALID_ROLES = {"AccessPilot.User", "AccessPilot.Admin", "AccessPilot.BreakGlassAdmin", "AccessPilot.SoDAdmin", "AccessPilot.SoCAdmin", "AccessPilot.ServerAdmin"}
 PERMISSIONS = {
     "AccessPilot.User": {"ME_READ", "DASHBOARD_USER_READ", "ACCESS_REQUEST_CREATE", "ACCESS_REQUEST_READ_SELF", "ACCESS_REQUEST_CANCEL_SELF", "ASSIGNMENT_READ_SELF", "ASSIGNMENT_ACTIVATE_SELF", "ASSIGNMENT_REVOKE_SELF"},
-    # SOD_READ (oversight) is deliberately here, but SOD_MANAGE (create/edit/disable the actual SoD rules) is NOT
-    # — a genuine separation of duties on the SoD engine itself: a plain Admin can see violations, but cannot rig
-    # the rules to clear their own conflicts. See AccessPilot.SoDAdmin below. An Admin also cannot grant or revoke
-    # AccessPilot.SoDAdmin itself in any way — that role is sourced exclusively from a real Entra App Role
-    # assignment (below), the same as every other role here; there is deliberately no in-app path to it at all.
-    "AccessPilot.Admin": {"ME_READ", "DASHBOARD_ADMIN_READ", "USER_READ", "GROUP_READ", "GROUP_MANAGE", "ROLE_READ", "ROLE_MANAGE", "PROVIDER_READ", "PROVIDER_MANAGE", "PROVIDER_SYNC", "ACCESS_REQUEST_READ", "ACCESS_REQUEST_APPROVE", "ACCESS_REQUEST_REJECT", "ACCESS_REQUEST_CANCEL", "ASSIGNMENT_READ", "ASSIGNMENT_CREATE", "ASSIGNMENT_REVOKE", "ASSIGNMENT_EXTEND", "POLICY_READ", "POLICY_CREATE", "POLICY_UPDATE", "POLICY_DELETE", "AUDIT_READ", "SYNC_READ", "PACKAGE_READ", "PACKAGE_MANAGE", "ONBOARDING_READ", "ONBOARDING_MANAGE", "SECURITY_SETTINGS_MANAGE", "BRANDING_MANAGE", "SOD_READ"},
+    # Deliberately NOT SOD_READ or SOC_READ — a plain Admin has no visibility into Separation of Duties at all
+    # (moved from oversight to fully excluded, per explicit request), the same exclusive-to-its-own-role treatment
+    # SOC already has. An Admin also cannot grant or revoke AccessPilot.SoDAdmin/SoCAdmin themselves in any way —
+    # both roles are sourced exclusively from a real Entra App Role assignment, the same as every other role here;
+    # there is deliberately no in-app path to either at all.
+    "AccessPilot.Admin": {"ME_READ", "DASHBOARD_ADMIN_READ", "USER_READ", "GROUP_READ", "GROUP_MANAGE", "ROLE_READ", "ROLE_MANAGE", "PROVIDER_READ", "PROVIDER_MANAGE", "PROVIDER_SYNC", "ACCESS_REQUEST_READ", "ACCESS_REQUEST_APPROVE", "ACCESS_REQUEST_REJECT", "ACCESS_REQUEST_CANCEL", "ASSIGNMENT_READ", "ASSIGNMENT_CREATE", "ASSIGNMENT_REVOKE", "ASSIGNMENT_EXTEND", "POLICY_READ", "POLICY_CREATE", "POLICY_UPDATE", "POLICY_DELETE", "AUDIT_READ", "SYNC_READ", "PACKAGE_READ", "PACKAGE_MANAGE", "ONBOARDING_READ", "ONBOARDING_MANAGE", "SECURITY_SETTINGS_MANAGE", "BRANDING_MANAGE"},
     # Deliberately narrow: the default landing role for the hidden /emergency-access/:token flow. Can see NOTHING
     # else in the app — no users/groups/roles/assignments/etc. — until the holder explicitly elevates to full
     # AccessPilot.Admin via POST /auth/breakglass-elevate (see _authenticate_via_portal_config_or_breakglass below).
@@ -59,6 +59,21 @@ PERMISSIONS = {
     # additions so SoDAdmin can actually reference real groups/roles/applications/packages when building a rule —
     # it still cannot MANAGE any of them (create/edit/delete), only SOD_MANAGE lets it touch SoD rules themselves.
     "AccessPilot.SoDAdmin": {"ME_READ", "DASHBOARD_USER_READ", "SOD_READ", "SOD_MANAGE", "GROUP_READ", "ROLE_READ", "PACKAGE_READ"},
+    # A pure observer role, built from day one the way SoDAdmin only got moved TO after a real gap was found there
+    # (see above) — sourced exclusively from a real Entra App Role assignment, never an in-app grant, so there is
+    # no path for a plain Admin to hand out security-monitoring access to anyone from inside the tool itself.
+    # Read-only across the board on purpose: SOC's job is to watch and flag, not to act — it holds AUDIT_READ and
+    # SOD_READ so it can see the same underlying signal the Admin/SoDAdmin dashboards already show, plus its own
+    # SOC_READ for the aggregated Security Operations dashboard (backend/app/api/v1/soc.py) — but no *_MANAGE
+    # permission of any kind, and no ability to approve/activate/revoke anything it observes.
+    "AccessPilot.SoCAdmin": {"ME_READ", "DASHBOARD_USER_READ", "SOC_READ", "AUDIT_READ", "SOD_READ", "SYNC_READ"},
+    # A pure observer role for infra/ops health (DB pool, background workers, sync/Graph connector status, live
+    # event log) — a distinct concern from SoC (security signal/anomalies) and SoD (governance rules), so it gets
+    # its own role rather than folding into either. Sourced exclusively from a real Entra App Role assignment,
+    # same as every other specialized role here — logs in through the exact same default IDP flow as everyone
+    # else, the role claim alone is what unlocks this dashboard. Deliberately NOT shared with AccessPilot.Admin —
+    # exclusive to whoever actually holds this role, same treatment SOC/SoD both already have.
+    "AccessPilot.ServerAdmin": {"ME_READ", "DASHBOARD_USER_READ", "SERVER_HEALTH_READ"},
 }
 
 @dataclass(frozen=True)

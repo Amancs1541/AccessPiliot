@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Box, Check, ChevronRight, Clock3, Cloud, Copy, Database, ExternalLink, FileCheck2, FolderKanban, Gauge, Image, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Lock, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldAlert, ShieldCheck, SlidersHorizontal, UploadCloud, UserRound, Users, X } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Box, Check, ChevronLeft, ChevronRight, Clock3, Cloud, Copy, Database, ExternalLink, FileCheck2, FolderKanban, Gauge, Image, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Lock, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldAlert, ShieldCheck, SlidersHorizontal, UploadCloud, UserRound, Users, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { currentUser, policies, type RequestStatus, type Role } from './mock';
 import { mockService, useMockState } from './mockService';
@@ -28,7 +28,7 @@ interface ApiUserAccessSegments { permanentActive: number; eligible: number; }
 interface ApiSegmentMember { id: string; display_name: string; email: string; }
 interface ApiOnboardingImport { id: string; filename: string; status: string; total_records: number; created_count: number; updated_count: number; disabled_count: number; no_change_count: number; failed_count: number; access_revoked_count: number; access_revoke_failed_count: number; real_accounts_provisioned_count: number; birthright_assignments_created_count: number; error_summary: Record<string, unknown> | null; created_at: string; completed_at: string | null; }
 interface ApiOnboardingImportRecord { row_number: number; employee_id: string; action: string; error_message: string | null; raw_data: Record<string, string> | null; }
-interface ApiSecuritySettings { blur_enabled: boolean; blur_after_minutes: number; lock_enabled: boolean; lock_after_minutes: number; logout_enabled: boolean; logout_after_minutes: number; timezone: string; }
+interface ApiSecuritySettings { blur_enabled: boolean; blur_after_minutes: number; lock_enabled: boolean; lock_after_minutes: number; logout_enabled: boolean; logout_after_minutes: number; timezone: string; support_contact_email: string | null; }
 // A short, curated list rather than every IANA zone (~400) — covers the timezones this deployment's users are
 // actually likely to be in; "Other (type it below)" falls through to a free-text input validated server-side by
 // the exact same zoneinfo check, so nothing is actually unreachable, just not pre-listed.
@@ -96,6 +96,18 @@ function useBranding() {
   return branding;
 }
 
+function useSupportContactEmail() {
+  // Same deliberately public, unauthenticated fetch as useBranding above — the one scenario this exists for is
+  // a user who can't sign in at all (the IDP itself is unreachable), so it can never go through apiRequest().
+  const [email, setEmail] = useState<string | null>(null);
+  useEffect(() => {
+    let ignore = false;
+    fetch(`${apiBaseUrl}/api/v1/security-settings/support-contact`).then(response => response.ok ? response.json() : null).then(data => { if (!ignore && data) setEmail(data.support_contact_email); }).catch(() => {});
+    return () => { ignore = true; };
+  }, []);
+  return email;
+}
+
 const nav = [
   { label: 'Dashboard', icon: LayoutDashboard, to: '/dashboard', roles: ['user','admin'] },
   { label: 'My Access', icon: KeyRound, to: '/my-access', roles: ['user'] },
@@ -112,11 +124,18 @@ const nav = [
   { label: 'Access Packages', icon: Box, to: '/admin/access-packages', roles: ['admin'] },
   { label: 'Policies', icon: SlidersHorizontal, to: '/admin/policies', roles: ['admin'], section: 'GOVERNANCE' },
   { label: 'Audit Logs', icon: BookOpen, to: '/admin/audit', roles: ['admin'] },
-  // Its own sidebar section, not folded into GOVERNANCE — also visible to a plain end-user who holds the real
-  // Entra AccessPilot.SoDAdmin app role (see Shell's nav filter, which additionally checks auth.isSodAdmin for
-  // items marked extra: 'sod') — 'admin' alone is neither sufficient nor necessary for these two.
-  { label: 'Separation of Duties', icon: ShieldAlert, to: '/admin/sod', roles: ['admin'], extra: 'sod', section: 'SEPARATION OF DUTIES' },
-  { label: 'SoD Configuration', icon: Settings2, to: '/admin/sod/configuration', roles: ['admin'], extra: 'sod' },
+  // Its own sidebar section, not folded into GOVERNANCE — exclusive to a real AccessPilot.SoDAdmin (see Shell's
+  // nav filter, which checks auth.isSodAdmin for items marked extra: 'sod'). roles: [] is deliberate: a plain
+  // Admin no longer sees this section at all, the same exclusive-to-its-own-role treatment SOC already has.
+  { label: 'Separation of Duties', icon: ShieldAlert, to: '/admin/sod', roles: [] as Role[], extra: 'sod', section: 'SEPARATION OF DUTIES' },
+  { label: 'SoD Configuration', icon: Settings2, to: '/admin/sod/configuration', roles: [] as Role[], extra: 'sod' },
+  // Same pattern as the SoD section above — visible ONLY to a plain end-user holding the real Entra
+  // AccessPilot.SoCAdmin app role (auth.isSocAdmin, checked via extra: 'soc' in Shell's nav filter) —
+  // deliberately roles: [], never ['admin']: exclusive to whoever actually holds AccessPilot.SoCAdmin, a plain
+  // Admin included.
+  { label: 'Security Operations', icon: Gauge, to: '/admin/soc', roles: [] as Role[], extra: 'soc', section: 'SECURITY OPERATIONS' },
+  // Same exclusive-to-its-own-role pattern again, for AccessPilot.ServerAdmin's infra/ops health dashboard.
+  { label: 'System Health', icon: Activity, to: '/admin/server-health', roles: [] as Role[], extra: 'server', section: 'SYSTEM HEALTH' },
   { label: 'Providers', icon: Cloud, to: '/admin/providers', roles: ['admin'], section: 'SYSTEM' },
   { label: 'Sync', icon: RefreshCw, to: '/admin/sync', roles: ['admin'] },
   { label: 'Onboarding', icon: UploadCloud, to: '/admin/onboarding', roles: ['admin'] },
@@ -132,21 +151,29 @@ function App() {
   if (auth.breakglassActive && !auth.breakglassElevated) return <BreakGlassDashboard />;
   const role = auth.authConfigured ? auth.role : mockRole;
   const changeRole = (nextRole: Role) => { localStorage.setItem('accesspilot.mockRole', nextRole); setMockRole(nextRole); };
-  return <IdleGuard><Shell role={role} setRole={changeRole}><Routes><Route path="/" element={<Navigate to="/dashboard" replace />} /><Route path="/dashboard" element={<Dashboard role={role} />} /><Route path="/my-access" element={<MyAccess />} /><Route path="/request-access" element={<RequestAccess />} /><Route path="/request-packages" element={<RequestPackagesPage />} /><Route path="/my-requests" element={<Requests mine />} /><Route path="/approvals" element={<MyApprovalsPage />} /><Route path="/profile" element={<Profile />} /><Route path="/admin/users" element={<AdminOnly role={role}><UsersPage /></AdminOnly>} /><Route path="/admin/users/:id" element={<AdminOnly role={role}><UserDetail /></AdminOnly>} /><Route path="/admin/groups" element={<AdminOnly role={role}><GroupsPage /></AdminOnly>} /><Route path="/admin/roles" element={<AdminOnly role={role}><RolesPage /></AdminOnly>} /><Route path="/admin/access-requests" element={<AdminOnly role={role}><Requests /></AdminOnly>} /><Route path="/admin/access-requests/:id" element={<AdminOnly role={role}><RequestDetailInteractive /></AdminOnly>} /><Route path="/admin/assignments" element={<AdminOnly role={role}><AssignmentsInteractive /></AdminOnly>} /><Route path="/admin/access-packages" element={<AdminOnly role={role}><AccessPackagesInteractive /></AdminOnly>} /><Route path="/admin/policies" element={<AdminOnly role={role}><PoliciesPage /></AdminOnly>} /><Route path="/admin/audit" element={<AdminOnly role={role}><AuditPage /></AdminOnly>} /><Route path="/admin/providers" element={<AdminOnly role={role}><ProvidersPage /></AdminOnly>} /><Route path="/admin/sync" element={<AdminOnly role={role}><SyncPage /></AdminOnly>} /><Route path="/admin/onboarding" element={<AdminOnly role={role}><OnboardingPage /></AdminOnly>} /><Route path="/admin/security" element={<AdminOnly role={role}><SecurityPage /></AdminOnly>} /><Route path="/admin/branding" element={<AdminOnly role={role}><BrandingPage /></AdminOnly>} /><Route path="/admin/sod" element={role === 'admin' || auth.isSodAdmin ? <SodPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/sod/configuration" element={role === 'admin' || auth.isSodAdmin ? <SodConfigurationPage /> : <Navigate to="/dashboard" replace />} /><Route path="*" element={<Navigate to="/dashboard" replace />} /></Routes></Shell></IdleGuard>;
+  return <IdleGuard><Shell role={role} setRole={changeRole}><Routes><Route path="/" element={<Navigate to="/dashboard" replace />} /><Route path="/dashboard" element={<Dashboard role={role} />} /><Route path="/my-access" element={<MyAccess />} /><Route path="/request-access" element={<RequestAccess />} /><Route path="/request-packages" element={<RequestPackagesPage />} /><Route path="/my-requests" element={<Requests mine />} /><Route path="/approvals" element={<MyApprovalsPage />} /><Route path="/profile" element={<Profile />} /><Route path="/admin/users" element={<AdminOnly role={role}><UsersPage /></AdminOnly>} /><Route path="/admin/users/:id" element={<AdminOnly role={role}><UserDetail /></AdminOnly>} /><Route path="/admin/groups" element={<AdminOnly role={role}><GroupsPage /></AdminOnly>} /><Route path="/admin/roles" element={<AdminOnly role={role}><RolesPage /></AdminOnly>} /><Route path="/admin/access-requests" element={<AdminOnly role={role}><Requests /></AdminOnly>} /><Route path="/admin/access-requests/:id" element={<AdminOnly role={role}><RequestDetailInteractive /></AdminOnly>} /><Route path="/admin/assignments" element={<AdminOnly role={role}><AssignmentsInteractive /></AdminOnly>} /><Route path="/admin/access-packages" element={<AdminOnly role={role}><AccessPackagesInteractive /></AdminOnly>} /><Route path="/admin/policies" element={<AdminOnly role={role}><PoliciesPage /></AdminOnly>} /><Route path="/admin/audit" element={<AdminOnly role={role}><AuditPage /></AdminOnly>} /><Route path="/admin/providers" element={<AdminOnly role={role}><ProvidersPage /></AdminOnly>} /><Route path="/admin/sync" element={<AdminOnly role={role}><SyncPage /></AdminOnly>} /><Route path="/admin/onboarding" element={<AdminOnly role={role}><OnboardingPage /></AdminOnly>} /><Route path="/admin/security" element={<AdminOnly role={role}><SecurityPage /></AdminOnly>} /><Route path="/admin/branding" element={<AdminOnly role={role}><BrandingPage /></AdminOnly>} /><Route path="/admin/sod" element={auth.isSodAdmin ? <SodPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/sod/configuration" element={auth.isSodAdmin ? <SodConfigurationPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/soc" element={auth.isSocAdmin ? <SocDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health" element={auth.isServerAdmin ? <ServerHealthDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health/troubleshooting" element={auth.isServerAdmin ? <TroubleshootingDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="*" element={<Navigate to="/dashboard" replace />} /></Routes></Shell></IdleGuard>;
 }
 function SignInScreen() {
   const auth = useAuth();
   const branding = useBranding();
+  const supportEmail = useSupportContactEmail();
   // Deliberately no mention of Break-Glass anywhere on this screen, for any user — it's reachable only via the
   // hidden /emergency-access/:token URL (src/EmergencyAccess.tsx), generated solely by a console command
   // (backend/app/cli.py). An IDP outage shows a generic notice here, never an actionable recovery hint.
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: '#f4f7f9', padding: 24 }}>
       <img src={branding?.sign_in_logo || logo} alt="AccessPilot" style={{ width: 140, height: 140, objectFit: 'contain', marginBottom: 26 }} />
-      <h1>Sign in to AccessPilot</h1>
-      <p className="subtitle">Use your Microsoft Entra account to continue.</p>
-      {auth.idpUnreachable && <div className="notice" style={{ background: '#fdecea', color: '#8c2b21', marginTop: 14, maxWidth: 380 }}>The identity provider is currently unavailable. Please contact your administrator.</div>}
-      <button className="btn btn-primary" onClick={auth.signIn} style={{ marginTop: 18 }}>Sign in</button>
+      {auth.idpUnreachable ? <div className="panel" style={{ maxWidth: 420, padding: 28, textAlign: 'center' }}>
+        <div className="stat-icon" style={{ width: 40, height: 40, margin: '0 auto 16px', background: '#fdecea', color: '#8c2b21' }}><AlertTriangle size={20}/></div>
+        <h1 style={{ fontSize: 19 }}>Can't reach the identity provider</h1>
+        <p className="subtitle" style={{ marginTop: 10, marginBottom: supportEmail ? 6 : 18 }}>This usually means a network issue between AccessPilot and Microsoft Entra, not a problem with your account. Please contact your administrator{supportEmail ? '' : ' to get this resolved'}.</p>
+        {supportEmail && <p style={{ marginBottom: 18 }}><a href={`mailto:${supportEmail}`} style={{ color: 'var(--teal)', fontWeight: 700 }}>{supportEmail}</a></p>}
+        <button className="btn btn-primary" onClick={auth.signIn}>Try again</button>
+      </div> : <>
+        <h1>Sign in to AccessPilot</h1>
+        <p className="subtitle">Use your Microsoft Entra account to continue.</p>
+        <button className="btn btn-primary" onClick={auth.signIn} style={{ marginTop: 18 }}>Sign in</button>
+      </>}
       <div style={{ position: 'fixed', right: 24, bottom: 20, fontSize: 11, color: '#8a9296' }}>Powered by <strong style={{ color: '#52656d' }}>{branding?.powered_by_text || 'Clover-X'}</strong></div>
     </div>
   );
@@ -188,6 +215,9 @@ function SecurityPage() {
         </select>
       </label>
       {!COMMON_TIMEZONES.includes(form.timezone) && <label className="key" style={{display:'block',marginBottom:22,maxWidth:320}}><span>IANA timezone name (e.g. "Asia/Kolkata")</span><input className="select" style={{width:'100%'}} value={form.timezone} onChange={event => setForm({...form, timezone: event.target.value})}/></label>}
+      <div className="key" style={{marginBottom:8}}><span>Fallback support contact</span></div>
+      <p className="subtitle" style={{marginTop:0,marginBottom:14,maxWidth:640}}>Shown on the sign-in screen if the identity provider itself can't be reached (e.g. no network route to it) — a real person to contact instead of a dead end. Leave blank to show a generic "contact your administrator" message with no address.</p>
+      <label className="key" style={{display:'block',marginBottom:22,maxWidth:320}}><span>Support contact email</span><input className="select" style={{width:'100%'}} type="email" placeholder="helpdesk@yourcompany.com" value={form.support_contact_email || ''} onChange={event => setForm({...form, support_contact_email: event.target.value})}/></label>
       {message && <div className="notice" style={{marginBottom:14}}>{message}</div>}
       <button className="btn btn-primary" disabled={saving} onClick={save}>{saving ? 'Saving...' : 'Save'}</button>
     </div></div>}
@@ -568,16 +598,443 @@ function SodConfigurationPage() {
     </div>
   </Page>;
 }
+interface ApiSocFieldInfo { field: string; label: string; }
+interface ApiSocSourceInfo { source: string; label: string; fields: ApiSocFieldInfo[]; }
+interface ApiSocFields { sources: ApiSocSourceInfo[]; builtin_widgets: ApiSocFieldInfo[]; }
+interface ApiSocWidgetFilter { field: string; value: string; }
+interface ApiSocWidget { id: string; title: string; kind: 'card' | 'timeseries' | 'bar' | 'list'; source: string; builtin_id?: string | null; group_by?: string | null; filters: ApiSocWidgetFilter[]; visible: boolean; order: number; }
+interface ApiSocLayout { widgets: ApiSocWidget[]; }
+interface ApiSocWidgetDataResult { value?: number | null; series?: { date?: string; label?: string; count?: number; value?: number }[] | null; rows?: Record<string, string>[] | null; }
+interface ApiSocWidgetDataResponse { results: Record<string, ApiSocWidgetDataResult>; }
+const emptySocWidgetForm = { title: '', source: 'builtin', builtin_id: '', kind: 'card' as ApiSocWidget['kind'], group_by: '', filter_field: '', filter_value: '' };
+
+// A small, hand-rolled horizontal bar list — used for both 'bar' and 'list' custom-graph kinds, since the only
+// real difference the user asked for is which fields feed it, not a genuinely different visual. No new charting
+// dependency, same convention as ActivationTimelineChart/PieChart elsewhere in this app.
+function SocBarList({ rows, onRowClick }: { rows: { label: string; value: number }[]; onRowClick?: (label: string) => void }) {
+  if (rows.length === 0) return <div className="empty">No matching data yet.</div>;
+  const max = Math.max(...rows.map(r => r.value), 1);
+  return <div className="soc-bar-list">{rows.slice(0, 12).map(r => <div key={r.label} className={`soc-bar-row${onRowClick ? ' soc-bar-row-clickable' : ''}`} onClick={onRowClick ? () => onRowClick(r.label) : undefined}>
+    <span className="soc-bar-label">{r.label}</span>
+    <span className="soc-bar-track"><span className="soc-bar-fill" style={{ width: `${(r.value / max) * 100}%` }}/></span>
+    <span className="soc-bar-value">{r.value}</span>
+  </div>)}</div>;
+}
+
+function SocDashboard() {
+  const auth = useAuth();
+  const timezone = useAppTimezone();
+  const { data: fields } = useApiResource<ApiSocFields>('/api/v1/soc/fields');
+  const { data: layoutData, loading: layoutLoading } = useApiResource<ApiSocLayout>('/api/v1/soc/layout');
+  const [widgets, setWidgets] = useState<ApiSocWidget[] | null>(null);
+  const [data, setData] = useState<Record<string, ApiSocWidgetDataResult>>({});
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [showBuilder, setShowBuilder] = useState(false);
+  const [builderForm, setBuilderForm] = useState(emptySocWidgetForm);
+  const [builderMessage, setBuilderMessage] = useState('');
+  const [drilldown, setDrilldown] = useState<{ title: string; date: string; rows: Record<string, any>[]; loading: boolean } | null>(null);
+  useEffect(() => { if (layoutData) setWidgets(layoutData.widgets); }, [layoutData]);
+
+  // Every card and graph drills into the real rows behind whatever was clicked: a card shows the rows behind its
+  // total, a timeseries point shows that day's rows, and a bar/list entry shows the rows in that group. The "SoD
+  // violations" card is the one exception with real per-row detail beyond a plain row list (exception coverage),
+  // handled entirely server-side — the frontend just renders whatever shape comes back.
+  const openDrilldown = async (widget: ApiSocWidget, point?: { date: string; count: number }, groupValue?: string) => {
+    const date = point?.date || '';
+    setDrilldown({ title: widget.title, date, rows: [], loading: true });
+    const response = await auth.apiRequest('/api/v1/soc/widget-drilldown', { method: 'POST', body: JSON.stringify({ widget, date: point?.date, group_value: groupValue }) });
+    const rows = response.ok ? ((await response.json()) as { rows: Record<string, any>[] }).rows : [];
+    setDrilldown({ title: widget.title, date, rows, loading: false });
+  };
+
+  const loadData = async (list: ApiSocWidget[]) => {
+    if (list.length === 0) { setData({}); return; }
+    const response = await auth.apiRequest('/api/v1/soc/widget-data', { method: 'POST', body: JSON.stringify({ widgets: list }) });
+    if (response.ok) { const body = await response.json() as ApiSocWidgetDataResponse; setData(body.results); }
+  };
+  useEffect(() => { if (widgets) void loadData(widgets); }, [widgets]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Live: matches the admin Dashboard's own 30s polling cadence — no push infrastructure exists anywhere in this
+  // app, so "real-time" always means a short interval timer re-fetching the same widgets' data.
+  useEffect(() => {
+    const id = setInterval(() => { if (widgets) void loadData(widgets); }, 30000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [widgets]);
+
+  const saveLayout = (next: ApiSocWidget[]) => {
+    setWidgets(next);
+    void auth.apiRequest('/api/v1/soc/layout', { method: 'PUT', body: JSON.stringify({ widgets: next }) });
+  };
+  const removeWidget = (id: string) => { if (widgets) saveLayout(widgets.filter(w => w.id !== id)); };
+
+  // Real mouse drag-and-drop reordering via the browser's native HTML5 Drag and Drop API — no grid-layout
+  // dependency added. Dropping a widget onto another one moves it to that position in the order (like reordering
+  // cards on a Trello board), then persists immediately.
+  const sorted = (widgets || []).slice().sort((a, b) => a.order - b.order);
+  const handleDrop = (targetId: string) => {
+    if (!widgets || !dragId || dragId === targetId) { setDragId(null); return; }
+    const list = sorted.slice();
+    const fromIndex = list.findIndex(w => w.id === dragId);
+    const toIndex = list.findIndex(w => w.id === targetId);
+    if (fromIndex === -1 || toIndex === -1) { setDragId(null); return; }
+    const [moved] = list.splice(fromIndex, 1);
+    list.splice(toIndex, 0, moved);
+    saveLayout(list.map((w, i) => ({ ...w, order: i })));
+    setDragId(null);
+  };
+
+  const openBuilder = () => { setBuilderForm(emptySocWidgetForm); setBuilderMessage(''); setShowBuilder(true); };
+  const submitBuilder = () => {
+    if (!widgets) return;
+    if (builderForm.source === 'builtin') {
+      if (!builderForm.builtin_id) { setBuilderMessage('Choose a built-in panel.'); return; }
+      const meta = fields?.builtin_widgets.find(b => b.field === builderForm.builtin_id);
+      const kind = builderForm.builtin_id === 'high_signal_events' ? 'list' : builderForm.builtin_id === 'activity_timeline' ? 'timeseries' : 'card';
+      saveLayout([...widgets, { id: `${builderForm.builtin_id}-${Date.now()}`, title: meta?.label || builderForm.builtin_id, kind, source: 'builtin', builtin_id: builderForm.builtin_id, filters: [], visible: true, order: widgets.length }]);
+    } else {
+      if (!builderForm.title.trim()) { setBuilderMessage('Give the graph a title.'); return; }
+      if (builderForm.kind !== 'card' && builderForm.kind !== 'timeseries' && !builderForm.group_by) { setBuilderMessage('Choose a field to group by.'); return; }
+      const filters: ApiSocWidgetFilter[] = builderForm.filter_field && builderForm.filter_value ? [{ field: builderForm.filter_field, value: builderForm.filter_value }] : [];
+      saveLayout([...widgets, { id: `custom-${Date.now()}`, title: builderForm.title.trim(), kind: builderForm.kind, source: builderForm.source, group_by: builderForm.kind === 'timeseries' ? null : builderForm.group_by, filters, visible: true, order: widgets.length }]);
+    }
+    setShowBuilder(false);
+  };
+
+  const activeSourceFields = fields?.sources.find(s => s.source === builderForm.source)?.fields || [];
+
+  const renderWidget = (widget: ApiSocWidget) => {
+    const result = data[widget.id];
+    const kindClass = widget.kind === 'card' ? 'soc-widget-card' : widget.kind === 'timeseries' ? 'soc-widget-chart' : 'soc-widget-list';
+    return <div key={widget.id} className={`soc-widget ${kindClass} ${dragId === widget.id ? 'soc-widget-dragging' : ''}`} draggable
+      onDragStart={event => { event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', widget.id); setDragId(widget.id); }}
+      onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }}
+      onDrop={event => { event.preventDefault(); handleDrop(widget.id); }}
+      onDragEnd={() => setDragId(null)}>
+      <div className="soc-widget-head">
+        <span className="soc-widget-drag" title="Drag to move"><Menu size={13}/></span>
+        <h3>{widget.title}</h3>
+        <div className="soc-widget-controls">
+          <button type="button" aria-label="Remove widget" onClick={() => removeWidget(widget.id)}><X size={13}/></button>
+        </div>
+      </div>
+      <div className="soc-widget-body">
+        {!result ? <div className="empty">Loading...</div> : <>
+          {widget.kind === 'card' && <div className="soc-card-clickable" onClick={() => void openDrilldown(widget)}>
+              <div className="soc-card-value">{result.value ?? '—'}</div>
+              <div className="soc-card-hint">Click to view details</div>
+            </div>}
+          {widget.kind === 'timeseries' && <ActivationTimelineChart series={(result.series || []).map(p => ({ date: p.date || '', count: p.count ?? p.value ?? 0 }))} yAxisLabel="Events" unitLabel="event" tooltipSuffix="recorded" onPointClick={point => void openDrilldown(widget, point)}/>}
+          {(widget.kind === 'bar' || widget.kind === 'list') && (widget.builtin_id === 'high_signal_events'
+            ? ((result.rows || []).length === 0 ? <div className="empty">No high-signal events recorded yet.</div> : (result.rows || []).map(row => <div key={row.id} className="soc-event-row"><div className="soc-event-main"><strong>{(row.action || '').replace(/_/g, ' ')}</strong> — {row.actor_display_name || 'System'}{row.target_user_display_name ? ` → ${row.target_user_display_name}` : ''}</div><div className="soc-event-time">{formatDateTime(row.timestamp, timezone)}</div></div>))
+            : <SocBarList rows={(result.series || []).map(p => ({ label: p.label || '—', value: p.value ?? 0 }))} onRowClick={label => void openDrilldown(widget, undefined, label)}/>)}
+        </>}
+      </div>
+    </div>;
+  };
+
+  return <div className="soc-page"><Page eyebrow="SECURITY OPERATIONS" title="Security Operations Dashboard" subtitle="Real-time platform activity, blocked or overridden access, emergency-access usage, and open Separation-of-Duties conflicts. Drag a card to reorder it, or build your own graph from any available field." action={<button className="btn btn-primary" onClick={openBuilder}><Plus size={14}/> Add widget</button>}>
+    {showBuilder && <form role="dialog" aria-modal="true" className="panel" style={{ maxWidth: 480, marginBottom: 18 }} onSubmit={event => { event.preventDefault(); submitBuilder(); }}>
+      <div className="panel-head"><h2>Add widget</h2><button type="button" className="btn" aria-label="Close" onClick={() => setShowBuilder(false)}><X size={14}/></button></div>
+      <div className="detail-section">
+        <label className="key" style={{ display: 'block', marginBottom: 14 }}><span>Widget type</span>
+          <select className="select" style={{ width: '100%' }} value={builderForm.source} onChange={event => setBuilderForm({ ...emptySocWidgetForm, source: event.target.value })}>
+            <option value="builtin">Built-in panel</option>
+            {(fields?.sources || []).map(s => <option key={s.source} value={s.source}>Custom graph — {s.label}</option>)}
+          </select>
+        </label>
+        {builderForm.source === 'builtin' ? <label className="key" style={{ display: 'block' }}><span>Panel</span>
+          <select className="select" style={{ width: '100%' }} value={builderForm.builtin_id} onChange={event => setBuilderForm({ ...builderForm, builtin_id: event.target.value })}>
+            <option value="">Select...</option>
+            {(fields?.builtin_widgets || []).map(b => <option key={b.field} value={b.field}>{b.label}</option>)}
+          </select>
+        </label> : <>
+          <label className="key" style={{ display: 'block', marginBottom: 14 }}><span>Title</span><input className="select" style={{ width: '100%' }} value={builderForm.title} onChange={event => setBuilderForm({ ...builderForm, title: event.target.value })}/></label>
+          <label className="key" style={{ display: 'block', marginBottom: 14 }}><span>Chart type</span>
+            <select className="select" style={{ width: '100%' }} value={builderForm.kind} onChange={event => setBuilderForm({ ...builderForm, kind: event.target.value as ApiSocWidget['kind'] })}>
+              <option value="card">Number (count)</option>
+              <option value="timeseries">Line chart over time</option>
+              <option value="bar">Bar chart (grouped)</option>
+              <option value="list">List (grouped)</option>
+            </select>
+          </label>
+          {(builderForm.kind === 'bar' || builderForm.kind === 'list') && <label className="key" style={{ display: 'block', marginBottom: 14 }}><span>Group by field</span>
+            <select className="select" style={{ width: '100%' }} value={builderForm.group_by} onChange={event => setBuilderForm({ ...builderForm, group_by: event.target.value })}>
+              <option value="">Select a field...</option>
+              {activeSourceFields.map(f => <option key={f.field} value={f.field}>{f.label}</option>)}
+            </select>
+          </label>}
+          <div className="key" style={{ marginBottom: 8 }}><span>Filter (optional)</span></div>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+            <select className="select" style={{ flex: 1 }} value={builderForm.filter_field} onChange={event => setBuilderForm({ ...builderForm, filter_field: event.target.value })}>
+              <option value="">No filter</option>
+              {activeSourceFields.map(f => <option key={f.field} value={f.field}>{f.label}</option>)}
+            </select>
+            <input className="select" style={{ flex: 1 }} placeholder="equals..." disabled={!builderForm.filter_field} value={builderForm.filter_value} onChange={event => setBuilderForm({ ...builderForm, filter_value: event.target.value })}/>
+          </div>
+        </>}
+        {builderMessage && <div className="notice" style={{ marginTop: 10 }}>{builderMessage}</div>}
+      </div>
+      <div className="detail-section" style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}><button type="button" className="btn" onClick={() => setShowBuilder(false)}>Cancel</button><button type="submit" className="btn btn-primary">Add widget</button></div>
+    </form>}
+    {layoutLoading || !widgets ? <div className="empty">Loading Security Operations dashboard...</div> :
+      widgets.length === 0 ? <div className="empty">No widgets on this dashboard yet — click "Add widget" to build one.</div> :
+      <div className="soc-widget-grid">{sorted.map(w => renderWidget(w))}</div>}
+    {drilldown && <div className="overlay-backdrop" onClick={() => setDrilldown(null)}>
+      <div className="overlay-card" onClick={event => event.stopPropagation()}>
+        <div className="panel-head"><h2>{drilldown.title}{drilldown.date ? ` — ${formatDate(drilldown.date, timezone)}` : ''}</h2><button type="button" className="btn" aria-label="Close" onClick={() => setDrilldown(null)}><X size={14}/></button></div>
+        <div className="table-wrap" style={{ padding: '4px 20px 20px' }}>
+          {drilldown.loading ? <div className="empty">Loading...</div> : drilldown.rows.length === 0 ? <div className="empty">{drilldown.date ? 'No matching records for this day.' : 'No conflicts found — every policy is currently clear.'}</div> : drilldown.rows.map((row, index) => <div key={row.id || index} className="soc-event-row">
+            {row.policy_name ? <div className="soc-event-main">
+              <strong>{row.user_display_name}</strong> — {row.policy_name}
+              <span className={`badge ${row.exception_active ? 'success' : 'danger'}`} style={{ marginLeft: 8 }}>{row.exception_active ? 'Exception active' : 'Open'}</span>
+              <div className="soc-event-time" style={{ marginTop: 4 }}>Holds: {(row.side_a as string[]).join(', ')} + {(row.side_b as string[]).join(', ')}{row.exception_active && row.exception_expires_at ? ` — exception expires ${formatDate(row.exception_expires_at, timezone)}` : ''}</div>
+            </div> : row.action
+              ? <div className="soc-event-main"><strong>{row.action.replace(/_/g, ' ')}</strong> — {row.actor_display_name || 'System'}{row.target_user_display_name ? ` → ${row.target_user_display_name}` : ''}</div>
+              : <div className="soc-event-main"><strong>{row.status}</strong> — {row.resource_type}{row.user_display_name ? ` · ${row.user_display_name}` : ''}</div>}
+            {!row.policy_name && <div className="soc-event-time">{formatDateTime(row.timestamp || row.created_at, timezone)}</div>}
+          </div>)}
+        </div>
+      </div>
+    </div>}
+  </Page></div>;
+}
+
+// ---- System Health (AccessPilot.ServerAdmin) ----
+// V1 is deliberately mock data from a real, role-gated endpoint (GET /api/v1/server-health) — only a real
+// AccessPilot.ServerAdmin can reach it at all (see security/auth.py), but every number on the page today is
+// placeholder data pending v2's real instrumentation (see services/server_health.py for exactly which pieces
+// are already real-and-cheap to wire up vs. which need new work). The frontend renders whatever shape comes
+// back identically either way, so swapping the backend's internals later needs zero changes here.
+interface ApiServiceStatusCard { name: string; tag: string; status: string; variant: string; metric: string; metric_unit: string; metric_label: string; foot_label: string; foot_value: string; }
+interface ApiRequestVolumeChart { avg_req_per_min: number; bars: number[]; latency_line: number[]; }
+interface ApiWorkerStatus { name: string; cadence: string; last_run: string; ticks: string[]; }
+interface ApiWorkflowStatus { name: string; description: string; kind: string; cadence: string; status: string; variant: string; last_run: string; ticks: string[]; recent_activity: string; }
+interface ApiEndpointHealth { method: string; path: string; status: string; status_variant: string; avg: string; p95: string; req_per_min: number; error_rate: string; }
+interface ApiDatabaseHealth { pool_used: number; pool_max: number; avg_query_ms: number; slowest_query_ms: number; audit_log_rows: number; replication_lag: string; last_backup: string; }
+interface ApiLiveEvent { level: string; time: string; message: string; }
+interface ApiServerHealth { is_mock: boolean; overall_status: string; services: ApiServiceStatusCard[]; request_chart: ApiRequestVolumeChart; workers: ApiWorkerStatus[]; workflows: ApiWorkflowStatus[]; endpoints: ApiEndpointHealth[]; database: ApiDatabaseHealth; events: ApiLiveEvent[]; }
+
+function ServerHealthDashboard() {
+  const { data, loading, error, reload } = useApiResource<ApiServerHealth>('/api/v1/server-health');
+  const [clock, setClock] = useState(() => new Date().toLocaleTimeString('en-US', { hour12: false }));
+  useEffect(() => { const id = setInterval(() => setClock(new Date().toLocaleTimeString('en-US', { hour12: false })), 1000); return () => clearInterval(id); }, []);
+  // Real-time: every 20s, matching the user's explicit ask — same interval-timer "real-time" pattern already
+  // used by the admin Dashboard (30s) and SOC (30s), just a tighter cadence since this page is meant for
+  // actively watching something during an incident, not a passive overview. Empty deps deliberately: `reload`
+  // is a fresh closure every render (useApiResource doesn't memoize it) but always calls the same underlying
+  // stable setState setter, so capturing it once at mount is safe — depending on it would tear down and
+  // recreate this interval on every render (including every 1s clock tick above), so the 20s timer would never
+  // actually get to fire.
+  useEffect(() => { const id = setInterval(reload, 20000); return () => clearInterval(id); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return <div className="serverhealth-page"><Page eyebrow="SYSTEM HEALTH" title="System Health" subtitle="Live status of every server-side component — API, database, background workers, and connected identity providers." action={<div className="sh-status-strip"><span className={`sh-pulse-dot sh-pulse-${data?.overall_status === 'operational' ? 'ok' : 'warn'}`}/><span>{data ? (data.overall_status === 'operational' ? 'All systems operational' : data.overall_status) : 'Checking...'}</span><span className="sh-clock">· {clock}</span><Link to="/admin/server-health/troubleshooting" className="btn" style={{ marginLeft: 10 }}>Troubleshoot</Link></div>}>
+    {loading && !data && <div className="empty">Loading system health...</div>}
+    {error && <div className="empty">{error}</div>}
+    {data && <>
+      <div className="sh-status-grid">
+        {data.services.map(card => <div key={card.name} className={`sh-status-card sh-${card.variant}`}>
+          <div className="sh-status-head">
+            <div><div className="sh-status-name">{card.name}</div><div className="sh-status-tag">{card.tag}</div></div>
+            <span className={`sh-status-badge sh-${card.variant}`}>{card.status}</span>
+          </div>
+          <div className="sh-status-metric">{card.metric}<span className="sh-status-metric-unit">{card.metric_unit}</span></div>
+          <div className="sh-status-metric-label">{card.metric_label}</div>
+          <div className="sh-status-foot"><span>{card.foot_label}</span><span>{card.foot_value}</span></div>
+        </div>)}
+      </div>
+
+      <div className="panel sh-panel" style={{ marginBottom: 18 }}>
+        <div className="panel-head"><h2>API request volume &amp; latency — last 60 min</h2><span className="panel-link">avg {data.request_chart.avg_req_per_min} req/min</span></div>
+        <div className="detail-section"><ServerHealthChart chart={data.request_chart}/>
+          <div className="sh-chart-legend"><span><i className="sh-legend-swatch" style={{ background: '#D7DCE3' }}/>Requests / min</span><span><i className="sh-legend-swatch" style={{ background: 'var(--sh-accent)' }}/>p95 latency</span></div>
+        </div>
+      </div>
+
+      <div className="section-label">WORKFLOWS</div>
+      <div className="sh-workflow-grid">
+        {data.workflows.map(workflow => <div key={workflow.name} className={`sh-workflow-card sh-${workflow.variant}`}>
+          <div className="sh-workflow-head">
+            <div><div className="sh-workflow-name">{workflow.name}</div><div className="sh-workflow-kind">{workflow.kind === 'background' ? `Background · ${workflow.cadence}` : 'On demand'}</div></div>
+            <span className={`sh-status-badge sh-${workflow.variant}`}>{workflow.status}</span>
+          </div>
+          <div className="sh-workflow-desc">{workflow.description}</div>
+          {workflow.ticks.length > 0 && <div className="sh-tick-row sh-tick-row-left">{workflow.ticks.map((tick, index) => <span key={index} className={`sh-tick sh-tick-${tick}`}/>)}</div>}
+          <div className="sh-workflow-foot"><span>{workflow.last_run}</span><span>{workflow.recent_activity}</span></div>
+        </div>)}
+      </div>
+
+      <div className="panel sh-panel" style={{ marginBottom: 14 }}>
+        <div className="panel-head"><h2>Endpoint health — last 15 min</h2><span className="panel-link">{data.endpoints.length} routes monitored</span></div>
+        <div className="table-wrap"><table><thead><tr><th>Method</th><th>Path</th><th>Status</th><th>Avg</th><th>P95</th><th>Req/min</th><th>Error rate</th></tr></thead><tbody>
+          {data.endpoints.map(endpoint => <tr key={`${endpoint.method}-${endpoint.path}`}>
+            <td><span className={`sh-method-badge sh-method-${endpoint.method.toLowerCase()}`}>{endpoint.method}</span></td>
+            <td>{endpoint.path}</td>
+            <td><span className={`badge ${endpoint.status_variant === 'info' ? 'success' : endpoint.status_variant === 'warn' ? 'warning' : endpoint.status_variant === 'error' ? 'danger' : 'neutral'}`}>{endpoint.status}</span></td>
+            <td>{endpoint.avg}</td><td>{endpoint.p95}</td><td>{endpoint.req_per_min}</td><td>{endpoint.error_rate}</td>
+          </tr>)}
+        </tbody></table></div>
+      </div>
+
+      <div className="sh-bottom-grid">
+        <div className="panel sh-panel">
+          <div className="panel-head"><h2>Database</h2><span className="panel-link">Postgres</span></div>
+          <div className="detail-section">
+            <div className="sh-db-row"><span>Connection pool</span><span>{data.database.pool_used} / {data.database.pool_max}</span></div>
+            <div className="sh-pool-track"><div className="sh-pool-fill" style={{ width: `${(data.database.pool_used / data.database.pool_max) * 100}%` }}/></div>
+            <div className="sh-db-row" style={{ marginTop: 14 }}><span>Avg query time</span><span>{data.database.avg_query_ms} ms</span></div>
+            <div className="sh-db-row"><span>Slowest query (5m)</span><span>{data.database.slowest_query_ms} ms</span></div>
+            <div className="sh-db-row"><span>Rows in audit_logs</span><span>{data.database.audit_log_rows.toLocaleString()}</span></div>
+            <div className="sh-db-row"><span>Replication lag</span><span>{data.database.replication_lag}</span></div>
+            <div className="sh-db-row"><span>Last backup</span><span>{data.database.last_backup}</span></div>
+          </div>
+        </div>
+        <div className="panel sh-panel">
+          <div className="panel-head"><h2>Live event log</h2><span className="panel-link">auto-scrolling</span></div>
+          <div className="table-wrap"><table><thead><tr><th style={{ width: 70 }}>Level</th><th style={{ width: 90 }}>Time</th><th>Event</th></tr></thead><tbody>
+            {data.events.map((event, index) => <tr key={index}>
+              <td><span className={`badge ${event.level === 'info' ? 'neutral' : event.level === 'warn' ? 'warning' : event.level === 'error' ? 'danger' : 'neutral'}`}>{event.level.toUpperCase()}</span></td>
+              <td className="sh-log-time">{event.time}</td>
+              <td>{event.message}</td>
+            </tr>)}
+          </tbody></table></div>
+        </div>
+      </div>
+    </>}
+  </Page></div>;
+}
+
+function ServerHealthChart({ chart }: { chart: ApiRequestVolumeChart }) {
+  const width = 760, height = 190;
+  const barCount = chart.bars.length;
+  const barWidth = 10, gap = (width - barCount * barWidth) / (barCount + 1);
+  const maxBar = Math.max(...chart.bars, 1);
+  const maxLatency = Math.max(...chart.latency_line, 1);
+  const barPoints = chart.bars.map((value, index) => ({ x: gap + index * (barWidth + gap), height: (value / maxBar) * 130 }));
+  const linePoints = chart.latency_line.map((value, index) => `${gap + index * (barWidth + gap) + barWidth / 2},${20 + (1 - value / maxLatency) * 130}`).join(' ');
+  return <svg viewBox={`0 0 ${width} ${height}`} width="100%" height={height} preserveAspectRatio="none">
+    <g stroke="var(--line)" strokeWidth={1}>
+      <line x1={0} y1={10} x2={width} y2={10}/><line x1={0} y1={55} x2={width} y2={55}/><line x1={0} y1={100} x2={width} y2={100}/><line x1={0} y1={145} x2={width} y2={145}/>
+    </g>
+    <g fill="#E9EBEF">{barPoints.map((bar, index) => <rect key={index} x={bar.x} y={165 - bar.height} width={barWidth} height={bar.height}/>)}</g>
+    <polyline fill="none" stroke="var(--sh-accent)" strokeWidth={2} points={linePoints}/>
+  </svg>;
+}
+
+// ---- Troubleshooting (drill-down from System Health) ----
+// Same real, role-gated data discipline as System Health — every field here comes from a real signal (recent
+// SyncError rows, the same live service cards, real audit history), never a fabricated scenario. When nothing
+// is actually wrong, `incident` is null and the page shows a calm "no active incidents" state instead of
+// pretending there's always something to diagnose.
+interface ApiIncident { title: string; severity: string; started_label: string; affects: string[]; }
+interface ApiRootCause { rank: number; title: string; detail: string; confidence: string; }
+interface ApiChecklistItem { label: string; detail: string; done: boolean; }
+interface ApiErrorTrendPoint { label: string; count: number; }
+interface ApiDependencyNode { name: string; status: string; variant: string; }
+interface ApiProviderDetail { name: string; type: string; tag: string; status: string; variant: string; detail: string; }
+interface ApiTroubleshootLog { level: string; time: string; message: string; service: string; }
+interface ApiTroubleshooting { incident: ApiIncident | null; root_causes: ApiRootCause[]; checklist: ApiChecklistItem[]; error_trend: ApiErrorTrendPoint[]; dependency_chain: ApiDependencyNode[]; providers: ApiProviderDetail[]; logs: ApiTroubleshootLog[]; primary_provider_id: string | null; }
+
+function TroubleshootingDashboard() {
+  const { data, loading, error, reload } = useApiResource<ApiTroubleshooting>('/api/v1/server-health/troubleshooting');
+  const [logFilter, setLogFilter] = useState('All services');
+  useEffect(() => { const id = setInterval(reload, 20000); return () => clearInterval(id); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const copyDiagnostics = async () => {
+    try { await navigator.clipboard.writeText(JSON.stringify(data, null, 2)); } catch { /* clipboard unavailable — silently ignore, nothing else to do */ }
+  };
+
+  const serviceOptions = ['All services', ...Array.from(new Set((data?.logs || []).map(log => log.service)))];
+  const visibleLogs = (data?.logs || []).filter(log => logFilter === 'All services' || log.service === logFilter);
+
+  return <div className="troubleshoot-page"><Page eyebrow="SYSTEM HEALTH" title="Troubleshooting" subtitle="Diagnose and resolve active issues, drilled down from System Health." action={<Link to="/admin/server-health" className="btn">← Back to System Health</Link>}>
+    {loading && !data && <div className="empty">Loading diagnostics...</div>}
+    {error && <div className="empty">{error}</div>}
+    {data && <>
+      {data.incident ? <div className={`ts-incident-banner ts-${data.incident.severity}`}>
+        <div className="ts-incident-left">
+          <div className="ts-incident-icon">!</div>
+          <div><div className="ts-incident-title">{data.incident.title}</div><div className="ts-incident-meta">Started {data.incident.started_label} · affects: {data.incident.affects.join(', ')}</div></div>
+        </div>
+      </div> : <div className="ts-incident-banner ts-ok"><div className="ts-incident-left"><div className="ts-incident-icon">✓</div><div><div className="ts-incident-title">No active incidents</div><div className="ts-incident-meta">Every service card on System Health is currently healthy.</div></div></div></div>}
+
+      <div className="ts-grid-2">
+        <div className="panel ts-panel">
+          <div className="panel-head"><h2>Likely root cause</h2><span className="panel-meta">ranked</span></div>
+          {data.root_causes.length === 0 ? <div className="empty">Nothing to diagnose right now.</div> : data.root_causes.map(cause => <div key={cause.rank} className="ts-cause-row">
+            <div className={`ts-cause-rank ${cause.rank === 1 ? 'ts-top' : ''}`}>{cause.rank}</div>
+            <div className="ts-cause-text"><b>{cause.title}</b> — {cause.detail}<div className="ts-cause-conf">Confidence: {cause.confidence}</div></div>
+          </div>)}
+        </div>
+        <div className="panel ts-panel">
+          <div className="panel-head"><h2>Diagnostic checklist</h2><span className="panel-meta">{data.checklist.filter(item => item.done).length} of {data.checklist.length} done</span></div>
+          {data.checklist.length === 0 ? <div className="empty">Nothing to check right now.</div> : data.checklist.map(item => <div key={item.label} className="ts-check-item">
+            <div className={`ts-check-box ${item.done ? 'ts-done' : ''}`}/>
+            <div><div className={`ts-check-label ${item.done ? 'ts-done' : ''}`}>{item.label}</div><div className="ts-check-sub">{item.detail}</div></div>
+          </div>)}
+          <div className="section-label" style={{ marginTop: 18 }}>QUICK ACTIONS</div>
+          <div className="ts-qa-grid">
+            <div className="ts-qa-btn"><div className="ts-qa-title">↻ Retry Graph connection</div><div className="ts-qa-sub">Requires an Admin — Admin → Providers → Test connection</div></div>
+            <div className="ts-qa-btn"><div className="ts-qa-title">▶ Run manual sync</div><div className="ts-qa-sub">Requires an Admin — Admin → Sync → Sync now</div></div>
+            <div className="ts-qa-btn" style={{ cursor: 'pointer' }} onClick={() => void copyDiagnostics()}><div className="ts-qa-title">📋 Copy diagnostics</div><div className="ts-qa-sub">Copies this page's real data as JSON</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div className="panel ts-panel" style={{ marginBottom: 14 }}>
+        <div className="panel-head"><h2>Error rate — last 30 min</h2><span className="panel-meta">real SyncError timestamps</span></div>
+        <TroubleshootTrendChart points={data.error_trend}/>
+        <div className="section-label" style={{ marginTop: 14 }}>DEPENDENCY CHAIN</div>
+        <div className="ts-chain-row">{data.dependency_chain.map((node, index) => <Fragment key={node.name}>
+          {index > 0 && <div className="ts-chain-arrow">→</div>}
+          <div className="ts-chain-node"><div className={`ts-chain-pill ts-${node.variant}`}><div className="ts-chain-name">{node.name}</div></div><div className={`ts-chain-status ts-${node.variant}`}>{node.status}</div></div>
+        </Fragment>)}</div>
+      </div>
+
+      <div className="ts-grid-2">
+        <div className="panel ts-panel">
+          <div className="panel-head"><h2>Identity providers</h2><span className="panel-meta">portal authentication</span></div>
+          {data.providers.map(provider => <div key={provider.name} className="ts-idp-row">
+            <div className="ts-idp-left"><div className={`ts-idp-dot ts-${provider.variant}`}/><div><div className="ts-idp-name">{provider.name} <span className={`ts-idp-tag ts-${provider.variant}`}>{provider.tag}</span></div><div className="ts-idp-sub">{provider.type}</div></div></div>
+            <div className="ts-idp-right"><div className={`ts-idp-status ts-${provider.variant}`}>{provider.status}</div><div className="ts-idp-detail">{provider.detail}</div></div>
+          </div>)}
+        </div>
+        <div className="panel ts-panel">
+          <div className="panel-head"><h2>Correlated logs</h2><span className="panel-meta">server-generated only</span></div>
+          <div className="ts-filter-row">{serviceOptions.map(option => <span key={option} className={`ts-filter-pill ${logFilter === option ? 'ts-active' : ''}`} onClick={() => setLogFilter(option)}>{option}</span>)}</div>
+          <div className="table-wrap"><table className="ts-log-table"><thead><tr><th style={{ width: 60 }}>Level</th><th style={{ width: 80 }}>Time</th><th>Event</th></tr></thead><tbody>
+            {visibleLogs.length === 0 ? <tr><td colSpan={3} className="empty">No matching log entries.</td></tr> : visibleLogs.map((log, index) => <tr key={index} className={log.level === 'error' ? 'ts-hot' : ''}>
+              <td><span className={`ts-log-level ts-${log.level}`}>{log.level.toUpperCase()}</span></td>
+              <td className="ts-log-time">{log.time}</td>
+              <td>{log.message}</td>
+            </tr>)}
+          </tbody></table></div>
+        </div>
+      </div>
+    </>}
+  </Page></div>;
+}
+
+function TroubleshootTrendChart({ points }: { points: ApiErrorTrendPoint[] }) {
+  const width = 760, height = 120;
+  const max = Math.max(...points.map(point => point.count), 1);
+  const step = width / Math.max(points.length - 1, 1);
+  const linePoints = points.map((point, index) => `${index * step},${10 + (1 - point.count / max) * 90}`).join(' ');
+  return <svg viewBox={`0 0 ${width} ${height}`} width="100%" height={height} preserveAspectRatio="none">
+    <g stroke="var(--ts-border)" strokeWidth={1}><line x1={0} y1={10} x2={width} y2={10}/><line x1={0} y1={60} x2={width} y2={60}/><line x1={0} y1={100} x2={width} y2={100}/></g>
+    <polyline fill="none" stroke={points.some(point => point.count > 0) ? 'var(--crit)' : 'var(--ts-faint)'} strokeWidth={2} points={linePoints}/>
+  </svg>;
+}
+
 function AdminOnly({ role, children }: { role: Role; children: React.ReactNode }) { return role === 'admin' ? children : <Navigate to="/dashboard" replace />; }
 function Shell({ role, setRole, children }: { role: Role; setRole: (r: Role) => void; children: React.ReactNode }) {
   const location = useLocation(); const navigate = useNavigate();
   const auth = useAuth();
   const timezone = useAppTimezone();
   const branding = useBranding();
-  const visible = nav.filter(item => item.roles.includes(role) || (item.extra === 'sod' && auth.isSodAdmin));
+  const visible = nav.filter(item => item.roles.includes(role) || (item.extra === 'sod' && auth.isSodAdmin) || (item.extra === 'soc' && auth.isSocAdmin) || (item.extra === 'server' && auth.isServerAdmin));
   const path = location.pathname;
   const signedIn = Boolean(auth.account) || auth.breakglassActive;
-  const seesSodBell = role === 'admin' || auth.isSodAdmin;
+  const seesSodBell = auth.isSodAdmin;
   const { data: sodNotifications, reload: reloadSodNotifications } = useApiResource<ApiSodNotification[]>('/api/v1/sod/notifications', seesSodBell);
   // Every signed-in user's own assignment/approval notifications (see backend/app/services/notifications.py) —
   // same dropdown, same style, as the org-wide notification experience, distinct from the SoD-only feed above.
@@ -654,7 +1111,7 @@ function niceAxisMax(value: number): number {
   const step = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
   return step * magnitude;
 }
-function ActivationTimelineChart({ series }: { series: { date: string; count: number }[] }) {
+function ActivationTimelineChart({ series, yAxisLabel = 'Users activated', unitLabel = 'user', tooltipSuffix = 'activated', onPointClick }: { series: { date: string; count: number }[]; yAxisLabel?: string; unitLabel?: string; tooltipSuffix?: string; onPointClick?: (point: { date: string; count: number }) => void }) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   if (series.length === 0) return <div className="empty">No privileged role activations recorded yet.</div>;
   const width = 800, height = 300, marginLeft = 44, marginRight = 16, marginTop = 16, marginBottom = 48;
@@ -681,13 +1138,13 @@ function ActivationTimelineChart({ series }: { series: { date: string; count: nu
       })}
       {points.map((p, i) => (i % labelStride === 0 || i === n - 1) && <text key={p.date} x={p.x} y={height - marginBottom + 20} textAnchor="middle" fontSize="11" fill="#94a3ab">{new Date(p.date).toLocaleDateString(undefined, { month:'short', day:'numeric' })}</text>)}
       <text x={marginLeft + plotWidth / 2} y={height - 6} textAnchor="middle" fontSize="11" fontWeight={700} fill="#687782">Date</text>
-      <text x={14} y={marginTop + plotHeight / 2} textAnchor="middle" fontSize="11" fontWeight={700} fill="#687782" transform={`rotate(-90 14 ${marginTop + plotHeight / 2})`}>Users activated</text>
+      <text x={14} y={marginTop + plotHeight / 2} textAnchor="middle" fontSize="11" fontWeight={700} fill="#687782" transform={`rotate(-90 14 ${marginTop + plotHeight / 2})`}>{yAxisLabel}</text>
       <path d={linePath} fill="none" stroke="#087f82" strokeWidth={2}/>
       {hoverIndex !== null && <line x1={points[hoverIndex].x} y1={marginTop} x2={points[hoverIndex].x} y2={height - marginBottom} stroke="#087f82" strokeDasharray="3 3" opacity={0.4}/>}
-      {points.map((p, i) => <circle key={p.date} cx={p.x} cy={p.y} r={i === hoverIndex ? 6 : 4} fill="#fff" stroke="#087f82" strokeWidth={2} style={{cursor:'pointer'}} onMouseEnter={() => setHoverIndex(i)} onMouseLeave={() => setHoverIndex(null)}/>)}
+      {points.map((p, i) => <circle key={p.date} cx={p.x} cy={p.y} r={i === hoverIndex ? 6 : 4} fill="#fff" stroke="#087f82" strokeWidth={2} style={{cursor: onPointClick ? 'pointer' : 'default'}} onMouseEnter={() => setHoverIndex(i)} onMouseLeave={() => setHoverIndex(null)} onClick={() => onPointClick?.(p)}/>)}
     </svg>
     {hovered && <div className="notice" style={{position:'absolute', top:0, left:`${(hovered.x / width) * 100}%`, transform:'translate(-50%, -100%)', whiteSpace:'nowrap', pointerEvents:'none', padding:'6px 10px'}}>
-      <strong>{new Date(hovered.date).toLocaleDateString(undefined, { month:'short', day:'numeric' })}</strong>: {hovered.count} user{hovered.count === 1 ? '' : 's'} activated
+      <strong>{new Date(hovered.date).toLocaleDateString(undefined, { month:'short', day:'numeric' })}</strong>: {hovered.count} {unitLabel}{hovered.count === 1 ? '' : 's'} {tooltipSuffix}{onPointClick ? ' — click to see details' : ''}
     </div>}
   </div>;
 }
@@ -738,7 +1195,7 @@ function Dashboard({ role }: { role: Role }) {
   const { data: segmentMembers, loading: membersLoading } = useApiResource<ApiSegmentMember[]>(`/api/v1/dashboard/user-access-segments/${selectedSegment}`, Boolean(selectedSegment));
   const segmentTitle = selectedSegment === 'permanent-active' ? 'Permanent & Active' : selectedSegment === 'eligible' ? 'Eligible (not yet activated)' : '';
   const { data: myAssignments, reload: reloadMine } = useApiResource<ApiAssignment[]>('/api/v1/assignments/mine', !admin);
-  const seesSod = admin || auth.isSodAdmin;
+  const seesSod = auth.isSodAdmin;
   const { data: sodViolations } = useApiResource<ApiSodViolation[]>('/api/v1/sod/violations', seesSod);
   const { data: sodActivity } = useApiResource<ApiSodActivityEntry[]>('/api/v1/sod/activity', seesSod);
   const greetingName = auth.account?.name || (auth.authConfigured ? '' : currentUser.name);

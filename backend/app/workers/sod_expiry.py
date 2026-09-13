@@ -5,6 +5,7 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.services import server_health_state
 from app.services.sod import revoke_lapsed_sod_exceptions
 
 logger = logging.getLogger("accesspilot.sod_expiry")
@@ -21,8 +22,10 @@ async def sod_exception_expiry_worker_loop(session_factory: async_sessionmaker[A
         try:
             async with session_factory() as session:
                 await revoke_lapsed_sod_exceptions(session)
+            server_health_state.record_worker_tick("SoD exception expiry worker", "ok")
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("SoD exception expiry worker iteration failed")
+            server_health_state.record_worker_tick("SoD exception expiry worker", "crit")
         await asyncio.sleep(POLL_INTERVAL_SECONDS)

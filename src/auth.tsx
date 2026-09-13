@@ -13,10 +13,14 @@ const staticMsalConfig: Configuration = { auth: { clientId: clientId || 'unconfi
 type AppRole = 'user' | 'admin';
 interface AuthContextValue {
   role: AppRole; account: AccountInfo | null; loading: boolean; signIn: () => Promise<void>; signOut: () => Promise<void>; apiRequest: (path: string, init?: RequestInit) => Promise<Response>;
-  // Whether the signed-in user additionally holds AccessPilot.SoDAdmin — a DB-driven flag (not an Entra App
-  // Role, unlike `role` above), granted/revoked by a plain Admin from inside the app. Independent of `role`: a
-  // plain end-user can hold this without being 'admin', and an Admin can hold it too.
+  // Whether the signed-in user additionally holds AccessPilot.SoDAdmin — a real Entra App Role, exactly like
+  // `role` above (no in-app grant path exists for it). Independent of `role`: a plain end-user can hold this
+  // without being 'admin', and an Admin can hold it too.
   isSodAdmin: boolean;
+  // Same idea as isSodAdmin, for the separate AccessPilot.SoCAdmin role (Security Operations dashboard).
+  isSocAdmin: boolean;
+  // Same idea again, for AccessPilot.ServerAdmin (infra/ops System Health dashboard).
+  isServerAdmin: boolean;
   // Unix-ms timestamp of when the CURRENT session actually began — derived once, in one place, from the real
   // token claims for whichever auth path is active (MSAL ID token's auth_time/iat, or the Break-Glass JWT's
   // iat), never a placeholder string. See the Profile page (src/App.tsx), the only current consumer.
@@ -106,6 +110,8 @@ function AuthState({ children, authConfigured, apiScope }: { children: ReactNode
   const [role, setRole] = useState<AppRole>('user'); const [account, setAccount] = useState<AccountInfo | null>(accounts[0] || null); const [apiLoading, setApiLoading] = useState(true);
   const [sessionStartedAt, setSessionStartedAt] = useState<number | null>(null);
   const [isSodAdmin, setIsSodAdmin] = useState(false);
+  const [isSocAdmin, setIsSocAdmin] = useState(false);
+  const [isServerAdmin, setIsServerAdmin] = useState(false);
 
   // Break-Glass emergency login — mutually exclusive with a real MSAL account. A token found in sessionStorage
   // (survives a page refresh, cleared when the tab closes, matching MSAL's own cacheLocation choice above) is
@@ -135,6 +141,8 @@ function AuthState({ children, authConfigured, apiScope }: { children: ReactNode
       setBreakglassElevated(elevated);
       setRole(elevated ? 'admin' : 'user');
       setIsSodAdmin(Array.isArray(profile.roles) && profile.roles.includes('AccessPilot.SoDAdmin'));
+      setIsSocAdmin(Array.isArray(profile.roles) && profile.roles.includes('AccessPilot.SoCAdmin'));
+      setIsServerAdmin(Array.isArray(profile.roles) && profile.roles.includes('AccessPilot.ServerAdmin'));
       const breakglassClaims = decodeJwtPayload(token);
       const breakglassIat = breakglassClaims?.iat as number | undefined;
       setSessionStartedAt(breakglassIat ? breakglassIat * 1000 : Date.now());
@@ -205,6 +213,8 @@ function AuthState({ children, authConfigured, apiScope }: { children: ReactNode
       const nextRole: AppRole = Array.isArray(profile?.roles) && profile.roles.includes(adminAppRole) ? 'admin' : 'user';
       setRole(nextRole);
       setIsSodAdmin(Array.isArray(profile?.roles) && profile.roles.includes('AccessPilot.SoDAdmin'));
+      setIsSocAdmin(Array.isArray(profile?.roles) && profile.roles.includes('AccessPilot.SoCAdmin'));
+      setIsServerAdmin(Array.isArray(profile?.roles) && profile.roles.includes('AccessPilot.ServerAdmin'));
       // auth_time is an OPTIONAL ID-token claim Entra does not always emit; iat (issued-at, always present on
       // any valid token) is the reliable fallback — either way this is a real timestamp, never a placeholder.
       const idClaims = current.idTokenClaims as Record<string, unknown> | undefined;
@@ -273,6 +283,46 @@ function AuthState({ children, authConfigured, apiScope }: { children: ReactNode
     authDebug('Requested API scope:', apiScope);
     try {
       if (!authConfigured) return;
+      // A real, honest pre-flight check, not a full fix: loginRedirect() performs a full top-level browser
+      // navigation to the IDP's own domain (login.microsoftonline.com) — if that navigation itself fails at the
+      // network level, the BROWSER intercepts it and replaces this entire page with its own native offline
+      // error screen before any of our JS gets a chance to run, since the page has already navigated away.
+      // There is no way for application code to catch or override that — it's a browser platform boundary, not
+      // something loginRedirect()'s own promise rejection ever sees.
+      //
+      // navigator.onLine is NOT good enough for this: in every major browser it only reflects whether a network
+      // *interface* is up (e.g. Wi-Fi associated with a router) — it stays `true` even when that router has no
+      // upstream internet at all, which is exactly the case a real user hit (confirmed live: fully offline,
+      // navigator.onLine still true, loginRedirect() still attempted and lost the race to Edge's own DNS error
+      // page).
+      //
+      // A real probe is the only honest signal — but it must reach the actual public internet, not just
+      // AccessPilot's own backend: an earlier version of this check only fetched our own /api/v1/health, which
+      // is USELESS as a connectivity signal whenever the frontend and backend share a host or LAN (confirmed
+      // live: with real internet fully disconnected, a fetch to localhost:8001/health still succeeded instantly
+      // — loopback/LAN traffic never leaves the machine, so it proves nothing about whether the WAN path to
+      // Microsoft is up). The fix probes the IDP's own real domain directly, with mode:'no-cors' — a cross-origin
+      // request AccessPilot's JS can never read the response of, but one whose underlying fetch() Promise still
+      // rejects exactly like any other on a genuine network failure (DNS failure, connection refused, timeout);
+      // CORS opacity only hides the response content, it never suppresses a real transport-level failure. If the
+      // real internet path to the IDP is down, this fails the same way loginRedirect()'s own navigation would —
+      // so it's skipped, and AccessPilot's own fallback shows instead of losing the race to the browser's native
+      // error page. Runs alongside the same short-timeout probe against our own backend from before (still
+      // useful: if AccessPilot's own backend is down, continuing to a real Microsoft sign-in would just strand
+      // the user after a successful login), so either one failing shows the fallback.
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3000);
+        await Promise.all([
+          fetch(`${apiBaseUrl}/api/v1/health`, { signal: controller.signal, cache: 'no-store' }),
+          fetch('https://login.microsoftonline.com/favicon.ico', { signal: controller.signal, cache: 'no-store', mode: 'no-cors' }),
+        ]);
+        clearTimeout(timeoutId);
+      } catch (probeError) {
+        authDebug('Connectivity probe failed (own backend and/or the real IDP domain unreachable) — skipping loginRedirect() entirely, would otherwise hand off to the browser\'s own native offline error page.', authDebugError(probeError));
+        setIdpUnreachable(true);
+        return;
+      }
       await instance.loginRedirect({ scopes: [apiScope!] });
       authDebug('loginRedirect() returned without an immediate error.');
     } catch (error) {
@@ -338,7 +388,7 @@ function AuthState({ children, authConfigured, apiScope }: { children: ReactNode
     }
     return fetch(`${apiBaseUrl}${path}`, { ...init, headers });
   };
-  return <AuthContext.Provider value={{ role: (authenticated || breakglassActive) ? role : 'user', account, loading: inProgress !== 'none' || apiLoading || breakglassChecking, signIn, signOut, apiRequest, isSodAdmin, sessionStartedAt, authConfigured, breakglassActive, breakglassUsername, breakglassElevated, idpUnreachable, elevateBreakglass, refreshAccess }}>{children}</AuthContext.Provider>;
+  return <AuthContext.Provider value={{ role: (authenticated || breakglassActive) ? role : 'user', account, loading: inProgress !== 'none' || apiLoading || breakglassChecking, signIn, signOut, apiRequest, isSodAdmin, isSocAdmin, isServerAdmin, sessionStartedAt, authConfigured, breakglassActive, breakglassUsername, breakglassElevated, idpUnreachable, elevateBreakglass, refreshAccess }}>{children}</AuthContext.Provider>;
 }
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
@@ -13,6 +14,7 @@ from app.core.config import get_settings
 from app.core.errors import AccessPilotError, access_pilot_error_handler, http_error_handler, unhandled_error_handler, validation_error_handler
 from app.core.logging import configure_logging
 from app.db.session import AsyncSessionLocal
+from app.services import server_health_state
 from app.services.bootstrap import ensure_bootstrap_credential
 from app.workers.activation import activation_worker_loop
 from app.workers.expiration import expiration_worker_loop
@@ -55,6 +57,37 @@ class RequestIdMiddleware:
         await self.app(scope, receive, send_wrapper)
 
 
+class RequestTimingMiddleware:
+    """Feeds the System Health dashboard's request-volume/latency chart and per-endpoint table (see
+    services/server_health.py) — real per-request timing, nothing tracked this anywhere before. Raw ASGI, not
+    Starlette's BaseHTTPMiddleware, for the exact same reason RequestIdMiddleware above is: BaseHTTPMiddleware's
+    send/receive bridge can wedge on a client disconnecting mid-request, freezing unrelated requests behind it.
+    The route's path *template* (e.g. "/users/{id}", not "/users/abc123") is read from scope["route"] after
+    routing has happened inside self.app(...) — the same scope dict is mutated in place by Starlette's router, so
+    it's populated by the time send_wrapper sees the final status code."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        started_at = time.perf_counter()
+        status_code = 500
+
+        async def send_wrapper(message):
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message["status"]
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+        route = scope.get("route")
+        path = route.path if route is not None else scope.get("path", "?")
+        server_health_state.record_request(scope.get("method", "?"), path, status_code, (time.perf_counter() - started_at) * 1000)
+
+
 async def _log_bootstrap_credential_if_needed() -> None:
     """Only ever prints/does anything on a genuinely fresh install with no portal login IDP configured anywhere
     (env-var Entra or an active PortalAuthConfig) — a no-op, one-query check for every existing deployment,
@@ -74,10 +107,16 @@ async def lifespan(_: FastAPI):
     background_tasks: list[asyncio.Task] = []
     if settings.environment != "test":
         await _log_bootstrap_credential_if_needed()
-        background_tasks.append(asyncio.create_task(sync_scheduler_loop(AsyncSessionLocal)))
-        background_tasks.append(asyncio.create_task(expiration_worker_loop(AsyncSessionLocal)))
-        background_tasks.append(asyncio.create_task(activation_worker_loop(AsyncSessionLocal)))
-        background_tasks.append(asyncio.create_task(sod_exception_expiry_worker_loop(AsyncSessionLocal)))
+        workers = {
+            "Entra sync worker": sync_scheduler_loop(AsyncSessionLocal),
+            "Access expiry sweep": expiration_worker_loop(AsyncSessionLocal),
+            "Scheduled activation worker": activation_worker_loop(AsyncSessionLocal),
+            "SoD exception expiry worker": sod_exception_expiry_worker_loop(AsyncSessionLocal),
+        }
+        for name, coroutine in workers.items():
+            task = asyncio.create_task(coroutine)
+            background_tasks.append(task)
+            server_health_state.WORKER_TASKS[name] = task
     yield
     for task in background_tasks:
         task.cancel()
@@ -85,6 +124,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title=settings.app_name, version="0.1.0", docs_url="/docs" if settings.environment != "production" else None, lifespan=lifespan)
 app.add_middleware(RequestIdMiddleware)
+app.add_middleware(RequestTimingMiddleware)
 app.add_middleware(CORSMiddleware, allow_origins=[settings.frontend_url], allow_credentials=False, allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"], allow_headers=["Content-Type", "X-Request-ID", "Authorization"])
 app.add_exception_handler(AccessPilotError, access_pilot_error_handler)
 app.add_exception_handler(StarletteHTTPException, http_error_handler)

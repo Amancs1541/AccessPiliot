@@ -609,6 +609,30 @@ async def test_expiration_worker_expires_due_temporary_assignments(db_override):
 
 
 @pytest.mark.asyncio
+async def test_expiration_worker_reverts_due_permanent_assignments_to_eligible_not_expired(db_override):
+    """A Permanent assignment's ELIGIBILITY is meant to never expire — only the bounded activation session does.
+    When that session's clock runs out, the assignment must revert to ELIGIBLE (self-reactivatable indefinitely),
+    never a terminal EXPIRED that would require an admin to create a whole new assignment from scratch."""
+    ids = await _seed_directory(db_override.factory)
+    async with db_override.factory() as session:
+        assignment = AccessAssignment(provider_id=ids["provider_id"], user_id=ids["user_id"], resource_type="GROUP", resource_id=ids["group_id"], assignment_type="PERMANENT", status="ACTIVE", start_time=datetime.now(timezone.utc) - timedelta(hours=2), expiration_time=datetime.now(timezone.utc) - timedelta(minutes=1), activated_at=datetime.now(timezone.utc) - timedelta(hours=2))
+        session.add(assignment)
+        await session.commit()
+        assignment_id = assignment.id
+
+    expired_count = await expire_due_assignments(db_override.factory)
+    assert expired_count == 1
+
+    async with db_override.factory() as session:
+        reverted = await session.get(AccessAssignment, assignment_id)
+        assert reverted.status == "ELIGIBLE"
+        assert reverted.activated_at is None
+        assert reverted.expiration_time is None
+        audit_rows = (await session.execute(select(AuditLog).where(AuditLog.target_id == assignment_id))).scalars().all()
+        assert any(row.action == "ASSIGNMENT_EXPIRED" and (row.metadata_json or {}).get("reason") == "SESSION_EXPIRED_REVERTED_TO_ELIGIBLE" for row in audit_rows)
+
+
+@pytest.mark.asyncio
 async def test_expiration_worker_expires_eligible_assignments_never_activated_by_deadline(db_override):
     """An ELIGIBLE (Temporary) assignment that's never activated by its expiration_time deadline must be swept to
     EXPIRED with no provider call — nothing was ever granted, so there's nothing to revoke."""

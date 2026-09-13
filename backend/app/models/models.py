@@ -370,6 +370,11 @@ class SecuritySettings(Base):
     # zoneinfo.ZoneInfo at save time — every displayed date/time in the app is shown in this zone, uniformly for
     # every viewer, rather than each browser's own local timezone.
     timezone: Mapped[str] = mapped_column(String(50), nullable=False, default="Europe/Berlin", server_default="Europe/Berlin")
+    # Shown on the public sign-in screen (via a dedicated public endpoint, no auth — the whole point is a user who
+    # can't sign in at all still needs to see it) whenever the IDP itself can't be reached (e.g. no network route
+    # to it) — a real person to contact instead of a dead end. Nullable: unset means the sign-in screen falls back
+    # to a generic "contact your administrator" with no address, exactly like before this field existed.
+    support_contact_email: Mapped[Optional[str]] = mapped_column(String(255))
     updated_at: Mapped[datetime] = updated_at()
 
 
@@ -404,3 +409,19 @@ class Notification(Base):
     link: Mapped[Optional[str]] = mapped_column(String(255))
     read_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = created_at()
+
+
+class SocDashboardLayout(Base):
+    """One row per AccessPilot.SoCAdmin (or Admin) who has customized their Security Operations dashboard —
+    the FIRST genuinely per-viewer preference table in this app (every other settings table — SecuritySettings,
+    BrandingSettings, SodNotificationSettings — is a shared singleton). `widgets` is a plain JSON list of
+    `{id, visible, order}` objects, one per known widget id the frontend already knows how to render (the set of
+    available widgets/metrics is fixed in code for this first version, not admin-defined — this column only
+    controls which ones a given viewer sees and in what order, not what a widget IS). No row for a viewer means
+    "never customized yet" — the frontend falls back to a hardcoded default (all widgets visible, default order)
+    rather than this table needing a pre-seeded default row."""
+    __tablename__ = "soc_dashboard_layouts"
+    id: Mapped[UUID] = uuid_pk()
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False, unique=True)
+    widgets: Mapped[list] = mapped_column("widgets", JSON, nullable=False)
+    updated_at: Mapped[datetime] = updated_at()

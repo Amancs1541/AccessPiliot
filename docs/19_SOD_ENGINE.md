@@ -51,10 +51,10 @@ Two roles matter here:
 
 | Role | Can view violations & rules (`SOD_READ`) | Can edit rules or grant exceptions (`SOD_MANAGE`) |
 |---|---|---|
-| `AccessPilot.Admin` | ✅ | ❌ |
+| `AccessPilot.Admin` | ❌ | ❌ |
 | `AccessPilot.SoDAdmin` | ✅ | ✅ |
 
-An Admin can see everything and read who's on it, but — just as deliberately as it cannot edit the rules — **cannot grant an exception either**: an Admin granting themselves a risk acceptance would be an equally effective way to defeat the engine as an Admin editing the rule directly, which is already forbidden. Confirmed live: an Admin attempting `POST /sod/exceptions` gets 403.
+**Updated 2026-09-06, per explicit request**: an Admin used to retain read-only oversight (`SOD_READ`) even without `SOD_MANAGE` — able to see violations and rules, just not edit them. That oversight has since been removed entirely: a plain Admin now sees *nothing* SoD-related at all (every `SOD_READ`-gated endpoint 403s for Admin, and the whole "Separation of Duties" sidebar section, Dashboard panel, and notification bell are hidden from Admin in the frontend) — the same exclusive-to-its-own-role treatment the Security Operations dashboard already has. An Admin also still **cannot grant an exception**, unchanged from before: an Admin granting themselves a risk acceptance would be an equally effective way to defeat the engine as an Admin editing the rule directly, which was already forbidden. Confirmed live: an Admin attempting `POST /sod/exceptions` or `GET /sod/violations` both get 403.
 
 `AccessPilot.SoDAdmin` is sourced **exclusively from a real Entra App Role assignment** on the AccessPilot app registration — recognized purely from the caller's own access token (`user.roles`, in `require_authenticated_user`), exactly the same way `AccessPilot.Admin`/`AccessPilot.User` are. There is deliberately **no in-app path to grant or revoke it at all** — assigning the role happens directly in the Entra/Azure portal, outside AccessPilot entirely, and takes effect on the user's next token refresh (up to ~60 minutes, or immediately via the "Refresh my access" button on the Profile page).
 
@@ -190,6 +190,19 @@ At all three points, `check_sod_conflicts()` first excludes any conflict covered
 
 **Live cleanup performed**: one stale, already-expired, pre-fix `SodException` was found in the real tenant with exactly this landmine shape (a `granted_assignment_id`-less request whose own original assignment was long gone) and was formally marked `revoked_at` directly — a no-op on real access, since it was already past its own expiry and covering nothing, but it stops the worker from ever re-scanning it again.
 
+## 9d. The exact link alone still wasn't enough — a third real gap, found live
+
+**The gap**: the exact `granted_assignment_id` link (§9c) solved "don't wander onto an unrelated later grant," but it also means `_find_exception_granted_assignment` stops looking the moment that ONE linked assignment is no longer `ELIGIBLE`/`ACTIVE` — even if it was separately revoked for a reason that has nothing to do with the exception itself (e.g. an unrelated admin cleanup action). Since an active `SodException` is scoped to `(policy, user)`, not to one assignment (its own docstring is explicit about this), any *later*, ordinary grant to the exact same conflicting target is also allowed through unblocked while the exception is still active — with no link back to the exception's request at all. Confirmed live: an exception-granted assignment was manually revoked for an unrelated reason, a fresh grant to the same conflicting group went through cleanly (correctly — the exception still covered it), and when the exception was later revoked, the exact-link lookup found only the first, already-gone assignment and stopped — leaving the real, currently-held conflicting access untouched and the violations table showing it "Open" indefinitely.
+
+**The fix — fall back to the live violation scan itself, not another timing heuristic**: `_find_exception_granted_assignment()` now tries the exact link first (unchanged, still the fast path for the common case); only if that assignment is gone/no-longer-current does it call the new `_current_violating_holding_assignment()`, which:
+1. Confirms via `get_sod_violations(session, policy_id=...)` — the same trusted, already-correct live scan the violations table and the SOC dashboard's card both use — that this `(policy, user)` pair is a genuine, currently-real violation right now. If it isn't (e.g. the other side of the conflict was independently removed), there's nothing to revoke and this correctly does nothing.
+2. **Critical guard**: checks `get_active_sod_exception()` for this `(policy, user)` pair first — if some *other*, still-active exception already covers it, stop immediately and do nothing. Without this, the fallback would have reintroduced exactly the §9c bug: an old, already-processed exception's stale request wandering onto a later grant that a *different*, still-valid exception is legitimately protecting. This is precisely what `test_a_later_unrelated_grant_for_the_same_target_survives_the_old_exceptions_worker_tick` (§9c) guards against, and it still passes unchanged with this fallback in place.
+3. Only then finds the current holding matching the *original request's exact target* (same resource, same app role) among the violation's real holdings, and revokes it.
+
+A new regression test, `test_revoking_an_exception_also_revokes_a_later_re_grant_the_exact_link_no_longer_covers`, reproduces the full live sequence: grant → separately revoke the linked assignment → re-grant the same conflicting target while the exception is still active → revoke the exception → assert the re-grant is now `REVOKED` and `GET /sod/violations` is empty.
+
+**Live cleanup performed**: the real exception behind this had already been revoked before the fix existed, so no background worker would ever reprocess it (only a fresh manual revoke or a fresh expiry re-runs this logic). Manually re-ran the now-fixed lookup and revoke against the real row via the actual service functions (not raw SQL) — confirmed it found the real re-granted assignment and revoked it, and the live violations scan for that policy now correctly returns zero.
+
 ## 10. Overriding a block (distinct from an exception)
 
 `override_sod: true` on `AssignmentCreate` (Admin-only path, since it's only checked in the bypass branch) or `AssignmentActivate` (checked server-side against `actor_roles` — only honored when the caller is an Admin, never for a plain end-user activating their own access). This is a **one-time, per-grant** decision with no memory — the opposite of §9's exception, which is a standing decision covering every future grant until it expires or is revoked. Use an override for a one-off "this specific grant needs to happen right now despite the conflict"; use an exception for "this user/rule combination is a known, ongoing, accepted risk." Either way, the existing mandatory justification field is reused — there's no separate field for the override's reason. An override is recorded on the resulting audit entry (`sod_override: true`).
@@ -202,7 +215,7 @@ At all three points, `check_sod_conflicts()` first excludes any conflict covered
 
 **Scope**: this closes the cycling gap for the specific case of a user deactivating/revoking one side and then trying to activate the other within the window — it does not, and cannot, catch a conflict that never touches AccessPilot's own deactivate/revoke path (e.g. an admin removing direct-in-Entra group membership through the Entra portal itself, bypassing AccessPilot entirely — there's no audit trail for that here to key off of).
 
-**Configuration**: `/admin/sod/configuration`'s notification-settings form (SoDAdmin-editable, Admin read-only, same gating as the rest of §16) now includes the cooldown toggle and the hours field (1–720).
+**Configuration**: `/admin/sod/configuration`'s notification-settings form (SoDAdmin-editable, invisible to Admin entirely as of the 2026-09-06 exclusion in §3) now includes the cooldown toggle and the hours field (1–720).
 
 ## 11. Preventive check vs. detective scan — a deliberate performance split
 
@@ -274,8 +287,8 @@ Separation of Duties has its own top-level sidebar section (not folded into GOVE
 
 ## 15. Frontend surfaces
 
-- **`/admin/sod`** — the SoD management page. Rule builder, a live violations table (accepted-until badge, no direct grant button — see §9), an "Exception Requests" panel (§9a, Grant/Deny for SoDAdmin), an "Active Exceptions" panel, and an "SoD Activity" audit table. No roster panel — see §3 for why that was removed.
-- **`/admin/sod/configuration`** — notification settings (violation/expiry toggles, the exception-expiry warning-days field, the exception-requested toggle, and the cooldown toggle + hours field from §10a — all SoDAdmin-editable, Admin read-only) and the notification log (§16, auto-refreshing every 60s), with mark-read/mark-all-read actions.
+- **`/admin/sod`** — the SoD management page, exclusive to a real `AccessPilot.SoDAdmin` as of the 2026-09-06 exclusion (§3) — a plain Admin is redirected away, same as `/admin/soc`. Rule builder, a live violations table (accepted-until badge, no direct grant button — see §9), an "Exception Requests" panel (§9a, Grant/Deny for SoDAdmin), an "Active Exceptions" panel, and an "SoD Activity" audit table. No roster panel — see §3 for why that was removed.
+- **`/admin/sod/configuration`** — same exclusivity. Notification settings (violation/expiry toggles, the exception-expiry warning-days field, the exception-requested toggle, and the cooldown toggle + hours field from §10a) and the notification log (§16, auto-refreshing every 60s), with mark-read/mark-all-read actions.
 - **Dashboard** — a widget (visible to Admins and SoDAdmins) showing the current live violation count plus the 3 most recent SoD activity entries, linking to `/admin/sod`. See §11 for its real query cost.
 - **Topbar Bell icon** — for Admins/SoDAdmins, now a link to `/admin/sod/configuration` with a live unread-count badge (sourced from `GET /sod/notifications`, fetched once per app session by the persistent `Shell` chrome, not on every navigation).
 - **My Access → Eligible access** — every eligible item is soft-checked against `/sod/check` on load (always as the caller checking themselves); anything that would conflict if activated shows a `⚠ SoD conflict` badge *before* the user attempts to activate it.

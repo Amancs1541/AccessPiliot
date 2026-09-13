@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import AccessAssignment
+from app.services import server_health_state
 from app.services.assignments import grant_provider_access_for_assignment
 from app.services.audit import record_audit
 from app.services.sod import check_sod_conflicts
@@ -70,8 +71,10 @@ async def activation_worker_loop(session_factory: async_sessionmaker[AsyncSessio
     while True:
         try:
             await activate_due_assignments(session_factory)
+            server_health_state.record_worker_tick("Scheduled activation worker", "ok")
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Activation worker iteration failed")
+            server_health_state.record_worker_tick("Scheduled activation worker", "crit")
         await asyncio.sleep(POLL_INTERVAL_SECONDS)

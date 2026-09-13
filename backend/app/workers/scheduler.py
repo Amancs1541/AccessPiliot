@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import IdentityProvider
+from app.services import server_health_state
 from app.services.directory_sync import run_sync
 
 logger = logging.getLogger("accesspilot.scheduler")
@@ -52,8 +53,10 @@ async def sync_scheduler_loop(session_factory: async_sessionmaker[AsyncSession])
     while True:
         try:
             await run_due_syncs(session_factory)
+            server_health_state.record_worker_tick("Entra sync worker", "ok")
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Sync scheduler iteration failed")
+            server_health_state.record_worker_tick("Entra sync worker", "crit")
         await asyncio.sleep(POLL_INTERVAL_SECONDS)

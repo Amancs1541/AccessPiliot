@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import AccessAssignment
+from app.services import server_health_state
 from app.services.assignments import revoke_provider_access
 from app.services.audit import record_audit
 
@@ -56,8 +57,18 @@ async def expire_due_assignments(session_factory: async_sessionmaker[AsyncSessio
                 logger.warning("Provider revoke failed for assignment %s; will retry", candidate.id)
                 continue
             try:
-                assignment.status = "EXPIRED"
-                await record_audit(session, action="ASSIGNMENT_EXPIRED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, request_id=f"expiration-worker-{assignment.id}")
+                if assignment.assignment_type == "PERMANENT":
+                    # A Permanent assignment's ELIGIBILITY never expires — only the bounded activation session
+                    # does. Reverting to ELIGIBLE (rather than a terminal EXPIRED) lets the user self-reactivate
+                    # indefinitely, matching what "Permanent" is meant to promise; a brand-new assignment should
+                    # never be required just because a prior session's clock ran out.
+                    assignment.status = "ELIGIBLE"
+                    assignment.activated_at = None
+                    assignment.expiration_time = None
+                    await record_audit(session, action="ASSIGNMENT_EXPIRED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, request_id=f"expiration-worker-{assignment.id}", metadata={"reason": "SESSION_EXPIRED_REVERTED_TO_ELIGIBLE"})
+                else:
+                    assignment.status = "EXPIRED"
+                    await record_audit(session, action="ASSIGNMENT_EXPIRED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, request_id=f"expiration-worker-{assignment.id}")
                 await session.commit()
                 expired_count += 1
             except Exception:
@@ -92,8 +103,10 @@ async def expiration_worker_loop(session_factory: async_sessionmaker[AsyncSessio
         try:
             await expire_due_assignments(session_factory)
             await expire_due_eligibility(session_factory)
+            server_health_state.record_worker_tick("Access expiry sweep", "ok")
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Expiration worker iteration failed")
+            server_health_state.record_worker_tick("Access expiry sweep", "crit")
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
