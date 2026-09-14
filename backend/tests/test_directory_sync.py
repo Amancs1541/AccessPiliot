@@ -20,6 +20,7 @@ class FakeConnector(IdentityProviderProtocol):
     async def test_connection(self): return True
     async def get_users(self, query=None): return self._users
     async def get_user(self, external_id): return next((u for u in self._users if u.external_id == external_id), None)
+    async def update_user(self, external_id, *, department, job_title): raise NotImplementedError
     async def get_groups(self, query=None): return self._groups
     async def get_group(self, external_id): return next((g for g in self._groups if g.external_id == external_id), None)
     async def get_group_members(self, external_id):
@@ -33,6 +34,8 @@ class FakeConnector(IdentityProviderProtocol):
     async def get_role(self, external_id): return next((r for r in self._roles if r.external_id == external_id), None)
     async def get_role_assignments(self, external_role_id): return []
     async def get_applications(self, query=None): return []
+    async def set_application_enabled(self, external_id, enabled): return True
+    async def get_application_permissions(self, external_id): return []
     async def activate_assignment(self, request): return True
     async def revoke_assignment(self, assignment): return True
     async def extend_assignment(self, assignment, duration_minutes): return True
@@ -100,6 +103,34 @@ async def test_sync_is_idempotent_when_run_twice(session, monkeypatch):
     assert len(db_users) == 2
     assert len(db_groups) == 1
     assert len(memberships) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_department_change_picked_up_by_sync_triggers_birthright_reconciliation(session, monkeypatch):
+    """The Entra/Okta -> AccessPilot direction: nobody called any birthright endpoint — a plain directory sync
+    noticing u1's department changed is what's supposed to trigger the mover grant on its own."""
+    from app.models import BirthrightPolicy
+
+    db, provider = session
+    users, groups, members, roles = connector_fixture()
+    monkeypatch.setattr("app.services.directory_sync._connector", lambda p: FakeConnector(users, groups, members, roles))
+    await run_sync(db, provider, "req-1")  # establishes u1 (no department yet) and g1
+
+    group_row = (await db.execute(select(Group).where(Group.external_id == "g1"))).scalar_one()
+    db.add(BirthrightPolicy(name="Finance -> Group One", match_field="department", match_value="Finance", resource_type="GROUP", resource_id=group_row.id))
+    await db.commit()
+
+    users_with_department = [NormalizedUser("u1", "u1@x.com", "User One", department="Finance"), users[1]]
+    monkeypatch.setattr("app.services.directory_sync._connector", lambda p: FakeConnector(users_with_department, groups, members, roles))
+    await run_sync(db, provider, "req-2")
+
+    user_row = (await db.execute(select(User).where(User.external_id == "u1"))).scalar_one()
+    assert user_row.department == "Finance"
+    assignments = (await db.execute(select(AccessAssignment).where(AccessAssignment.user_id == user_row.id))).scalars().all()
+    assert len(assignments) == 1
+    assert assignments[0].resource_id == group_row.id
+    assert assignments[0].status == "ELIGIBLE"
+    assert assignments[0].birthright_policy_id is not None
 
 
 @pytest.mark.asyncio

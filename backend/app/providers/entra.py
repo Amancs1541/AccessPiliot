@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import secrets
+from datetime import datetime
 from typing import Any
 
 import httpx
 
 from app.core.config import get_settings
-from app.providers.base import CreatedUser, IdentityProvider, NewGroupRequest, NewUserRequest, NormalizedApplication, NormalizedApplicationRole, NormalizedDomain, NormalizedGroup, NormalizedRole, NormalizedUser, ProviderConflictError
+from app.providers.base import CreatedUser, IdentityProvider, NewGroupRequest, NewUserRequest, NormalizedApplication, NormalizedApplicationPermission, NormalizedApplicationRole, NormalizedCredential, NormalizedDomain, NormalizedGroup, NormalizedRole, NormalizedUser, ProviderConflictError
 from app.providers.graph_client import GraphClient, GraphCredentials, GraphError
 from app.security.credential_encryption import CredentialEncryptionError, decrypt_credential
 from app.security.secrets import SecretReferenceStore
@@ -14,7 +15,7 @@ from app.security.secrets import SecretReferenceStore
 USER_SELECT = "id,userPrincipalName,mail,displayName,givenName,surname,department,jobTitle,accountEnabled"
 GROUP_SELECT = "id,displayName,description,securityEnabled,isAssignableToRole"
 ROLE_SELECT = "id,displayName,description"
-APPLICATION_SELECT = "id,displayName,accountEnabled,appRoles"
+APPLICATION_SELECT = "id,displayName,accountEnabled,appRoles,passwordCredentials,keyCredentials,servicePrincipalType"
 DEFAULT_APP_ROLE_ID = "00000000-0000-0000-0000-000000000000"
 
 
@@ -114,11 +115,42 @@ class EntraProvider(IdentityProvider):
         return NormalizedRole(external_id=item["id"], name=name, description=item.get("description"), role_type="DIRECTORY_ROLE", is_privileged="administrator" in name.lower())
 
     @staticmethod
+    def _credentials_list(item: dict[str, Any]) -> list[NormalizedCredential]:
+        """Every secret and certificate this service principal currently has, for the NHI detail page's
+        "Certificates & Secrets" section — already returned by the same /servicePrincipals call via
+        passwordCredentials/keyCredentials, no extra Graph call needed."""
+        credentials: list[NormalizedCredential] = []
+        for credential_type, entries in (("PASSWORD", item.get("passwordCredentials", [])), ("CERTIFICATE", item.get("keyCredentials", []))):
+            for credential in entries:
+                end_date = credential.get("endDateTime")
+                expires_at: datetime | None = None
+                if end_date:
+                    try:
+                        expires_at = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                    except ValueError:
+                        expires_at = None
+                credentials.append(NormalizedCredential(credential_type=credential_type, display_name=credential.get("displayName"), expires_at=expires_at))
+        return credentials
+
+    @staticmethod
+    def _earliest_credential_expiry(credentials: list[NormalizedCredential]) -> datetime | None:
+        """The soonest-expiring credential from the list above. Past-expiry entries still count — an
+        already-expired credential is exactly the kind of risk this is meant to surface, not hide."""
+        expiries = [credential.expires_at for credential in credentials if credential.expires_at is not None]
+        return min(expiries) if expiries else None
+
+    @staticmethod
     def _application_from_graph(item: dict[str, Any]) -> NormalizedApplication:
         app_roles = [NormalizedApplicationRole(external_id=role["id"], name=role.get("displayName") or "Unnamed role", description=role.get("description")) for role in item.get("appRoles", []) if role.get("isEnabled", True)]
         if not app_roles:
             app_roles = [NormalizedApplicationRole(external_id=DEFAULT_APP_ROLE_ID, name="Default Access", description="Basic access with no application-defined role.")]
-        return NormalizedApplication(external_id=item["id"], name=item.get("displayName") or "", status="ACTIVE" if item.get("accountEnabled", True) else "DISABLED", app_roles=tuple(app_roles))
+        # servicePrincipalType is a real Graph-reported field ("Application", "ManagedIdentity", "SocialIdp",
+        # "Legacy") — MANAGED_IDENTITY here is a genuine signal from Microsoft, not a guess. There's no equally
+        # reliable Graph signal to auto-detect "this is a bot" or "this is an AI agent" today, so those remain a
+        # manual NHIAdmin classification (see app.services.nhi.set_nhi_type) rather than something invented here.
+        nhi_type = "MANAGED_IDENTITY" if item.get("servicePrincipalType") == "ManagedIdentity" else "SERVICE_PRINCIPAL"
+        credentials = EntraProvider._credentials_list(item)
+        return NormalizedApplication(external_id=item["id"], name=item.get("displayName") or "", status="ACTIVE" if item.get("accountEnabled", True) else "DISABLED", app_roles=tuple(app_roles), nhi_type=nhi_type, credential_expires_at=EntraProvider._earliest_credential_expiry(credentials), credentials=tuple(credentials))
 
     async def get_users(self, query: str | None = None) -> list[NormalizedUser]:
         params: dict[str, Any] = {"$select": USER_SELECT, "$top": "999"}
@@ -136,6 +168,17 @@ class EntraProvider(IdentityProvider):
         async with self._client() as client:
             item = await client.get_one(f"/users/{external_id}?$select={USER_SELECT}")
         return self._user_from_graph(item) if item else None
+
+    async def update_user(self, external_id: str, *, department: str | None, job_title: str | None) -> NormalizedUser:
+        """Needs User.ReadWrite.All — already granted and in active use by create_user()/CSV provisioning, so
+        this doesn't need any new tenant consent."""
+        body = {"department": department, "jobTitle": job_title}
+        async with self._client() as client:
+            await client.request("PATCH", f"/users/{external_id}", json=body)
+            item = await client.get_one(f"/users/{external_id}?$select={USER_SELECT}")
+        if item is None:
+            raise GraphError("PROVIDER_RESOURCE_NOT_FOUND", "The user could not be found after updating it.", 502)
+        return self._user_from_graph(item)
 
     async def get_user_licenses(self, external_id: str) -> list[dict[str, str]]:
         """Best-effort live read of a user's assigned Microsoft 365/Entra licenses — not synced/stored, fetched
@@ -262,6 +305,24 @@ class EntraProvider(IdentityProvider):
         async with self._client() as client:
             items = await client.get_all("/servicePrincipals", params=params, headers=headers)
         return [self._application_from_graph(item) for item in items]
+
+    async def set_application_enabled(self, external_id: str, enabled: bool) -> bool:
+        """A real, consequential write against the tenant's Enterprise Application — needs Application.ReadWrite.All
+        (or Directory.ReadWrite.All), which is a WRITE scope beyond the read-only Application.Read.All this app's
+        sync has needed so far. If that scope isn't granted, this surfaces as a clean PROVIDER_PERMISSION_DENIED
+        (403), the same graceful-failure pattern every other under-permissioned Graph call in this app already has
+        — never a silent no-op."""
+        async with self._client() as client:
+            await client.request("PATCH", f"/servicePrincipals/{external_id}", json={"accountEnabled": enabled})
+        return True
+
+    async def get_application_permissions(self, external_id: str) -> list[NormalizedApplicationPermission]:
+        async with self._client() as client:
+            items = await client.get_all(f"/servicePrincipals/{external_id}/appRoleAssignments")
+        return [
+            NormalizedApplicationPermission(resource_external_id=item.get("resourceId", ""), resource_display_name=item.get("resourceDisplayName") or item.get("resourceId", ""), role_name=item.get("appRoleId") or "Default Access")
+            for item in items if item.get("resourceId")
+        ]
 
     async def _add_app_role_assignment(self, resource_external_id: str, app_role_external_id: str, user_external_id: str) -> bool:
         async with self._client() as client:

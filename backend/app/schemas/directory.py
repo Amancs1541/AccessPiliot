@@ -37,6 +37,14 @@ class UserCreateResponse(BaseModel):
     temporary_password: Optional[str] = None
 
 
+class UserAttributeUpdate(BaseModel):
+    """Only department/job_title are editable here — the two fields birthright policies match on. Editing
+    either triggers a real write to the identity's own provider (Entra/Okta) AND a birthright mover
+    reconciliation (see app.services.birthright.reconcile_birthright_policies_for_user)."""
+    department: Optional[str] = Field(default=None, max_length=200)
+    job_title: Optional[str] = Field(default=None, max_length=200)
+
+
 class GroupResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: UUID
@@ -94,6 +102,19 @@ class UserLicense(BaseModel):
 class UserAccessSummary(BaseModel):
     assignments: list[UserAccessItem]
     licenses: list[UserLicense]
+
+
+class NamedPolicyRef(BaseModel):
+    id: UUID
+    name: str
+
+
+class GroupAccessSummary(BaseModel):
+    member_count: int
+    active_assignment_count: int
+    birthright_policies: list[NamedPolicyRef]
+    sod_policies: list[NamedPolicyRef]
+    access_packages: list[NamedPolicyRef]
 
 
 class SyncRunResponse(BaseModel):

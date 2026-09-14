@@ -219,7 +219,7 @@ async def _find_or_create_identity(session: AsyncSession, employee_id: str, norm
         return real_user, True, True
 
     csv_provider = await _get_or_create_csv_provider(session)
-    row = await upsert_user(session, csv_provider.id, normalized)
+    row, _ = await upsert_user(session, csv_provider.id, normalized)
     row.employee_id, row.source = employee_id, "CSV_ONBOARDING"
     await session.flush()
     return row, False, False

@@ -80,7 +80,7 @@ async def provision_real_account(session: AsyncSession, *, display_name: str, em
     mail_nickname = upn.split("@")[0] or upn
     try:
         created = await connector.create_user(NewUserRequest(display_name=display_name, user_principal_name=upn, mail_nickname=mail_nickname, department=department, job_title=job_title))
-        row = await upsert_user(session, provider.id, created.user)
+        row, _ = await upsert_user(session, provider.id, created.user)
         await record_audit(session, action="USER_PROVISIONED", target_type="USER", target_id=row.id, provider_id=provider.id, request_id=request_id, metadata={"source": "ONBOARDING", "email": email, "provisioned_upn": upn})
         return row
     except ProviderConflictError:
@@ -88,6 +88,7 @@ async def provision_real_account(session: AsyncSession, *, display_name: str, em
         existing = next((candidate for candidate in matches if candidate.email.lower() == upn.lower()), None)
         if existing is None:
             return None
-        return await upsert_user(session, provider.id, existing)
+        row, _ = await upsert_user(session, provider.id, existing)
+        return row
     except GraphError:
         return None

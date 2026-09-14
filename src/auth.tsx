@@ -21,6 +21,8 @@ interface AuthContextValue {
   isSocAdmin: boolean;
   // Same idea again, for AccessPilot.ServerAdmin (infra/ops System Health dashboard).
   isServerAdmin: boolean;
+  // Same idea again, for AccessPilot.NHIAdmin (Non-Human Identity ownership/risk management).
+  isNhiAdmin: boolean;
   // Unix-ms timestamp of when the CURRENT session actually began — derived once, in one place, from the real
   // token claims for whichever auth path is active (MSAL ID token's auth_time/iat, or the Break-Glass JWT's
   // iat), never a placeholder string. See the Profile page (src/App.tsx), the only current consumer.
@@ -112,6 +114,7 @@ function AuthState({ children, authConfigured, apiScope }: { children: ReactNode
   const [isSodAdmin, setIsSodAdmin] = useState(false);
   const [isSocAdmin, setIsSocAdmin] = useState(false);
   const [isServerAdmin, setIsServerAdmin] = useState(false);
+  const [isNhiAdmin, setIsNhiAdmin] = useState(false);
 
   // Break-Glass emergency login — mutually exclusive with a real MSAL account. A token found in sessionStorage
   // (survives a page refresh, cleared when the tab closes, matching MSAL's own cacheLocation choice above) is
@@ -143,6 +146,7 @@ function AuthState({ children, authConfigured, apiScope }: { children: ReactNode
       setIsSodAdmin(Array.isArray(profile.roles) && profile.roles.includes('AccessPilot.SoDAdmin'));
       setIsSocAdmin(Array.isArray(profile.roles) && profile.roles.includes('AccessPilot.SoCAdmin'));
       setIsServerAdmin(Array.isArray(profile.roles) && profile.roles.includes('AccessPilot.ServerAdmin'));
+      setIsNhiAdmin(Array.isArray(profile.roles) && profile.roles.includes('AccessPilot.NHIAdmin'));
       const breakglassClaims = decodeJwtPayload(token);
       const breakglassIat = breakglassClaims?.iat as number | undefined;
       setSessionStartedAt(breakglassIat ? breakglassIat * 1000 : Date.now());
@@ -215,6 +219,7 @@ function AuthState({ children, authConfigured, apiScope }: { children: ReactNode
       setIsSodAdmin(Array.isArray(profile?.roles) && profile.roles.includes('AccessPilot.SoDAdmin'));
       setIsSocAdmin(Array.isArray(profile?.roles) && profile.roles.includes('AccessPilot.SoCAdmin'));
       setIsServerAdmin(Array.isArray(profile?.roles) && profile.roles.includes('AccessPilot.ServerAdmin'));
+      setIsNhiAdmin(Array.isArray(profile?.roles) && profile.roles.includes('AccessPilot.NHIAdmin'));
       // auth_time is an OPTIONAL ID-token claim Entra does not always emit; iat (issued-at, always present on
       // any valid token) is the reliable fallback — either way this is a real timestamp, never a placeholder.
       const idClaims = current.idTokenClaims as Record<string, unknown> | undefined;
@@ -388,7 +393,7 @@ function AuthState({ children, authConfigured, apiScope }: { children: ReactNode
     }
     return fetch(`${apiBaseUrl}${path}`, { ...init, headers });
   };
-  return <AuthContext.Provider value={{ role: (authenticated || breakglassActive) ? role : 'user', account, loading: inProgress !== 'none' || apiLoading || breakglassChecking, signIn, signOut, apiRequest, isSodAdmin, isSocAdmin, isServerAdmin, sessionStartedAt, authConfigured, breakglassActive, breakglassUsername, breakglassElevated, idpUnreachable, elevateBreakglass, refreshAccess }}>{children}</AuthContext.Provider>;
+  return <AuthContext.Provider value={{ role: (authenticated || breakglassActive) ? role : 'user', account, loading: inProgress !== 'none' || apiLoading || breakglassChecking, signIn, signOut, apiRequest, isSodAdmin, isSocAdmin, isServerAdmin, isNhiAdmin, sessionStartedAt, authConfigured, breakglassActive, breakglassUsername, breakglassElevated, idpUnreachable, elevateBreakglass, refreshAccess }}>{children}</AuthContext.Provider>;
 }
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);

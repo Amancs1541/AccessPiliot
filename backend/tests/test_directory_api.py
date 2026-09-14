@@ -3,12 +3,13 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
-from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, Application, Group, IdentityProvider, Role, User, UserGroup
+from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, AccessPackageItem, Application, Group, IdentityProvider, Role, User, UserGroup
 from app.providers.base import CreatedUser, NormalizedGroup, NormalizedUser, ProviderConflictError
 from app.security.auth import AuthenticatedUser, require_authenticated_user
 
@@ -353,3 +354,131 @@ async def test_user_access_summary_denied_for_normal_user(db_override):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get(f"/api/v1/users/{user_id}/access-summary")
     assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_updating_a_users_department_pushes_a_real_write_to_the_provider_first(db_override, monkeypatch):
+    """The AccessPilot -> Entra direction: editing department/job_title here must actually write to the
+    connector (never a local-only edit), and the local row must end up matching whatever the connector reports
+    back — not just whatever was requested — since the provider is the source of truth."""
+    async with db_override.factory() as session:
+        provider = IdentityProvider(name="Entra", type="ENTRA", status="CONNECTED", tenant_id="tenant-1")
+        session.add(provider)
+        await session.flush()
+        target_user = User(provider_id=provider.id, external_id="obj-1", email="mover@x.com", display_name="Mover", status="ACTIVE", department="Engineering")
+        session.add(target_user)
+        await session.commit()
+        user_id = target_user.id
+
+    seen = {}
+
+    async def fake_update_user(self, external_id, *, department, job_title):
+        seen["external_id"], seen["department"], seen["job_title"] = external_id, department, job_title
+        return NormalizedUser(external_id=external_id, email="mover@x.com", display_name="Mover", department=department, job_title=job_title)
+
+    monkeypatch.setattr("app.providers.entra.EntraProvider.update_user", fake_update_user)
+
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.patch(f"/api/v1/users/{user_id}/attributes", json={"department": "Sales", "job_title": "Account Executive"})
+    assert response.status_code == 200
+    assert response.json()["department"] == "Sales"
+    assert seen == {"external_id": "obj-1", "department": "Sales", "job_title": "Account Executive"}
+
+
+@pytest.mark.asyncio
+async def test_updating_department_triggers_birthright_reconciliation(db_override, monkeypatch):
+    async with db_override.factory() as session:
+        provider = IdentityProvider(name="Entra", type="ENTRA", status="CONNECTED", tenant_id="tenant-1")
+        session.add(provider)
+        await session.flush()
+        engineering_group = Group(provider_id=provider.id, external_id="g-eng", name="Engineering Team", status="ACTIVE", is_privileged=False)
+        sales_group = Group(provider_id=provider.id, external_id="g-sales", name="Sales Team", status="ACTIVE", is_privileged=False)
+        target_user = User(provider_id=provider.id, external_id="obj-1", email="mover@x.com", display_name="Mover", status="ACTIVE", department="Engineering")
+        session.add_all([engineering_group, sales_group, target_user])
+        await session.commit()
+        user_id, engineering_group_id, sales_group_id = target_user.id, engineering_group.id, sales_group.id
+
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/policies/birthright", json={"name": "Engineering -> Engineering Team", "match_field": "department", "match_value": "Engineering", "resource_type": "GROUP", "resource_id": str(engineering_group_id)})
+        await client.post("/api/v1/policies/birthright", json={"name": "Sales -> Sales Team", "match_field": "department", "match_value": "Sales", "resource_type": "GROUP", "resource_id": str(sales_group_id)})
+        await client.post(f"/api/v1/policies/birthright/evaluate/{user_id}")
+
+        async def fake_update_user(self, external_id, *, department, job_title):
+            return NormalizedUser(external_id=external_id, email="mover@x.com", display_name="Mover", department=department, job_title=job_title)
+        monkeypatch.setattr("app.providers.entra.EntraProvider.update_user", fake_update_user)
+
+        updated = await client.patch(f"/api/v1/users/{user_id}/attributes", json={"department": "Sales"})
+    assert updated.status_code == 200
+
+    async with db_override.factory() as session:
+        assignments = (await session.execute(select(AccessAssignment).where(AccessAssignment.user_id == user_id))).scalars().all()
+    by_resource = {a.resource_id: a.status for a in assignments}
+    assert by_resource[engineering_group_id] == "REVOKED"
+    assert by_resource[sales_group_id] == "ELIGIBLE"
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_never_touches_a_manually_granted_assignment(db_override, monkeypatch):
+    """The whole safety point of birthright_policy_id: an assignment an admin granted directly (bypass_activation,
+    no policy involved at all) must survive a department change untouched, even though it happens to target a
+    group with the same name/shape a birthright policy could otherwise match."""
+    async with db_override.factory() as session:
+        provider = IdentityProvider(name="Entra", type="ENTRA", status="CONNECTED", tenant_id="tenant-1")
+        session.add(provider)
+        await session.flush()
+        group = Group(provider_id=provider.id, external_id="g-manual", name="Special Access", status="ACTIVE", is_privileged=False)
+        target_user = User(provider_id=provider.id, external_id="obj-1", email="mover@x.com", display_name="Mover", status="ACTIVE", department="Engineering")
+        session.add_all([group, target_user])
+        await session.commit()
+        user_id, group_id = target_user.id, group.id
+
+    async def fake_activate_assignment(self, request):
+        return True
+    monkeypatch.setattr("app.providers.entra.EntraProvider.activate_assignment", fake_activate_assignment)
+
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        manual = await client.post("/api/v1/assignments", json={"user_id": str(user_id), "resource_type": "GROUP", "resource_id": str(group_id), "assignment_type": "PERMANENT", "justification": "Manually granted by an admin, not a policy.", "bypass_activation": True})
+        assert manual.status_code == 201
+
+        async def fake_update_user(self, external_id, *, department, job_title):
+            return NormalizedUser(external_id=external_id, email="mover@x.com", display_name="Mover", department=department, job_title=job_title)
+        monkeypatch.setattr("app.providers.entra.EntraProvider.update_user", fake_update_user)
+
+        updated = await client.patch(f"/api/v1/users/{user_id}/attributes", json={"department": "Sales"})
+    assert updated.status_code == 200
+
+    async with db_override.factory() as session:
+        assignment = (await session.execute(select(AccessAssignment).where(AccessAssignment.user_id == user_id))).scalars().one()
+    assert assignment.status == "ACTIVE"  # untouched — never linked to a birthright policy
+
+
+@pytest.mark.asyncio
+async def test_group_access_summary_reports_members_packages_and_policies(db_override):
+    async with db_override.factory() as session:
+        provider = IdentityProvider(name="Directory", type="MOCK", status="CONNECTED", tenant_id="t")
+        session.add(provider)
+        await session.flush()
+        group = Group(provider_id=provider.id, external_id="g1", name="Finance Team", status="ACTIVE", is_privileged=False)
+        member = User(provider_id=provider.id, external_id="u1", email="a@x.com", display_name="A", status="ACTIVE")
+        session.add_all([group, member])
+        await session.flush()
+        session.add(UserGroup(user_id=member.id, group_id=group.id, source="SYNC"))
+        package = AccessPackage(name="Finance Bundle", status="ACTIVE")
+        session.add(package)
+        await session.flush()
+        session.add(AccessPackageItem(package_id=package.id, resource_type="GROUP", resource_id=group.id))
+        await session.commit()
+        group_id = group.id
+
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/policies/birthright", json={"name": "Finance -> Finance Team", "match_field": "department", "match_value": "Finance", "resource_type": "GROUP", "resource_id": str(group_id)})
+        response = await client.get(f"/api/v1/groups/{group_id}/access-summary")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["member_count"] == 1
+    assert len(body["access_packages"]) == 1 and body["access_packages"][0]["name"] == "Finance Bundle"
+    assert len(body["birthright_policies"]) == 1 and body["birthright_policies"][0]["name"] == "Finance -> Finance Team"

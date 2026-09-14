@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Box, Check, ChevronLeft, ChevronRight, Clock3, Cloud, Copy, Database, ExternalLink, FileCheck2, FolderKanban, Gauge, Image, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Lock, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldAlert, ShieldCheck, SlidersHorizontal, UploadCloud, UserRound, Users, X } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Bot, Box, Check, ChevronLeft, ChevronRight, Clock3, Cloud, Copy, Database, ExternalLink, FileCheck2, FolderKanban, Gauge, Image, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Lock, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldAlert, ShieldCheck, SlidersHorizontal, UploadCloud, UserRound, Users, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { currentUser, policies, type RequestStatus, type Role } from './mock';
 import { mockService, useMockState } from './mockService';
@@ -136,6 +136,8 @@ const nav = [
   { label: 'Security Operations', icon: Gauge, to: '/admin/soc', roles: [] as Role[], extra: 'soc', section: 'SECURITY OPERATIONS' },
   // Same exclusive-to-its-own-role pattern again, for AccessPilot.ServerAdmin's infra/ops health dashboard.
   { label: 'System Health', icon: Activity, to: '/admin/server-health', roles: [] as Role[], extra: 'server', section: 'SYSTEM HEALTH' },
+  // Same exclusive-to-its-own-role pattern again, for AccessPilot.NHIAdmin (non-human identity ownership/risk).
+  { label: 'Non-Human Identities', icon: Bot, to: '/admin/nhi', roles: [] as Role[], extra: 'nhi', section: 'NON-HUMAN IDENTITIES' },
   { label: 'Providers', icon: Cloud, to: '/admin/providers', roles: ['admin'], section: 'SYSTEM' },
   { label: 'Sync', icon: RefreshCw, to: '/admin/sync', roles: ['admin'] },
   { label: 'Onboarding', icon: UploadCloud, to: '/admin/onboarding', roles: ['admin'] },
@@ -151,7 +153,7 @@ function App() {
   if (auth.breakglassActive && !auth.breakglassElevated) return <BreakGlassDashboard />;
   const role = auth.authConfigured ? auth.role : mockRole;
   const changeRole = (nextRole: Role) => { localStorage.setItem('accesspilot.mockRole', nextRole); setMockRole(nextRole); };
-  return <IdleGuard><Shell role={role} setRole={changeRole}><Routes><Route path="/" element={<Navigate to="/dashboard" replace />} /><Route path="/dashboard" element={<Dashboard role={role} />} /><Route path="/my-access" element={<MyAccess />} /><Route path="/request-access" element={<RequestAccess />} /><Route path="/request-packages" element={<RequestPackagesPage />} /><Route path="/my-requests" element={<Requests mine />} /><Route path="/approvals" element={<MyApprovalsPage />} /><Route path="/profile" element={<Profile />} /><Route path="/admin/users" element={<AdminOnly role={role}><UsersPage /></AdminOnly>} /><Route path="/admin/users/:id" element={<AdminOnly role={role}><UserDetail /></AdminOnly>} /><Route path="/admin/groups" element={<AdminOnly role={role}><GroupsPage /></AdminOnly>} /><Route path="/admin/roles" element={<AdminOnly role={role}><RolesPage /></AdminOnly>} /><Route path="/admin/access-requests" element={<AdminOnly role={role}><Requests /></AdminOnly>} /><Route path="/admin/access-requests/:id" element={<AdminOnly role={role}><RequestDetailInteractive /></AdminOnly>} /><Route path="/admin/assignments" element={<AdminOnly role={role}><AssignmentsInteractive /></AdminOnly>} /><Route path="/admin/access-packages" element={<AdminOnly role={role}><AccessPackagesInteractive /></AdminOnly>} /><Route path="/admin/policies" element={<AdminOnly role={role}><PoliciesPage /></AdminOnly>} /><Route path="/admin/audit" element={<AdminOnly role={role}><AuditPage /></AdminOnly>} /><Route path="/admin/providers" element={<AdminOnly role={role}><ProvidersPage /></AdminOnly>} /><Route path="/admin/sync" element={<AdminOnly role={role}><SyncPage /></AdminOnly>} /><Route path="/admin/onboarding" element={<AdminOnly role={role}><OnboardingPage /></AdminOnly>} /><Route path="/admin/security" element={<AdminOnly role={role}><SecurityPage /></AdminOnly>} /><Route path="/admin/branding" element={<AdminOnly role={role}><BrandingPage /></AdminOnly>} /><Route path="/admin/sod" element={auth.isSodAdmin ? <SodPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/sod/configuration" element={auth.isSodAdmin ? <SodConfigurationPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/soc" element={auth.isSocAdmin ? <SocDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health" element={auth.isServerAdmin ? <ServerHealthDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health/troubleshooting" element={auth.isServerAdmin ? <TroubleshootingDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="*" element={<Navigate to="/dashboard" replace />} /></Routes></Shell></IdleGuard>;
+  return <IdleGuard><Shell role={role} setRole={changeRole}><Routes><Route path="/" element={<Navigate to="/dashboard" replace />} /><Route path="/dashboard" element={<Dashboard role={role} />} /><Route path="/my-access" element={<MyAccess />} /><Route path="/request-access" element={<RequestAccess />} /><Route path="/request-packages" element={<RequestPackagesPage />} /><Route path="/my-requests" element={<Requests mine />} /><Route path="/approvals" element={<MyApprovalsPage />} /><Route path="/profile" element={<Profile />} /><Route path="/admin/users" element={<AdminOnly role={role}><UsersPage /></AdminOnly>} /><Route path="/admin/users/:id" element={<AdminOnly role={role}><UserDetail /></AdminOnly>} /><Route path="/admin/groups" element={<AdminOnly role={role}><GroupsPage /></AdminOnly>} /><Route path="/admin/groups/:id" element={<AdminOnly role={role}><GroupDetail /></AdminOnly>} /><Route path="/admin/roles" element={<AdminOnly role={role}><RolesPage /></AdminOnly>} /><Route path="/admin/access-requests" element={<AdminOnly role={role}><Requests /></AdminOnly>} /><Route path="/admin/access-requests/:id" element={<AdminOnly role={role}><RequestDetailInteractive /></AdminOnly>} /><Route path="/admin/assignments" element={<AdminOnly role={role}><AssignmentsInteractive /></AdminOnly>} /><Route path="/admin/access-packages" element={<AdminOnly role={role}><AccessPackagesInteractive /></AdminOnly>} /><Route path="/admin/policies" element={<AdminOnly role={role}><PoliciesPage /></AdminOnly>} /><Route path="/admin/audit" element={<AdminOnly role={role}><AuditPage /></AdminOnly>} /><Route path="/admin/providers" element={<AdminOnly role={role}><ProvidersPage /></AdminOnly>} /><Route path="/admin/sync" element={<AdminOnly role={role}><SyncPage /></AdminOnly>} /><Route path="/admin/onboarding" element={<AdminOnly role={role}><OnboardingPage /></AdminOnly>} /><Route path="/admin/security" element={<AdminOnly role={role}><SecurityPage /></AdminOnly>} /><Route path="/admin/branding" element={<AdminOnly role={role}><BrandingPage /></AdminOnly>} /><Route path="/admin/sod" element={auth.isSodAdmin ? <SodPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/sod/configuration" element={auth.isSodAdmin ? <SodConfigurationPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/soc" element={auth.isSocAdmin ? <SocDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health" element={auth.isServerAdmin ? <ServerHealthDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health/troubleshooting" element={auth.isServerAdmin ? <TroubleshootingDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi" element={auth.isNhiAdmin ? <NhiPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi/:id" element={auth.isNhiAdmin ? <NhiDetailPage /> : <Navigate to="/dashboard" replace />} /><Route path="*" element={<Navigate to="/dashboard" replace />} /></Routes></Shell></IdleGuard>;
 }
 function SignInScreen() {
   const auth = useAuth();
@@ -920,6 +922,241 @@ function ServerHealthChart({ chart }: { chart: ApiRequestVolumeChart }) {
   </svg>;
 }
 
+// ---- Non-Human Identities (AccessPilot.NHIAdmin) ----
+// Governs Entra service principals / Okta service apps the same way this app already governs human users: who's
+// accountable for it (an owner), and whether a real, live-computed risk (no owner, expiring/expired credential)
+// is currently open or has been formally, time-boxed accepted. Exclusive to AccessPilot.NHIAdmin — a plain Admin
+// cannot reach this page at all, same self-escalation reasoning that already keeps SoDAdmin/SoCAdmin/ServerAdmin
+// Entra-only (see backend/app/security/auth.py). `Application` rows already exist for per-user app-role
+// assignment; this page treats those same rows as an inventory of the identities themselves.
+interface ApiNhiOwner { user_id: string; display_name: string; email: string; }
+interface ApiNhiCredential { credential_type: string; display_name: string | null; expires_at: string | null; }
+interface ApiNonHumanIdentity { id: string; provider_id: string; provider_name: string; provider_type: string; external_id: string; name: string; status: string; nhi_type: string; nhi_type_overridden: boolean; credential_expires_at: string | null; credentials: ApiNhiCredential[]; owners: ApiNhiOwner[]; risk_flags: string[]; last_synced_at: string | null; }
+interface ApiNhiSummary { total: number; no_owner: number; credential_expiring_soon: number; credential_expired: number; by_type: Record<string, number>; }
+interface ApiNhiPermission { resource_display_name: string; role_name: string; }
+const NHI_RISK_LABELS: Record<string, string> = { NO_OWNER: 'No owner', CREDENTIAL_EXPIRED: 'Credential expired', CREDENTIAL_EXPIRING_SOON: 'Credential expiring soon' };
+function nhiRiskBadge(flag: string) { return <span key={flag} className={`badge ${flag === 'CREDENTIAL_EXPIRED' ? 'danger' : 'warning'}`} style={{ marginRight: 6 }}>{NHI_RISK_LABELS[flag] || flag}</span>; }
+// SERVICE_PRINCIPAL/MANAGED_IDENTITY/OKTA_SERVICE_APP are auto-detected from what the connector actually reports
+// (Entra's real servicePrincipalType field, or Okta's app type). AI_AGENT/API/BOT/OTHER have no reliable
+// auto-detection signal from either provider today — they only ever get set by a deliberate NHIAdmin
+// reclassification (the "Type" control on the detail page below), never invented by a sync.
+const NHI_TYPE_LABELS: Record<string, string> = { SERVICE_PRINCIPAL: 'Entra service principal', MANAGED_IDENTITY: 'Managed identity', OKTA_SERVICE_APP: 'Okta service app', AI_AGENT: 'AI agent', API: 'API', BOT: 'Bot', OTHER: 'Other' };
+const NHI_TYPE_OPTIONS: FilterOption[] = Object.entries(NHI_TYPE_LABELS).map(([value, label]) => ({ value, label }));
+function nhiTypeLabel(type: string) { return NHI_TYPE_LABELS[type] || type.replace(/_/g, ' '); }
+function nhiProviderLabel(identity: { provider_type: string; provider_name: string }) { return identity.provider_type === 'ENTRA' ? 'Microsoft Entra ID' : identity.provider_type === 'OKTA' ? 'Okta' : identity.provider_name; }
+
+function NhiPage() {
+  const timezone = useAppTimezone();
+  const { data: identities, error, loading } = useApiResource<ApiNonHumanIdentity[]>('/api/v1/nhi');
+  const { data: summary } = useApiResource<ApiNhiSummary>('/api/v1/nhi/summary');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const search = searchParams.get('q') || '';
+  const riskFilter = searchParams.get('risk') || '';
+  const typeFilter = searchParams.get('type') || '';
+  const setSearch = (value: string) => setSearchParams(prev => { const next = new URLSearchParams(prev); if (value) next.set('q', value); else next.delete('q'); return next; });
+  const setRiskFilter = (value: string) => setSearchParams(prev => { const next = new URLSearchParams(prev); if (value) next.set('risk', value); else next.delete('risk'); return next; });
+  const setTypeFilter = (value: string) => setSearchParams(prev => { const next = new URLSearchParams(prev); if (value) next.set('type', value); else next.delete('type'); return next; });
+
+  const filtered = (identities || []).filter(identity =>
+    (!riskFilter || identity.risk_flags.includes(riskFilter)) &&
+    (!typeFilter || identity.nhi_type === typeFilter) &&
+    (!search || identity.name.toLowerCase().includes(search.toLowerCase()) || identity.external_id.toLowerCase().includes(search.toLowerCase()))
+  );
+  const riskOptions: FilterOption[] = [{ value: 'NO_OWNER', label: 'No owner' }, { value: 'CREDENTIAL_EXPIRING_SOON', label: 'Credential expiring soon' }, { value: 'CREDENTIAL_EXPIRED', label: 'Credential expired' }];
+  const typesWithCounts = NHI_TYPE_OPTIONS.map(option => ({ ...option, count: summary?.by_type[option.value] ?? 0 }));
+
+  return <Page eyebrow="NON-HUMAN IDENTITIES" title="Non-Human Identities" subtitle="Entra service principals, Okta service apps, AI agents, bots, and APIs — who owns each one, and whether a credential-expiry or ownership risk is currently open.">
+    <div className="stats" style={{ marginBottom: 18 }}>
+      <div className="stat stat-link" onClick={() => { setRiskFilter(''); setTypeFilter(''); }}><div className="stat-top"><span>Total</span><span className="stat-icon"><Bot size={15} /></span></div><div className="stat-value">{summary ? summary.total : '—'}</div><div className="stat-foot">Synced across every connected provider</div></div>
+      <div className="stat stat-link" onClick={() => setRiskFilter('NO_OWNER')}><div className="stat-top"><span>No owner</span><span className="stat-icon"><Users size={15} /></span></div><div className="stat-value">{summary ? summary.no_owner : '—'}</div><div className="stat-foot">Nobody accountable for these yet</div></div>
+      <div className="stat stat-link" onClick={() => setRiskFilter('CREDENTIAL_EXPIRING_SOON')}><div className="stat-top"><span>Expiring soon</span><span className="stat-icon"><Clock3 size={15} /></span></div><div className="stat-value">{summary ? summary.credential_expiring_soon : '—'}</div><div className="stat-foot">Credential expires within 30 days</div></div>
+      <div className="stat stat-link" onClick={() => setRiskFilter('CREDENTIAL_EXPIRED')}><div className="stat-top"><span>Expired</span><span className="stat-icon"><AlertTriangle size={15} /></span></div><div className="stat-value">{summary ? summary.credential_expired : '—'}</div><div className="stat-foot">Credential has already expired</div></div>
+    </div>
+
+    <div className="panel" style={{ marginBottom: 18 }}>
+      <div className="panel-head"><h2>By type</h2><span className="panel-link">Click a type to filter the table below</span></div>
+      <div className="detail-section" style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+        {typesWithCounts.map(({ value, label, count }) => <button key={value} className="btn" style={typeFilter === value ? { borderColor: 'var(--teal)', color: 'var(--teal-dark)' } : undefined} onClick={() => setTypeFilter(typeFilter === value ? '' : value)}>{label} <span className="badge neutral" style={{ marginLeft: 6 }}>{count}</span></button>)}
+      </div>
+    </div>
+
+    <TablePanel toolbar={<><Toolbar placeholder="Search by name or external ID" searchValue={search} onSearchChange={setSearch} filterLabel="All risk flags" filterValue={riskFilter} onFilterChange={setRiskFilter} filterOptions={riskOptions} /><select className="select" value={typeFilter} onChange={event => setTypeFilter(event.target.value)}><option value="">All types</option>{NHI_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select></>}>
+      {loading ? <div className="empty">Loading non-human identities...</div> : error ? <div className="empty">{error}</div> : !identities || identities.length === 0 ? <div className="empty">No applications synced yet — run a directory sync to populate this list.</div> : filtered.length === 0 ? <div className="empty">No non-human identities match this filter.</div> : <table><thead><tr><th>Name</th><th>Provider</th><th>Type</th><th>Status</th><th>Credential expiry</th><th>Owners</th><th>Risk</th><th></th></tr></thead><tbody>
+        {filtered.map(identity => <tr key={identity.id}>
+          <td><Link to={`/admin/nhi/${identity.id}`} className="user-name">{identity.name}</Link></td>
+          <td><span className="badge neutral">{nhiProviderLabel(identity)}</span></td>
+          <td>{nhiTypeLabel(identity.nhi_type)}{identity.nhi_type_overridden && <span title="Manually classified" style={{ marginLeft: 5, color: 'var(--muted)' }}>*</span>}</td>
+          <td><StatusBadge status={identity.status} /></td>
+          <td>{identity.credential_expires_at ? formatDateTime(identity.credential_expires_at, timezone) : 'Not tracked'}</td>
+          <td>{identity.owners.length === 0 ? '—' : identity.owners.map(o => o.display_name).join(', ')}</td>
+          <td>{identity.risk_flags.length === 0 ? <span className="badge success">None</span> : identity.risk_flags.map(nhiRiskBadge)}</td>
+          <td><Link to={`/admin/nhi/${identity.id}`}><ChevronRight size={15} color="#829198" /></Link></td>
+        </tr>)}
+      </tbody></table>}
+    </TablePanel>
+    {identities && identities.length > 0 && <p className="footer-note">Showing {filtered.length} of {identities.length} non-human identities{identities.some(i => i.nhi_type_overridden) ? ' · * manually classified' : ''}</p>}
+  </Page>;
+}
+
+function NhiDetailPage() {
+  const auth = useAuth();
+  const timezone = useAppTimezone();
+  const { id } = useParams();
+  const { data: identity, error, loading, reload } = useApiResource<ApiNonHumanIdentity>(`/api/v1/nhi/${id}`);
+  const { data: users } = useApiResource<ApiUser[]>('/api/v1/users');
+  const { data: activity } = useApiResource<ApiAuditLog[]>(`/api/v1/nhi/${id}/activity`);
+  const { data: permissions, loading: permissionsLoading, error: permissionsError } = useApiResource<ApiNhiPermission[]>(`/api/v1/nhi/${id}/permissions`);
+
+  const [addOwnerId, setAddOwnerId] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  const [acceptingRisk, setAcceptingRisk] = useState<string | null>(null);
+  const [justification, setJustification] = useState('');
+  const [expiresAt, setExpiresAt] = useState('');
+  const [nhiType, setNhiType] = useState('');
+  const [savingType, setSavingType] = useState(false);
+  const [togglingStatus, setTogglingStatus] = useState(false);
+
+  useEffect(() => { if (identity) setNhiType(identity.nhi_type); }, [identity]);
+
+  if (loading) return <Page eyebrow="NON-HUMAN IDENTITIES" title="Loading..." subtitle=""><div className="empty">Loading identity...</div></Page>;
+  if (error || !identity) return <Page eyebrow="NON-HUMAN IDENTITIES" title="Non-Human Identity" subtitle=""><div className="empty">{error || 'Identity not found.'}</div></Page>;
+
+  const reclassify = async () => {
+    if (nhiType === identity.nhi_type) return;
+    setSavingType(true); setMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/nhi/${identity.id}/type`, { method: 'PATCH', body: JSON.stringify({ nhi_type: nhiType }) });
+      if (response.ok) reload();
+      else { const body = await response.json().catch(() => null); setMessage(body?.error?.message || 'Unable to reclassify this identity.'); setNhiType(identity.nhi_type); }
+    } catch { setMessage('Unable to reach the backend.'); setNhiType(identity.nhi_type); } finally { setSavingType(false); }
+  };
+
+  const toggleStatus = async () => {
+    const enabling = identity.status !== 'ACTIVE';
+    if (!window.confirm(`${enabling ? 'Enable' : 'Disable'} "${identity.name}" at ${nhiProviderLabel(identity)}? This is a real, immediate change made directly against the provider, not just a local flag.`)) return;
+    setTogglingStatus(true); setMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/nhi/${identity.id}/${enabling ? 'enable' : 'disable'}`, { method: 'POST' });
+      if (response.ok) reload();
+      else { const body = await response.json().catch(() => null); setMessage(body?.error?.message || `Unable to ${enabling ? 'enable' : 'disable'} this identity — the provider may not have granted the write permission this needs.`); }
+    } catch { setMessage('Unable to reach the backend.'); } finally { setTogglingStatus(false); }
+  };
+
+  const addOwner = async () => {
+    if (!addOwnerId) return;
+    setSaving(true); setMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/nhi/${identity.id}/owners`, { method: 'POST', body: JSON.stringify({ user_id: addOwnerId }) });
+      if (response.ok) { reload(); setAddOwnerId(''); }
+      else { const body = await response.json().catch(() => null); setMessage(body?.error?.message || 'Unable to add this owner.'); }
+    } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
+  };
+
+  const removeOwner = async (userId: string) => {
+    if (!window.confirm('Remove this owner from this non-human identity?')) return;
+    setSaving(true); setMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/nhi/${identity.id}/owners/${userId}`, { method: 'DELETE' });
+      if (response.ok) reload();
+      else setMessage('Unable to remove this owner.');
+    } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
+  };
+
+  const acceptRisk = async (riskType: string) => {
+    if (!justification.trim() || !expiresAt) { setMessage('A justification and an expiry date are required.'); return; }
+    setSaving(true); setMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/nhi/${identity.id}/risk-exceptions`, { method: 'POST', body: JSON.stringify({ risk_type: riskType, justification: justification.trim(), expires_at: new Date(expiresAt).toISOString() }) });
+      if (response.ok) { setAcceptingRisk(null); setJustification(''); setExpiresAt(''); reload(); }
+      else { const body = await response.json().catch(() => null); setMessage(body?.error?.message || 'Unable to accept this risk.'); }
+    } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
+  };
+
+  const availableOwners = (users || []).filter(user => !identity.owners.some(owner => owner.user_id === user.id));
+
+  return <Page eyebrow="NON-HUMAN IDENTITIES" title={identity.name} subtitle={`${nhiProviderLabel(identity)} · ${nhiTypeLabel(identity.nhi_type)} · external ID ${identity.external_id}`} action={<Link to="/admin/nhi" className="btn">Back to list</Link>}>
+    <div className="panel" style={{ marginBottom: 18 }}>
+      <div className="panel-head"><h2>Overview</h2><div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><StatusBadge status={identity.status} /><button className="btn" disabled={togglingStatus} onClick={toggleStatus}>{togglingStatus ? 'Working...' : identity.status === 'ACTIVE' ? 'Disable' : 'Enable'}</button></div></div>
+      <div className="detail-section">
+        <div className="key-grid">
+          <div className="key"><span>Provider</span><strong>{nhiProviderLabel(identity)}</strong></div>
+          <div className="key"><span>External ID</span><strong>{identity.external_id}</strong></div>
+          <div className="key"><span>Credential expiry (soonest)</span><strong>{identity.credential_expires_at ? formatDateTime(identity.credential_expires_at, timezone) : 'Not tracked for this provider yet'}</strong></div>
+          <div className="key"><span>Last synced</span><strong>{identity.last_synced_at ? formatDateTime(identity.last_synced_at, timezone) : 'Never'}</strong></div>
+        </div>
+        <div className="key" style={{ margin: '20px 0 8px' }}><span>Type</span></div>
+        <p className="subtitle" style={{ marginTop: 0, marginBottom: 8 }}>{identity.nhi_type_overridden ? 'Manually classified — a directory sync will not change this.' : "Auto-detected from the provider — reclassify if it's actually an AI agent, bot, or API."}</p>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <select className="select" style={{ flex: 1, maxWidth: 320 }} value={nhiType} onChange={event => setNhiType(event.target.value)}>{NHI_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
+          <button className="btn btn-primary" disabled={savingType || nhiType === identity.nhi_type} onClick={reclassify}>{savingType ? 'Saving...' : 'Save type'}</button>
+        </div>
+        {message && <div className="notice" style={{ marginTop: 14 }}>{message}</div>}
+      </div>
+    </div>
+
+    <div className="grid-2" style={{ marginBottom: 18 }}>
+      <section className="panel">
+        <div className="panel-head"><h2>Owners</h2></div>
+        <div className="detail-section">
+          {identity.owners.length === 0 ? <div className="empty" style={{ padding: '10px 0' }}>No owner assigned yet.</div> : identity.owners.map(owner => <div key={owner.user_id} className="user-cell" style={{ marginBottom: 8, justifyContent: 'space-between', display: 'flex' }}>
+            <span><span className="user-name">{owner.display_name}</span><span className="user-email">{owner.email}</span></span>
+            <button className="btn" disabled={saving} onClick={() => removeOwner(owner.user_id)}>Remove</button>
+          </div>)}
+          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+            <select className="select" style={{ flex: 1 }} value={addOwnerId} onChange={event => setAddOwnerId(event.target.value)}><option value="">Select a user to add as owner</option>{availableOwners.map(user => <option key={user.id} value={user.id}>{user.display_name} ({user.email})</option>)}</select>
+            <button className="btn btn-primary" disabled={saving || !addOwnerId} onClick={addOwner}>Add owner</button>
+          </div>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-head"><h2>Risk</h2></div>
+        <div className="detail-section">
+          {identity.risk_flags.length === 0 ? <div className="empty" style={{ padding: '10px 0' }}>No open risk on this identity.</div> : identity.risk_flags.map(flag => <div key={flag} style={{ marginBottom: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: acceptingRisk === flag ? 8 : 0 }}>
+              {nhiRiskBadge(flag)}
+              {acceptingRisk !== flag && <button className="btn" onClick={() => { setAcceptingRisk(flag); setMessage(''); }}>Accept risk</button>}
+            </div>
+            {acceptingRisk === flag && <div className="panel" style={{ padding: 14 }}>
+              <label className="key" style={{ display: 'block', marginBottom: 10 }}><span>Justification</span><input className="select" style={{ width: '100%' }} value={justification} onChange={event => setJustification(event.target.value)} /></label>
+              <label className="key" style={{ display: 'block', marginBottom: 10 }}><span>Accepted until</span><input className="select" type="date" style={{ width: '100%' }} value={expiresAt} onChange={event => setExpiresAt(event.target.value)} /></label>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className="btn btn-primary" disabled={saving} onClick={() => acceptRisk(flag)}>{saving ? 'Saving...' : 'Accept'}</button>
+                <button className="btn" onClick={() => setAcceptingRisk(null)}>Cancel</button>
+              </div>
+            </div>}
+          </div>)}
+        </div>
+      </section>
+    </div>
+
+    <div className="panel" style={{ marginBottom: 18 }}>
+      <div className="panel-head"><h2>Certificates &amp; secrets</h2><span className="panel-link">{identity.credentials.length} on file</span></div>
+      {identity.credentials.length === 0 ? <div className="empty">No certificate or secret data tracked for this provider yet.</div> : <div className="table-wrap"><table><thead><tr><th>Type</th><th>Name</th><th>Expires</th></tr></thead><tbody>
+        {identity.credentials.map((credential, index) => <tr key={index}>
+          <td>{credential.credential_type === 'PASSWORD' ? 'Secret' : 'Certificate'}</td>
+          <td>{credential.display_name || '—'}</td>
+          <td>{credential.expires_at ? formatDateTime(credential.expires_at, timezone) : 'No expiry on file'}</td>
+        </tr>)}
+      </tbody></table></div>}
+      <div className="detail-section"><p className="subtitle" style={{ margin: 0 }}>Adding a new certificate or secret isn't available yet — it needs this app to also sync the underlying App Registration object (not just the Service Principal), which is a separate piece of work. Rotate credentials directly in {nhiProviderLabel(identity)} for now; this list reflects what's there as of the last sync.</p></div>
+    </div>
+
+    <div className="panel" style={{ marginBottom: 18 }}>
+      <div className="panel-head"><h2>Exposed API access</h2><span className="panel-link">Live from {nhiProviderLabel(identity)}, not synced</span></div>
+      {permissionsLoading ? <div className="empty">Loading...</div> : permissionsError ? <div className="empty">{permissionsError}</div> : !permissions || permissions.length === 0 ? <div className="empty">No API access grants found for this identity.</div> : <div className="table-wrap"><table><thead><tr><th>Resource</th><th>Role / scope</th></tr></thead><tbody>
+        {permissions.map((permission, index) => <tr key={index}><td>{permission.resource_display_name}</td><td>{permission.role_name}</td></tr>)}
+      </tbody></table></div>}
+    </div>
+
+    <div className="panel">
+      <div className="panel-head"><h2>Recent activity</h2><span className="panel-link">AccessPilot actions on this identity</span></div>
+      {!activity || activity.length === 0 ? <div className="empty">No activity recorded for this identity yet.</div> : activity.map(entry => <div className="activity" key={entry.id}><div className="activity-row"><span className="activity-dot" /><div className="activity-copy"><strong>{entry.action.replace(/_/g, ' ')}</strong><small>{entry.actor_display_name || 'System'} · {formatDateTime(entry.timestamp, timezone)}</small></div><StatusBadge status={entry.result} /></div></div>)}
+    </div>
+  </Page>;
+}
+
 // ---- Troubleshooting (drill-down from System Health) ----
 // Same real, role-gated data discipline as System Health — every field here comes from a real signal (recent
 // SyncError rows, the same live service cards, real audit history), never a fabricated scenario. When nothing
@@ -1031,7 +1268,7 @@ function Shell({ role, setRole, children }: { role: Role; setRole: (r: Role) => 
   const auth = useAuth();
   const timezone = useAppTimezone();
   const branding = useBranding();
-  const visible = nav.filter(item => item.roles.includes(role) || (item.extra === 'sod' && auth.isSodAdmin) || (item.extra === 'soc' && auth.isSocAdmin) || (item.extra === 'server' && auth.isServerAdmin));
+  const visible = nav.filter(item => item.roles.includes(role) || (item.extra === 'sod' && auth.isSodAdmin) || (item.extra === 'soc' && auth.isSocAdmin) || (item.extra === 'server' && auth.isServerAdmin) || (item.extra === 'nhi' && auth.isNhiAdmin));
   const path = location.pathname;
   const signedIn = Boolean(auth.account) || auth.breakglassActive;
   const seesSodBell = auth.isSodAdmin;
@@ -1320,9 +1557,22 @@ function UsersPage() {
   </Page>;
 }
 function UserDetail() {
+  const auth = useAuth();
   const timezone = useAppTimezone();
   const { id } = useParams();
-  const { data: user, error, loading } = useApiResource<ApiUser>(`/api/v1/users/${id}`);
+  const { data: user, error, loading, reload: reloadUser } = useApiResource<ApiUser>(`/api/v1/users/${id}`);
+  const [attributesForm, setAttributesForm] = useState({ department: '', job_title: '' });
+  const [savingAttributes, setSavingAttributes] = useState(false);
+  const [attributesMessage, setAttributesMessage] = useState('');
+  useEffect(() => { if (user) setAttributesForm({ department: user.department || '', job_title: user.job_title || '' }); }, [user]);
+  const saveAttributes = async () => {
+    setSavingAttributes(true); setAttributesMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/users/${id}/attributes`, { method: 'PATCH', body: JSON.stringify({ department: attributesForm.department.trim() || null, job_title: attributesForm.job_title.trim() || null }) });
+      if (response.ok) { setAttributesMessage('Saved — pushed to the real directory and any birthright policy grants re-evaluated.'); reloadUser(); }
+      else { const body = await response.json().catch(() => null); setAttributesMessage(body?.error?.message || 'Unable to save these attributes.'); }
+    } catch { setAttributesMessage('Unable to reach the backend.'); } finally { setSavingAttributes(false); }
+  };
   const { data: providers } = useApiResource<ApiProvider[]>('/api/v1/providers');
   const { data: access, error: accessError, loading: accessLoading, reload: reloadAccess } = useApiResource<ApiUserAccessSummary>(`/api/v1/users/${id}/access-summary`);
   const groupItems = (access?.assignments || []).filter(item => item.resource_type === 'GROUP');
@@ -1355,7 +1605,7 @@ function UserDetail() {
     {user.employee_id && <div className="key"><span>Employee ID (from CSV)</span><strong>{user.employee_id}</strong></div>}
     <div className="key"><span>Connector</span><strong>{connectorName}</strong></div>
     <div className="key"><span>Connector external ID</span><strong>{user.external_id}</strong></div>
-  </div>{isCsvOnly && <p className="subtitle" style={{marginTop:12}}>This identity has no real {providers?.some(p => p.provider_type === 'ENTRA') ? 'Entra' : providers?.some(p => p.provider_type === 'OKTA') ? 'Okta' : 'connector'} account yet — group/role membership shown below is AccessPilot-local (eligible) only. Re-uploading its CSV row after a real connector is available will provision one automatically.</p>}</div></section><aside className="panel">
+  </div>{isCsvOnly && <p className="subtitle" style={{marginTop:12}}>This identity has no real {providers?.some(p => p.provider_type === 'ENTRA') ? 'Entra' : providers?.some(p => p.provider_type === 'OKTA') ? 'Okta' : 'connector'} account yet — group/role membership shown below is AccessPilot-local (eligible) only. Re-uploading its CSV row after a real connector is available will provision one automatically.</p>}</div><div className="detail-section"><div className="detail-title"><h2>Department &amp; job title</h2></div><p className="subtitle" style={{marginTop:0,marginBottom:14}}>Editing either pushes a real write to {connectorName} (not just a local edit) and re-evaluates birthright policies — a mover loses any group a policy no longer grants and gains any newly-matching one, ELIGIBLE only, same as a new joiner.</p><div className="key-grid"><label className="key" style={{display:'block'}}><span>Department</span><input className="select" style={{width:'100%'}} value={attributesForm.department} onChange={event => setAttributesForm({...attributesForm, department: event.target.value})}/></label><label className="key" style={{display:'block'}}><span>Job title</span><input className="select" style={{width:'100%'}} value={attributesForm.job_title} onChange={event => setAttributesForm({...attributesForm, job_title: event.target.value})}/></label></div><div style={{display:'flex',alignItems:'center',gap:10,marginTop:14}}><button className="btn btn-primary" disabled={savingAttributes} onClick={saveAttributes}>{savingAttributes ? 'Saving...' : 'Save'}</button>{attributesMessage && <span className="footer-note" style={{margin:0}}>{attributesMessage}</span>}</div></div></section><aside className="panel">
     <div className="panel-head"><h2>Groups</h2></div>
     <div className="detail-section">{accessLoading ? <div className="empty">Loading groups...</div> : accessError ? <div className="notice">{accessError}</div> : groupItems.length === 0 ? <div className="notice">Not a member of any group.</div> : <div className="timeline" style={{padding:0}}>{groupItems.map(renderAccessItem)}</div>}</div>
     <div className="panel-head"><h2>Applications</h2></div>
@@ -2180,6 +2430,8 @@ function MyApprovalsPage() {
     </tbody></table>}</TablePanel>
   </Page>;
 }
+interface ApiNamedPolicyRef { id: string; name: string; }
+interface ApiGroupAccessSummary { member_count: number; active_assignment_count: number; birthright_policies: ApiNamedPolicyRef[]; sod_policies: ApiNamedPolicyRef[]; access_packages: ApiNamedPolicyRef[]; }
 function GroupsPage() {
   const auth = useAuth();
   const timezone = useAppTimezone();
@@ -2209,7 +2461,57 @@ function GroupsPage() {
   };
   return <Page eyebrow="ADMINISTRATION" title="Groups" subtitle="Directory groups and membership governance." action={<button className="btn btn-primary" onClick={() => { setOpen(true); setFormMessage(''); }}><Plus size={14}/> Add group</button>}>
     {open && <form role="dialog" aria-modal="true" className="panel" style={{maxWidth:640,marginBottom:18}} onSubmit={submit}><div className="panel-head"><h2>Add group</h2><button type="button" className="btn" aria-label="Close" onClick={() => setOpen(false)}><X size={14}/></button></div><div className="detail-section"><label className="key" style={{display:'block'}}><span>Group name</span><input className="select" style={{width:'100%'}} value={form.display_name} onChange={event => setForm({...form, display_name: event.target.value})}/></label><label className="key" style={{display:'block',marginTop:14}}><span>Description</span><input className="select" style={{width:'100%'}} value={form.description} onChange={event => setForm({...form, description: event.target.value})}/></label>{formMessage && <div className="notice" style={{marginTop:14}}>{formMessage}</div>}</div><div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setOpen(false)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Creating...' : 'Create group'}</button></div></form>}
-    <TablePanel toolbar={<Toolbar placeholder="Search groups" searchValue={search} onSearchChange={setSearch} filterLabel="All groups" filterValue={privilegedFilter} onFilterChange={setPrivilegedFilter} filterOptions={[{value:'true',label:'Privileged'},{value:'false',label:'Standard'}]}/>}>{loading ? <div className="empty">Loading groups...</div> : error ? <div className="empty">{error}</div> : !groups || groups.length === 0 ? <div className="empty">No groups found.</div> : filteredGroups.length === 0 ? <div className="empty">No groups match this filter.</div> : <table><thead><tr><th>Name</th><th>Description</th><th>Privileged</th><th>Status</th><th>Last synced</th></tr></thead><tbody>{filteredGroups.map(g => <tr key={g.id}><td className="user-name">{g.name}</td><td>{g.description || '—'}</td><td><span className={`risk ${g.is_privileged ? 'risk-high' : 'risk-low'}`}>{g.is_privileged ? 'Privileged' : 'Standard'}</span></td><td><StatusBadge status={g.status}/></td><td>{g.last_synced_at ? formatDateTime(g.last_synced_at, timezone) : 'Never'}</td></tr>)}</tbody></table>}</TablePanel>
+    <TablePanel toolbar={<Toolbar placeholder="Search groups" searchValue={search} onSearchChange={setSearch} filterLabel="All groups" filterValue={privilegedFilter} onFilterChange={setPrivilegedFilter} filterOptions={[{value:'true',label:'Privileged'},{value:'false',label:'Standard'}]}/>}>{loading ? <div className="empty">Loading groups...</div> : error ? <div className="empty">{error}</div> : !groups || groups.length === 0 ? <div className="empty">No groups found.</div> : filteredGroups.length === 0 ? <div className="empty">No groups match this filter.</div> : <table><thead><tr><th>Name</th><th>Description</th><th>Privileged</th><th>Status</th><th>Last synced</th><th></th></tr></thead><tbody>{filteredGroups.map(g => <tr key={g.id}><td><Link to={`/admin/groups/${g.id}`} className="user-name">{g.name}</Link></td><td>{g.description || '—'}</td><td><span className={`risk ${g.is_privileged ? 'risk-high' : 'risk-low'}`}>{g.is_privileged ? 'Privileged' : 'Standard'}</span></td><td><StatusBadge status={g.status}/></td><td>{g.last_synced_at ? formatDateTime(g.last_synced_at, timezone) : 'Never'}</td><td><Link to={`/admin/groups/${g.id}`}><ChevronRight size={15} color="#829198"/></Link></td></tr>)}</tbody></table>}</TablePanel>
+  </Page>;
+}
+
+function GroupDetail() {
+  const timezone = useAppTimezone();
+  const { id } = useParams();
+  const { data: group, error, loading } = useApiResource<ApiGroup>(`/api/v1/groups/${id}`);
+  const { data: members, error: membersError, loading: membersLoading } = useApiResource<ApiUser[]>(`/api/v1/groups/${id}/members`);
+  const { data: summary } = useApiResource<ApiGroupAccessSummary>(`/api/v1/groups/${id}/access-summary`);
+
+  if (loading) return <Page eyebrow="ADMINISTRATION" title="Loading..." subtitle=""><div className="empty">Loading group...</div></Page>;
+  if (error || !group) return <Page eyebrow="ADMINISTRATION" title="Group" subtitle=""><div className="empty">{error || 'Group not found.'}</div></Page>;
+
+  return <Page eyebrow="ADMINISTRATION" title={group.name} subtitle={group.description || 'No description on file'} action={<Link to="/admin/groups" className="btn">Back to groups</Link>}>
+    <div className="detail-layout">
+      <section className="panel">
+        <div className="detail-section">
+          <div className="detail-title"><h2>Overview</h2><StatusBadge status={group.status}/></div>
+          <div className="key-grid">
+            <div className="key"><span>Privileged</span><strong>{group.is_privileged ? 'Yes — assignable to a directory role' : 'No'}</strong></div>
+            <div className="key"><span>External ID</span><strong>{group.external_id}</strong></div>
+            <div className="key"><span>Members</span><strong>{summary ? summary.member_count : '…'}</strong></div>
+            <div className="key"><span>Active AccessPilot grants</span><strong>{summary ? summary.active_assignment_count : '…'}</strong></div>
+            <div className="key"><span>Last synced</span><strong>{group.last_synced_at ? formatDateTime(group.last_synced_at, timezone) : 'Never'}</strong></div>
+          </div>
+        </div>
+        <div className="detail-section">
+          <div className="detail-title"><h2>Members</h2></div>
+          {membersLoading ? <div className="empty">Loading members...</div> : membersError ? <div className="empty">{membersError}</div> : !members || members.length === 0 ? <div className="empty">No members synced for this group.</div> : <div className="table-wrap"><table><thead><tr><th>User</th><th>Department</th><th>Status</th></tr></thead><tbody>
+            {members.map(member => <tr key={member.id}><td><Link to={`/admin/users/${member.id}`} className="user-cell"><span className="avatar">{initialsFor(member.display_name)}</span><span><span className="user-name">{member.display_name}</span><span className="user-email">{member.email}</span></span></Link></td><td>{member.department || '—'}</td><td><StatusBadge status={member.status}/></td></tr>)}
+          </tbody></table></div>}
+        </div>
+      </section>
+      <section className="panel">
+        <div className="detail-section">
+          <div className="detail-title"><h2>What's attached to this group</h2></div>
+          <p className="subtitle" style={{ marginTop: 0, marginBottom: 16 }}>Groups have no native "apps/roles" of their own — this is everything else in AccessPilot that references this group.</p>
+          <div className="key" style={{ marginBottom: 6 }}><span>Access packages ({summary?.access_packages.length ?? 0})</span></div>
+          {!summary || summary.access_packages.length === 0 ? <div className="empty" style={{ padding: '8px 0' }}>Not included in any access package.</div> : summary.access_packages.map(item => <div key={item.id} style={{ padding: '4px 0' }}>{item.name}</div>)}
+        </div>
+        <div className="detail-section">
+          <div className="key" style={{ marginBottom: 6 }}><span>Birthright policies ({summary?.birthright_policies.length ?? 0})</span></div>
+          {!summary || summary.birthright_policies.length === 0 ? <div className="empty" style={{ padding: '8px 0' }}>No birthright policy grants this group.</div> : summary.birthright_policies.map(item => <div key={item.id} style={{ padding: '4px 0' }}>{item.name}</div>)}
+        </div>
+        <div className="detail-section">
+          <div className="key" style={{ marginBottom: 6 }}><span>Separation of Duties rules ({summary?.sod_policies.length ?? 0})</span></div>
+          {!summary || summary.sod_policies.length === 0 ? <div className="empty" style={{ padding: '8px 0' }}>Not referenced by any SoD rule.</div> : summary.sod_policies.map(item => <div key={item.id} style={{ padding: '4px 0' }}>{item.name}</div>)}
+        </div>
+      </section>
+    </div>
   </Page>;
 }
 function RolesPage() {

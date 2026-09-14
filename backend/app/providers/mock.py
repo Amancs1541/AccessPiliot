@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.providers.base import CreatedUser, IdentityProvider, NewGroupRequest, NewUserRequest, NormalizedApplication, NormalizedApplicationRole, NormalizedDomain, NormalizedGroup, NormalizedRole, NormalizedUser, ProviderConflictError
+from app.providers.base import CreatedUser, IdentityProvider, NewGroupRequest, NewUserRequest, NormalizedApplication, NormalizedApplicationPermission, NormalizedApplicationRole, NormalizedDomain, NormalizedGroup, NormalizedRole, NormalizedUser, ProviderConflictError
+from app.providers.graph_client import GraphError
 
 
 class MockProvider(IdentityProvider):
@@ -19,6 +20,14 @@ class MockProvider(IdentityProvider):
     async def test_connection(self) -> bool: return True
     async def get_users(self, query: str | None = None) -> list[NormalizedUser]: return self._filter(self.users, query, lambda item: f"{item.display_name} {item.email}")
     async def get_user(self, external_id: str) -> NormalizedUser | None: return next((item for item in self.users if item.external_id == external_id), None)
+
+    async def update_user(self, external_id: str, *, department: str | None, job_title: str | None) -> NormalizedUser:
+        for index, user in enumerate(self.users):
+            if user.external_id == external_id:
+                updated = NormalizedUser(external_id=user.external_id, email=user.email, display_name=user.display_name, given_name=user.given_name, surname=user.surname, department=department, job_title=job_title, status=user.status)
+                self.users[index] = updated
+                return updated
+        raise GraphError("PROVIDER_RESOURCE_NOT_FOUND", "No such mock user.", 502)
     async def get_groups(self, query: str | None = None) -> list[NormalizedGroup]: return self._filter(self.groups, query, lambda item: f"{item.name} {item.description or ''}")
     async def get_group(self, external_id: str) -> NormalizedGroup | None: return next((item for item in self.groups if item.external_id == external_id), None)
     async def get_group_members(self, external_id: str) -> list[NormalizedUser]: return [user for user in self.users if user.external_id in self.memberships.get(external_id, set())]
@@ -28,6 +37,16 @@ class MockProvider(IdentityProvider):
     async def get_role(self, external_id: str) -> NormalizedRole | None: return next((item for item in self.roles if item.external_id == external_id), None)
     async def get_role_assignments(self, external_role_id: str) -> list[dict[str, Any]]: return [{"user_external_id": user, "status": status} for user, status in self.assignments.items() if external_role_id]
     async def get_applications(self, query: str | None = None) -> list[NormalizedApplication]: return self._filter(self.applications, query, lambda item: item.name)
+
+    async def set_application_enabled(self, external_id: str, enabled: bool) -> bool:
+        for index, application in enumerate(self.applications):
+            if application.external_id == external_id:
+                self.applications[index] = NormalizedApplication(external_id=application.external_id, name=application.name, status="ACTIVE" if enabled else "DISABLED", app_roles=application.app_roles, nhi_type=application.nhi_type, credential_expires_at=application.credential_expires_at, credentials=application.credentials)
+                return True
+        return False
+
+    async def get_application_permissions(self, external_id: str) -> list[NormalizedApplicationPermission]:
+        return [NormalizedApplicationPermission(resource_external_id="graph", resource_display_name="Microsoft Graph", role_name="User.Read.All")] if external_id else []
     async def activate_assignment(self, request: dict[str, Any]) -> bool:
         if request.get("resource_type") == "GROUP" and request.get("target_external_id") and request.get("user_external_id"):
             await self.add_group_member(request["target_external_id"], request["user_external_id"])

@@ -13,12 +13,17 @@ from app.providers.base import NormalizedDomain
 from app.providers.entra import EntraProvider
 from app.providers.graph_client import GraphError
 from app.providers.mock import MockProvider
+from app.providers.okta import OktaProvider
 from app.schemas.providers import ProviderCreate, ProviderUpdate
 from app.security.credential_encryption import CredentialEncryptionError, encrypt_credential
 
 
 def _connector(provider: IdentityProvider):
-    return MockProvider() if provider.type == "MOCK" else EntraProvider(provider)
+    if provider.type == "MOCK":
+        return MockProvider()
+    if provider.type == "OKTA":
+        return OktaProvider(provider)
+    return EntraProvider(provider)
 
 async def list_providers(session: AsyncSession) -> list[IdentityProvider]:
     return list((await session.scalars(select(IdentityProvider).order_by(IdentityProvider.created_at))).all())
@@ -35,7 +40,7 @@ async def _audit(session: AsyncSession, provider: IdentityProvider, action: str,
     session.add(AuditLog(action=action, target_type="PROVIDER", target_id=provider.id, provider_id=provider.id, request_id=request_id, result=result))
 
 async def create_provider(session: AsyncSession, data: ProviderCreate, request_id: str) -> IdentityProvider:
-    provider = IdentityProvider(name=data.name, type=data.provider_type, status="CONFIGURED", tenant_id=data.tenant_id, client_id=data.client_id, authority=str(data.authority) if data.authority else None, api_audience=data.api_audience, api_scope=data.api_scope, redirect_uri_metadata=data.redirect_uri_metadata, configuration_ref=data.configuration_ref)
+    provider = IdentityProvider(name=data.name, type=data.provider_type, status="CONFIGURED", tenant_id=data.tenant_id, organization_url=data.organization_url, client_id=data.client_id, authority=str(data.authority) if data.authority else None, api_audience=data.api_audience, api_scope=data.api_scope, redirect_uri_metadata=data.redirect_uri_metadata, configuration_ref=data.configuration_ref)
     session.add(provider); await session.flush(); await _audit(session, provider, "PROVIDER_CREATED", request_id); await session.commit(); await session.refresh(provider); return provider
 
 async def update_provider(session: AsyncSession, provider_id: UUID, data: ProviderUpdate, request_id: str) -> IdentityProvider:

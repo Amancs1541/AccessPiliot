@@ -35,7 +35,7 @@ def _get_jwks_client(jwks_url: str) -> PyJWKClient:
         _jwks_client_url = jwks_url
     return _jwks_client
 
-VALID_ROLES = {"AccessPilot.User", "AccessPilot.Admin", "AccessPilot.BreakGlassAdmin", "AccessPilot.SoDAdmin", "AccessPilot.SoCAdmin", "AccessPilot.ServerAdmin"}
+VALID_ROLES = {"AccessPilot.User", "AccessPilot.Admin", "AccessPilot.BreakGlassAdmin", "AccessPilot.SoDAdmin", "AccessPilot.SoCAdmin", "AccessPilot.ServerAdmin", "AccessPilot.NHIAdmin"}
 PERMISSIONS = {
     "AccessPilot.User": {"ME_READ", "DASHBOARD_USER_READ", "ACCESS_REQUEST_CREATE", "ACCESS_REQUEST_READ_SELF", "ACCESS_REQUEST_CANCEL_SELF", "ASSIGNMENT_READ_SELF", "ASSIGNMENT_ACTIVATE_SELF", "ASSIGNMENT_REVOKE_SELF"},
     # Deliberately NOT SOD_READ or SOC_READ — a plain Admin has no visibility into Separation of Duties at all
@@ -74,6 +74,14 @@ PERMISSIONS = {
     # else, the role claim alone is what unlocks this dashboard. Deliberately NOT shared with AccessPilot.Admin —
     # exclusive to whoever actually holds this role, same treatment SOC/SoD both already have.
     "AccessPilot.ServerAdmin": {"ME_READ", "DASHBOARD_USER_READ", "SERVER_HEALTH_READ"},
+    # Governs non-human identities (Entra service principals / Okta service apps) — ownership assignment and
+    # credential-expiry risk acceptance. Sourced exclusively from a real Entra App Role assignment, same as every
+    # other specialized role here — deliberately NOT folded into AccessPilot.Admin, so the same self-escalation
+    # concern that keeps SoDAdmin/SoCAdmin/ServerAdmin Entra-only applies here too: an Admin should not be able to
+    # grant itself NHI ownership/risk-acceptance power from inside the app. NHI_READ/NHI_MANAGE are read/write on
+    # the same resource (unlike SoCAdmin's read-only split) because accepting a risk or assigning an owner IS the
+    # governance action this role exists to perform, not a separate escalation.
+    "AccessPilot.NHIAdmin": {"ME_READ", "DASHBOARD_USER_READ", "NHI_READ", "NHI_MANAGE", "USER_READ"},
 }
 
 @dataclass(frozen=True)

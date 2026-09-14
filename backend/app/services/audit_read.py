@@ -54,6 +54,14 @@ async def list_audit_logs_by_action(session: AsyncSession, actions: list[str], l
     return [(entry, await _hydrate_entry(session, entry)) for entry in entries]
 
 
+async def list_audit_logs_by_target(session: AsyncSession, target_type: str, target_id: UUID, limit: int = 20) -> list[tuple[AuditLog, dict]]:
+    """Same hydration again, filtered to everything recorded against one specific entity — the NHI detail page's
+    "Recent activity" tab uses this for target_type="APPLICATION" (owner assignment, risk exceptions, type
+    reclassification, enable/disable, and the sync events that touched it)."""
+    entries = list((await session.scalars(select(AuditLog).where(AuditLog.target_type == target_type, AuditLog.target_id == target_id).order_by(AuditLog.timestamp.desc()).limit(limit))).all())
+    return [(entry, await _hydrate_entry(session, entry)) for entry in entries]
+
+
 async def list_system_generated_audit_logs(session: AsyncSession, limit: int = 50) -> list[tuple[AuditLog, dict]]:
     """Same hydration again, filtered to entries with no actor at all — every record_audit() call the sync
     worker, expiration worker, activation worker, and SoD exception expiry worker make omits actor_user_id

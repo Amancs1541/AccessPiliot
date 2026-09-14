@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -32,6 +33,62 @@ def install_transport(monkeypatch, handler):
 
 def token_response() -> httpx.Response:
     return httpx.Response(200, json={"access_token": "fake-token", "expires_in": 3600})
+
+
+def test_a_managed_identity_service_principal_is_classified_as_managed_identity():
+    """servicePrincipalType is a real Graph-reported field, not a guess — this is the one NHI type this app
+    auto-detects with confidence; everything else (AI agent/bot/API) is a manual NHIAdmin classification."""
+    mapped = EntraProvider._application_from_graph({"id": "sp1", "displayName": "System-Assigned MI", "accountEnabled": True, "servicePrincipalType": "ManagedIdentity"})
+    assert mapped.nhi_type == "MANAGED_IDENTITY"
+
+
+def test_a_regular_application_service_principal_is_classified_as_service_principal():
+    mapped = EntraProvider._application_from_graph({"id": "sp2", "displayName": "Internal Reporting Service", "accountEnabled": True, "servicePrincipalType": "Application"})
+    assert mapped.nhi_type == "SERVICE_PRINCIPAL"
+
+
+def test_the_earliest_of_several_credentials_is_used_for_expiry():
+    mapped = EntraProvider._application_from_graph({
+        "id": "sp3", "displayName": "App", "accountEnabled": True,
+        "passwordCredentials": [{"endDateTime": "2027-06-01T00:00:00Z"}],
+        "keyCredentials": [{"endDateTime": "2026-01-01T00:00:00Z"}],
+    })
+    assert mapped.credential_expires_at is not None
+    assert mapped.credential_expires_at.year == 2026
+
+
+@pytest.mark.asyncio
+async def test_set_application_enabled_sends_a_patch_with_the_requested_state(monkeypatch):
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/oauth2/v2.0/token"):
+            return token_response()
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(204)
+
+    install_transport(monkeypatch, handler)
+    result = await EntraProvider(provider_row()).set_application_enabled("sp1", False)
+    assert result is True
+    assert seen["method"] == "PATCH"
+    assert seen["path"].endswith("/servicePrincipals/sp1")
+    assert seen["body"] == {"accountEnabled": False}
+
+
+@pytest.mark.asyncio
+async def test_get_application_permissions_maps_app_role_assignments(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/oauth2/v2.0/token"):
+            return token_response()
+        return httpx.Response(200, json={"value": [{"resourceId": "res1", "resourceDisplayName": "Microsoft Graph", "appRoleId": "role-guid-1"}]})
+
+    install_transport(monkeypatch, handler)
+    permissions = await EntraProvider(provider_row()).get_application_permissions("sp1")
+    assert len(permissions) == 1
+    assert permissions[0].resource_display_name == "Microsoft Graph"
+    assert permissions[0].role_name == "role-guid-1"
 
 
 @pytest.mark.asyncio

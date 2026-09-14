@@ -3,14 +3,14 @@ from __future__ import annotations
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AccessPilotError
-from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, Application, Group, IdentityProvider, Role, User, UserGroup
+from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, AccessPackageItem, Application, BirthrightPolicy, Group, IdentityProvider, Role, SodPolicy, SodPolicyEntity, User, UserGroup
 from app.providers.entra import EntraProvider
 from app.providers.graph_client import GraphError
-from app.schemas.directory import UserAccessItem, UserAccessSummary, UserLicense
+from app.schemas.directory import GroupAccessSummary, NamedPolicyRef, UserAccessItem, UserAccessSummary, UserLicense
 
 
 async def list_users(session: AsyncSession, query: Optional[str] = None) -> list[User]:
@@ -46,6 +46,39 @@ async def list_group_members(session: AsyncSession, group_id: UUID) -> list[User
     await get_group(session, group_id)
     statement = select(User).join(UserGroup, UserGroup.user_id == User.id).where(UserGroup.group_id == group_id).order_by(User.display_name)
     return list((await session.scalars(statement)).all())
+
+
+async def get_group_access_summary(session: AsyncSession, group_id: UUID) -> GroupAccessSummary:
+    """Answers "what's actually attached to this group" — real synced membership, how many of those are
+    AccessPilot-tracked grants (vs. membership added directly in Entra/Okta), and every OTHER piece of
+    governance config that references this group by resource/entity id: birthright policies that grant it,
+    SoD rules that treat it as a conflict-side entity, and access packages that bundle it alongside other
+    resources (packages are the natural "which apps/roles travel with this group" answer, since a group has no
+    native "associated app/role" concept of its own)."""
+    await get_group(session, group_id)
+
+    member_count = (await session.execute(select(func.count()).select_from(UserGroup).where(UserGroup.group_id == group_id))).scalar_one()
+    active_assignment_count = (await session.execute(select(func.count()).select_from(AccessAssignment).where(AccessAssignment.resource_type == "GROUP", AccessAssignment.resource_id == group_id, AccessAssignment.status == "ACTIVE"))).scalar_one()
+
+    birthright_rows = (await session.execute(select(BirthrightPolicy.id, BirthrightPolicy.name).where(BirthrightPolicy.resource_type == "GROUP", BirthrightPolicy.resource_id == group_id, BirthrightPolicy.status == "ACTIVE"))).all()
+    sod_rows = (await session.execute(
+        select(SodPolicy.id, SodPolicy.name).join(SodPolicyEntity, SodPolicyEntity.sod_policy_id == SodPolicy.id)
+        .where(SodPolicyEntity.entity_type == "GROUP", SodPolicyEntity.entity_id == group_id, SodPolicy.status == "ACTIVE")
+        .distinct()
+    )).all()
+    package_rows = (await session.execute(
+        select(AccessPackage.id, AccessPackage.name).join(AccessPackageItem, AccessPackageItem.package_id == AccessPackage.id)
+        .where(AccessPackageItem.resource_type == "GROUP", AccessPackageItem.resource_id == group_id)
+        .distinct()
+    )).all()
+
+    return GroupAccessSummary(
+        member_count=member_count,
+        active_assignment_count=active_assignment_count,
+        birthright_policies=[NamedPolicyRef(id=row.id, name=row.name) for row in birthright_rows],
+        sod_policies=[NamedPolicyRef(id=row.id, name=row.name) for row in sod_rows],
+        access_packages=[NamedPolicyRef(id=row.id, name=row.name) for row in package_rows],
+    )
 
 
 async def list_roles(session: AsyncSession, query: Optional[str] = None) -> list[Role]:

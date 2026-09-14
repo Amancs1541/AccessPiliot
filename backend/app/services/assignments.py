@@ -191,7 +191,7 @@ async def _supersede_existing_assignment(session: AsyncSession, *, user_id: UUID
     await session.commit()
 
 
-async def create_assignment(session: AsyncSession, data, actor_subject: str, request_id: str, check_sod_at_creation: bool = False) -> tuple[AccessAssignment, dict]:
+async def create_assignment(session: AsyncSession, data, actor_subject: str, request_id: str, check_sod_at_creation: bool = False, birthright_policy_id: Optional[UUID] = None) -> tuple[AccessAssignment, dict]:
     target_user = await session.get(User, data.user_id)
     if not target_user:
         raise AccessPilotError("USER_NOT_FOUND", "The user was not found.", 404)
@@ -269,6 +269,7 @@ async def create_assignment(session: AsyncSession, data, actor_subject: str, req
         fallback_approver_id=fallback_approver_id,
         fallback_unlock_at=fallback_unlock_at,
         bypass_activation=bypass_activation,
+        birthright_policy_id=birthright_policy_id,
         activated_at=now if status == "ACTIVE" else None,
     )
     session.add(assignment)
@@ -462,7 +463,7 @@ async def deactivate_assignment(session: AsyncSession, assignment_id: UUID, acto
     return assignment, await hydrate_display_fields(session, assignment)
 
 
-async def revoke_assignment(session: AsyncSession, assignment_id: UUID, actor_subject: str, justification: str, request_id: str) -> tuple[AccessAssignment, dict]:
+async def revoke_assignment(session: AsyncSession, assignment_id: UUID, actor_subject: str, justification: str, request_id: str, reason: str = "ADMIN_REVOKED") -> tuple[AccessAssignment, dict]:
     """Admin-only universal override: forcibly revokes an assignment regardless of its current status (ELIGIBLE,
     PENDING_APPROVAL, SCHEDULED, or ACTIVE) — unlike deactivate_assignment (self-service, ACTIVE-only, returns the
     user to ELIGIBLE so they can reactivate later), this always lands on the terminal REVOKED status and removes
@@ -483,7 +484,7 @@ async def revoke_assignment(session: AsyncSession, assignment_id: UUID, actor_su
 
     assignment.status = "REVOKED"
     assignment.revoked_at = datetime.now(timezone.utc)
-    await record_audit(session, action="ASSIGNMENT_REVOKED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, actor_user_id=actor_id, request_id=request_id, metadata={"reason": "ADMIN_REVOKED", "previous_status": previous_status, "justification": justification})
+    await record_audit(session, action="ASSIGNMENT_REVOKED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, actor_user_id=actor_id, request_id=request_id, metadata={"reason": reason, "previous_status": previous_status, "justification": justification})
     if actor_id != assignment.user_id:
         _, resource_name, _ = await _resolve_target(session, assignment.resource_type, assignment.resource_id)
         await create_notification(session, assignment.user_id, "ASSIGNMENT_REVOKED", f"Your access to {resource_name} was revoked by an administrator.", link="/my-access")

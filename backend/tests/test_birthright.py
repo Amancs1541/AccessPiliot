@@ -220,6 +220,44 @@ async def test_manual_evaluate_endpoint_applies_policies_to_an_already_synced_id
 
 
 @pytest.mark.asyncio
+async def test_reconciliation_revokes_a_birthright_grant_once_its_policy_is_disabled(db_override):
+    """reconcile_birthright_policies_for_user is what a mover reconciliation (department/job_title change) runs
+    under the hood — this exercises it directly against a policy that's disabled rather than a changed
+    attribute, since "the policy stopped applying" covers both cases identically."""
+    from app.services.birthright import evaluate_birthright_policies, reconcile_birthright_policies_for_user
+
+    group_id = await _seed_group(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/policies/birthright", json={"name": "Finance -> Finance Team", "match_field": "department", "match_value": "Finance", "resource_type": "GROUP", "resource_id": group_id})
+        policy_id = created.json()["id"]
+
+    async with db_override.factory() as session:
+        provider = (await session.execute(select(IdentityProvider))).scalars().first()
+        user = User(provider_id=provider.id, external_id="u-mover", email="mover@x.com", display_name="Mover", status="ACTIVE", department="Finance")
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+        user_id = user.id
+
+        granted = await evaluate_birthright_policies(session, user_id, "admin-oid", "req-1")
+        assert len(granted) == 1
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        authenticate_as("AccessPilot.Admin")
+        await client.patch(f"/api/v1/policies/birthright/{policy_id}", json={"status": "DISABLED"})
+
+    async with db_override.factory() as session:
+        result = await reconcile_birthright_policies_for_user(session, user_id, "admin-oid", "req-2")
+        assert len(result["revoked"]) == 1
+        assert result["granted"] == []
+
+        assignments = (await session.execute(select(AccessAssignment).where(AccessAssignment.user_id == user_id))).scalars().all()
+    assert len(assignments) == 1
+    assert assignments[0].status == "REVOKED"
+
+
+@pytest.mark.asyncio
 async def test_a_normal_user_cannot_manage_birthright_policies(db_override):
     group_id = await _seed_group(db_override.factory)
     authenticate_as("AccessPilot.User", subject="regular-user-oid")

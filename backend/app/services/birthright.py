@@ -9,7 +9,7 @@ from app.core.errors import AccessPilotError
 from app.models import AccessAssignment, BirthrightPolicy, User
 from app.schemas.assignments import AssignmentCreate
 from app.schemas.policies import BirthrightPolicyCreate, BirthrightPolicyUpdate
-from app.services.assignments import _resolve_target, create_assignment
+from app.services.assignments import _resolve_target, create_assignment, revoke_assignment
 from app.services.audit import record_audit
 
 NON_FINAL_ASSIGNMENT_STATUSES = ("REJECTED", "REVOKED", "EXPIRED")
@@ -93,8 +93,52 @@ async def evaluate_birthright_policies(session: AsyncSession, user_id: UUID, act
             continue
         data = AssignmentCreate(user_id=user.id, resource_type=policy.resource_type, resource_id=policy.resource_id, app_role_external_id=policy.app_role_external_id, assignment_type=policy.assignment_type, justification=f"Birthright policy: {policy.name}", bypass_activation=bypass_activation)
         try:
-            assignment, _ = await create_assignment(session, data, actor_subject, request_id)
+            assignment, _ = await create_assignment(session, data, actor_subject, request_id, birthright_policy_id=policy.id)
             created_ids.append(assignment.id)
         except AccessPilotError:
             continue  # e.g. the rule's target resource was deleted after the rule was created — don't block other rules
     return created_ids
+
+
+async def reconcile_birthright_policies_for_user(session: AsyncSession, user_id: UUID, actor_subject: str, request_id: str) -> dict:
+    """Mover reconciliation: call this whenever a user's department/job_title has just changed (from either
+    direction — a directory sync picking up a change made in Entra/Okta, or an admin editing it inside
+    AccessPilot itself). Diffs what birthright policies match the user's CURRENT attributes against what's
+    currently granted specifically BY a birthright policy (identified via AccessAssignment.birthright_policy_id,
+    never a manual grant — see that column's comment on the model):
+      - A live (non-final) birthright-granted assignment whose policy no longer matches the user (policy
+        disabled, deleted, or the attribute value changed) is revoked for real — same universal revoke path an
+        Admin's own revoke button uses, so it removes the real Entra/Graph grant too.
+      - Any policy that newly matches and isn't already held gets granted via evaluate_birthright_policies
+        (ELIGIBLE-only, same as every other birthright grant — a mover doesn't get instant real access any more
+        than a joiner does).
+    One resource's failure (e.g. a real Graph error revoking a specific group) never blocks the others, the same
+    "don't let one bad target block the rest" reasoning evaluate_birthright_policies already uses for grants."""
+    user = await session.get(User, user_id)
+    if user is None:
+        raise AccessPilotError("USER_NOT_FOUND", "The user was not found.", 404)
+
+    active_policies = (await session.execute(select(BirthrightPolicy).where(BirthrightPolicy.status == "ACTIVE"))).scalars().all()
+    matching_policy_ids = {
+        policy.id for policy in active_policies
+        if getattr(user, policy.match_field, None) and getattr(user, policy.match_field).strip().lower() == policy.match_value.strip().lower()
+    }
+
+    live_birthright_assignments = (await session.execute(select(AccessAssignment).where(
+        AccessAssignment.user_id == user_id,
+        AccessAssignment.birthright_policy_id.isnot(None),
+        AccessAssignment.status.notin_(NON_FINAL_ASSIGNMENT_STATUSES),
+    ))).scalars().all()
+
+    revoked_ids: list[UUID] = []
+    for assignment in live_birthright_assignments:
+        if assignment.birthright_policy_id in matching_policy_ids:
+            continue
+        try:
+            await revoke_assignment(session, assignment.id, actor_subject, "Birthright policy no longer applies — the user's department/job title changed.", request_id, reason="BIRTHRIGHT_POLICY_NO_LONGER_APPLIES")
+            revoked_ids.append(assignment.id)
+        except AccessPilotError:
+            continue
+
+    granted_ids = await evaluate_birthright_policies(session, user_id, actor_subject, request_id)
+    return {"revoked": revoked_ids, "granted": granted_ids}

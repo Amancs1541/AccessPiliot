@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 
@@ -44,11 +45,38 @@ class NormalizedApplicationRole:
 
 
 @dataclass(frozen=True)
+class NormalizedCredential:
+    """One secret or certificate a service principal/app currently has, for NHI detail views. Not a value that
+    can be used to authenticate — Graph/Okta never return the secret itself after creation, only this metadata."""
+    credential_type: str  # "PASSWORD" or "CERTIFICATE"
+    display_name: str | None
+    expires_at: datetime | None
+
+
+@dataclass(frozen=True)
+class NormalizedApplicationPermission:
+    """One resource this application/service principal has been granted access to (an "exposed API" it can
+    call) — e.g. it holds the Mail.Read app role on Microsoft Graph. Not synced/stored; fetched live on demand
+    (see app.services.nhi.get_permissions), same "on-demand, not synced" pattern as get_user_licenses."""
+    resource_external_id: str
+    resource_display_name: str
+    role_name: str
+
+
+@dataclass(frozen=True)
 class NormalizedApplication:
     external_id: str
     name: str
     status: str = "ACTIVE"
     app_roles: tuple[NormalizedApplicationRole, ...] = ()
+    # Non-Human Identity governance fields (see app.services.nhi). nhi_type distinguishes what kind of
+    # non-human principal this is; credential_expires_at is the soonest-expiring secret/certificate/token the
+    # connector could find for it, when the provider's API exposes that at all — None means "not tracked for
+    # this provider yet", not "no credential". `credentials` is the full list behind that soonest date, for the
+    # NHI detail page's "Certificates & Secrets" section.
+    nhi_type: str = "SERVICE_PRINCIPAL"
+    credential_expires_at: datetime | None = None
+    credentials: tuple[NormalizedCredential, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -95,6 +123,13 @@ class IdentityProvider(ABC):
     async def get_user(self, external_id: str) -> NormalizedUser | None: ...
 
     @abstractmethod
+    async def update_user(self, external_id: str, *, department: str | None, job_title: str | None) -> NormalizedUser:
+        """A real, consequential write against the provider's own directory — the AccessPilot -> Entra/Okta
+        direction of attribute editing (see app.api.v1.directory's user-attribute-update endpoint). Only
+        department/job_title are settable today, since those are the two fields birthright policies match on."""
+        ...
+
+    @abstractmethod
     async def get_groups(self, query: str | None = None) -> list[NormalizedGroup]: ...
 
     @abstractmethod
@@ -120,6 +155,19 @@ class IdentityProvider(ABC):
 
     @abstractmethod
     async def get_applications(self, query: str | None = None) -> list[NormalizedApplication]: ...
+
+    @abstractmethod
+    async def set_application_enabled(self, external_id: str, enabled: bool) -> bool:
+        """Enable/disable a non-human identity at the provider itself — a real, consequential write, not a local
+        AccessPilot-only flag. Used by the NHI detail page's Enable/Disable action (see app.services.nhi)."""
+        ...
+
+    @abstractmethod
+    async def get_application_permissions(self, external_id: str) -> list[NormalizedApplicationPermission]:
+        """Live read of what this application/service principal is actually granted access to elsewhere (its
+        "exposed API" access) — not synced/stored, fetched on demand for the NHI detail page, same pattern as
+        get_user_licenses/get_user_app_role_assignments."""
+        ...
 
     @abstractmethod
     async def activate_assignment(self, request: dict[str, Any]) -> bool: ...

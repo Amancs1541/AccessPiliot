@@ -19,8 +19,9 @@ def _validate_username_convention(value: Optional[str]) -> Optional[str]:
 
 class ProviderCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
-    provider_type: str = Field(pattern="^(ENTRA|MOCK)$")
+    provider_type: str = Field(pattern="^(ENTRA|OKTA|MOCK)$")
     tenant_id: str = Field(min_length=1, max_length=200)
+    organization_url: Optional[str] = Field(default=None, max_length=500)
     client_id: Optional[str] = None
     authority: Optional[HttpUrl] = None
     api_audience: Optional[str] = None
@@ -33,6 +34,7 @@ class ProviderUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=200)
     status: Optional[str] = Field(default=None, pattern="^(CONFIGURED|CONNECTED|ERROR|DISABLED)$")
     tenant_id: Optional[str] = None
+    organization_url: Optional[str] = Field(default=None, max_length=500)
     client_id: Optional[str] = None
     authority: Optional[HttpUrl] = None
     api_audience: Optional[str] = None

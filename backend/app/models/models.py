@@ -71,8 +71,44 @@ class Application(Base):
     __tablename__ = "applications"
     id: Mapped[UUID] = uuid_pk(); provider_id: Mapped[UUID] = mapped_column(ForeignKey("identity_providers.id"), nullable=False); external_id: Mapped[str] = mapped_column(String(255), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False); status: Mapped[str] = mapped_column(String(50), nullable=False); app_roles: Mapped[Optional[list]] = mapped_column("app_roles", JSON)
+    # Non-Human Identity governance fields (see app.services.nhi) — additive to the existing app-role-assignment
+    # use of this table, not a replacement for it.
+    nhi_type: Mapped[str] = mapped_column(String(50), nullable=False, default="SERVICE_PRINCIPAL", server_default="SERVICE_PRINCIPAL")
+    # True once an NHIAdmin has manually reclassified nhi_type (e.g. tagging a generic service principal as an
+    # AI agent, bot, or API) — sync then leaves it alone instead of stomping the manual call back to whatever the
+    # provider itself reports on the next run. False (the default) means nhi_type still just reflects whatever
+    # the connector auto-detected at last sync.
+    nhi_type_overridden: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="false")
+    credential_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    # Full secret/certificate list behind credential_expires_at (which is just the soonest of these) — powers the
+    # NHI detail page's "Certificates & Secrets" section. List of {credential_type, display_name, expires_at}.
+    nhi_credentials: Mapped[Optional[list]] = mapped_column(JSON)
     created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at(); last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     __table_args__ = (UniqueConstraint("provider_id", "external_id", name="uq_applications_provider_external"), Index("ix_applications_provider_external", "provider_id", "external_id"))
+
+
+class ApplicationOwner(Base):
+    """A human user accountable for a non-human identity (an Application row — an Entra service principal or
+    Okta service app). Purely an AccessPilot-internal accountability record, independent of whatever "owner"
+    concept (if any) the source provider itself tracks — this is who AccessPilot asks when this NHI's access or
+    credentials need a decision. A many-to-many join (not one owner column on Application) since real apps are
+    often co-owned."""
+    __tablename__ = "application_owners"
+    id: Mapped[UUID] = uuid_pk(); application_id: Mapped[UUID] = mapped_column(ForeignKey("applications.id"), nullable=False); user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    assigned_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); created_at: Mapped[datetime] = created_at()
+    __table_args__ = (UniqueConstraint("application_id", "user_id", name="uq_application_owners_app_user"),)
+
+
+class NhiRiskException(Base):
+    """A formally accepted, time-boxed NHI risk (e.g. "no owner assigned," "credential not rotated in a year") —
+    same reasoning as SodException: risk-acceptance is a real decision that must survive across scans, unlike
+    the risk finding itself, which is always live-computed (see app.services.nhi)."""
+    __tablename__ = "nhi_risk_exceptions"
+    id: Mapped[UUID] = uuid_pk(); application_id: Mapped[UUID] = mapped_column(ForeignKey("applications.id"), nullable=False); risk_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    justification: Mapped[str] = mapped_column(Text, nullable=False); approved_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False); revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = created_at()
+    __table_args__ = (Index("ix_nhi_risk_exceptions_app_type", "application_id", "risk_type"),)
 
 
 class UserGroup(Base):
@@ -88,7 +124,13 @@ class RoleAssignment(Base):
 
 class AccessAssignment(Base):
     __tablename__ = "access_assignments"
-    id: Mapped[UUID] = uuid_pk(); provider_id: Mapped[UUID] = mapped_column(ForeignKey("identity_providers.id"), nullable=False); user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False); resource_type: Mapped[str] = mapped_column(String(50), nullable=False); resource_id: Mapped[UUID] = mapped_column(Uuid, nullable=False); app_role_external_id: Mapped[Optional[str]] = mapped_column(String(100)); assignment_type: Mapped[str] = mapped_column(String(50), nullable=False); status: Mapped[str] = mapped_column(String(50), nullable=False); start_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); expiration_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); justification: Mapped[Optional[str]] = mapped_column(Text); ticket_number: Mapped[Optional[str]] = mapped_column(String(100)); requested_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); approved_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); fallback_approver_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); fallback_unlock_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); bypass_activation: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="false"); activated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at(); __table_args__ = (Index("ix_access_assignments_user", "user_id"), Index("ix_access_assignments_status", "status"), Index("ix_access_assignments_expiration", "expiration_time"))
+    id: Mapped[UUID] = uuid_pk(); provider_id: Mapped[UUID] = mapped_column(ForeignKey("identity_providers.id"), nullable=False); user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False); resource_type: Mapped[str] = mapped_column(String(50), nullable=False); resource_id: Mapped[UUID] = mapped_column(Uuid, nullable=False); app_role_external_id: Mapped[Optional[str]] = mapped_column(String(100)); assignment_type: Mapped[str] = mapped_column(String(50), nullable=False); status: Mapped[str] = mapped_column(String(50), nullable=False); start_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); expiration_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); justification: Mapped[Optional[str]] = mapped_column(Text); ticket_number: Mapped[Optional[str]] = mapped_column(String(100)); requested_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); approved_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); fallback_approver_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); fallback_unlock_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); bypass_activation: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="false")
+    # Set only when this assignment was created BY birthright-policy evaluation (see app.services.birthright) —
+    # NULL for every manually/admin-granted or self-requested assignment. This is the safety rail that lets
+    # reconcile_birthright_policies_for_user() know it's safe to auto-revoke this specific grant if the policy
+    # stops matching the user later, while NEVER touching anything a human granted directly.
+    birthright_policy_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("birthright_policies.id"))
+    activated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at(); __table_args__ = (Index("ix_access_assignments_user", "user_id"), Index("ix_access_assignments_status", "status"), Index("ix_access_assignments_expiration", "expiration_time"))
 
 
 class AccessRequest(Base):

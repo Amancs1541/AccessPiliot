@@ -13,18 +13,30 @@ from app.providers.graph_client import GraphError
 from app.services.audit import record_audit
 from app.services.provider_configuration import _connector
 
+# Passed as `actor_subject` into create_assignment/revoke_assignment for sync-triggered birthright reconciliation.
+# It deliberately matches no real user's external_id, so _resolve_internal_user_id() resolves it to None —
+# recorded as a system action with no actor_user_id, the same convention every worker-driven audit entry in this
+# app already uses (see workers/expiration.py, sod_expiry.py).
+SYSTEM_ACTOR_SUBJECT = "system:directory-sync"
 
-async def upsert_user(session: AsyncSession, provider_id: UUID, normalized: NormalizedUser) -> User:
+
+async def upsert_user(session: AsyncSession, provider_id: UUID, normalized: NormalizedUser) -> tuple[User, bool]:
+    """Returns (row, birthright_relevant_change) — the second value is True when this call either created a
+    brand-new user or changed department/job_title on an existing one, i.e. exactly the moments a birthright
+    mover/joiner reconciliation should re-run (see run_sync below and app.services.birthright). Most callers
+    don't care and just unpack `row, _ = await upsert_user(...)`."""
     row = (await session.execute(select(User).where(User.provider_id == provider_id, User.external_id == normalized.external_id))).scalar_one_or_none()
     now = datetime.now(timezone.utc)
     if row is None:
         row = User(provider_id=provider_id, external_id=normalized.external_id, email=normalized.email, display_name=normalized.display_name, given_name=normalized.given_name, surname=normalized.surname, department=normalized.department, job_title=normalized.job_title, status=normalized.status, last_synced_at=now)
         session.add(row)
-    else:
-        row.email, row.display_name, row.given_name, row.surname = normalized.email, normalized.display_name, normalized.given_name, normalized.surname
-        row.department, row.job_title, row.status, row.last_synced_at = normalized.department, normalized.job_title, normalized.status, now
+        await session.flush()
+        return row, True
+    birthright_relevant_change = row.department != normalized.department or row.job_title != normalized.job_title
+    row.email, row.display_name, row.given_name, row.surname = normalized.email, normalized.display_name, normalized.given_name, normalized.surname
+    row.department, row.job_title, row.status, row.last_synced_at = normalized.department, normalized.job_title, normalized.status, now
     await session.flush()
-    return row
+    return row, birthright_relevant_change
 
 
 async def upsert_group(session: AsyncSession, provider_id: UUID, normalized: NormalizedGroup) -> Group:
@@ -55,11 +67,17 @@ async def upsert_application(session: AsyncSession, provider_id: UUID, normalize
     row = (await session.execute(select(Application).where(Application.provider_id == provider_id, Application.external_id == normalized.external_id))).scalar_one_or_none()
     now = datetime.now(timezone.utc)
     app_roles_json = [{"id": role.external_id, "name": role.name, "description": role.description} for role in normalized.app_roles]
+    credentials_json = [{"credential_type": credential.credential_type, "display_name": credential.display_name, "expires_at": credential.expires_at.isoformat() if credential.expires_at else None} for credential in normalized.credentials]
     if row is None:
-        row = Application(provider_id=provider_id, external_id=normalized.external_id, name=normalized.name, status=normalized.status, app_roles=app_roles_json, last_synced_at=now)
+        row = Application(provider_id=provider_id, external_id=normalized.external_id, name=normalized.name, status=normalized.status, app_roles=app_roles_json, nhi_type=normalized.nhi_type, credential_expires_at=normalized.credential_expires_at, nhi_credentials=credentials_json, last_synced_at=now)
         session.add(row)
     else:
-        row.name, row.status, row.app_roles, row.last_synced_at = normalized.name, normalized.status, app_roles_json, now
+        row.name, row.status, row.app_roles, row.credential_expires_at, row.nhi_credentials, row.last_synced_at = normalized.name, normalized.status, app_roles_json, normalized.credential_expires_at, credentials_json, now
+        # An NHIAdmin's manual reclassification (e.g. tagging this as an AI agent/bot/API — see
+        # app.services.nhi.set_nhi_type) must survive future syncs, not get silently overwritten back to
+        # whatever the connector auto-detects on the next run.
+        if not row.nhi_type_overridden:
+            row.nhi_type = normalized.nhi_type
     await session.flush()
     return row
 
@@ -99,11 +117,15 @@ async def run_sync(session: AsyncSession, provider: IdentityProvider, request_id
     await session.commit()
 
     errors_count = 0
+    users_needing_birthright_reconciliation: list[UUID] = []
     try:
         users = await connector.get_users()
         user_by_external_id: dict[str, User] = {}
         for normalized_user in users:
-            user_by_external_id[normalized_user.external_id] = await upsert_user(session, provider.id, normalized_user)
+            user_row, birthright_relevant_change = await upsert_user(session, provider.id, normalized_user)
+            user_by_external_id[normalized_user.external_id] = user_row
+            if birthright_relevant_change:
+                users_needing_birthright_reconciliation.append(user_row.id)
 
         groups = await connector.get_groups()
         for normalized_group in groups:
@@ -116,7 +138,12 @@ async def run_sync(session: AsyncSession, provider: IdentityProvider, request_id
                 continue
             member_ids: set[UUID] = set()
             for member in members:
-                user_row = user_by_external_id.get(member.external_id) or await upsert_user(session, provider.id, member)
+                user_row = user_by_external_id.get(member.external_id)
+                if user_row is None:
+                    user_row, birthright_relevant_change = await upsert_user(session, provider.id, member)
+                    user_by_external_id[member.external_id] = user_row
+                    if birthright_relevant_change:
+                        users_needing_birthright_reconciliation.append(user_row.id)
                 member_ids.add(user_row.id)
                 await _upsert_membership(session, user_row.id, group_row.id)
             await _remove_stale_memberships(session, group_row.id, member_ids, request_id)
@@ -128,6 +155,20 @@ async def run_sync(session: AsyncSession, provider: IdentityProvider, request_id
         applications = await connector.get_applications()
         for normalized_application in applications:
             await upsert_application(session, provider.id, normalized_application)
+
+        # Mover/joiner reconciliation: a brand-new user, or an existing one whose department/job_title just
+        # changed in this sync, may now match (or stop matching) a birthright policy — e.g. someone moved from
+        # Engineering to Sales should lose the Engineering birthright group and gain the Sales one automatically,
+        # while anything granted to them manually is never touched (see app.services.birthright). One user's
+        # failure here (e.g. a real Graph error on a specific group) must never fail the whole sync run, the same
+        # "don't let one bad rule/target block the others" reasoning evaluate_birthright_policies already uses.
+        from app.services.birthright import reconcile_birthright_policies_for_user
+        for user_id in users_needing_birthright_reconciliation:
+            try:
+                await reconcile_birthright_policies_for_user(session, user_id, SYSTEM_ACTOR_SUBJECT, request_id)
+            except AccessPilotError:
+                errors_count += 1
+                session.add(SyncError(sync_run_id=sync_run.id, resource_type="BIRTHRIGHT_RECONCILIATION", external_id=str(user_id), error_code="BIRTHRIGHT_RECONCILIATION_FAILED", error_message="Could not reconcile birthright policies for this user after their attributes changed."))
 
         sync_run.status = "COMPLETED"
         sync_run.completed_at = datetime.now(timezone.utc)
