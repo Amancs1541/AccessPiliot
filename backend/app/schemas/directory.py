@@ -21,6 +21,10 @@ class UserResponse(BaseModel):
     status: str
     employee_id: Optional[str] = None
     source: Optional[str] = None
+    account_type: str = "NORMAL"
+    linked_user_id: Optional[UUID] = None
+    employee_category: Optional[str] = None
+    manager_id: Optional[UUID] = None
     last_synced_at: Optional[datetime]
 
 

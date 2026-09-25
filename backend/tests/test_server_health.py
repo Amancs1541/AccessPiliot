@@ -98,12 +98,12 @@ async def test_a_real_serveradmin_sees_real_live_data(db_override):
     body = response.json()
     assert body["is_mock"] is False
     assert {card["name"] for card in body["services"]} == {"API", "Database", "Graph connector", "Background workers", "Auth / Portal", "Identity providers"}
-    assert {worker["name"] for worker in body["workers"]} == {"Entra sync worker", "Access expiry sweep", "Scheduled activation worker", "SoD exception expiry worker"}
+    assert {worker["name"] for worker in body["workers"]} == {"Entra sync worker", "Access expiry sweep", "Scheduled activation worker", "SoD exception expiry worker", "Access review worker"}
     # No workers actually run in a test process (lifespan never fires here) — this must say so honestly, not
     # pretend workers are healthy.
     workers_card = next(card for card in body["services"] if card["name"] == "Background workers")
     assert workers_card["variant"] == "mock"
-    assert {w["name"] for w in body["workflows"]} == {"Entra sync worker", "Access expiry sweep", "Scheduled activation worker", "SoD exception expiry worker", "Onboarding CSV import", "Access Package assignment"}
+    assert {w["name"] for w in body["workflows"]} == {"Entra sync worker", "Access expiry sweep", "Scheduled activation worker", "SoD exception expiry worker", "Access review worker", "Onboarding CSV import", "Access Package assignment"}
     sync_workflow = next(w for w in body["workflows"] if w["name"] == "Entra sync worker")
     assert sync_workflow["kind"] == "background"
     assert sync_workflow["variant"] == "mock"  # honestly reflects no worker Task in this test process

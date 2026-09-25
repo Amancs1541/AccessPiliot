@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
-from app.models import AccessAssignment, Group, IdentityProvider, User
+from app.models import AccessAssignment, AccessPackage, AccessPackageItem, Application, Group, IdentityProvider, Role, User
 from app.security.auth import AuthenticatedUser, require_authenticated_user
 
 
@@ -255,6 +255,441 @@ async def test_reconciliation_revokes_a_birthright_grant_once_its_policy_is_disa
         assignments = (await session.execute(select(AccessAssignment).where(AccessAssignment.user_id == user_id))).scalars().all()
     assert len(assignments) == 1
     assert assignments[0].status == "REVOKED"
+
+
+async def _seed_package_with_two_items(factory) -> dict:
+    async with factory() as session:
+        provider = IdentityProvider(name="Directory", type="MOCK", status="CONNECTED", tenant_id="t")
+        session.add(provider)
+        await session.flush()
+        group = Group(provider_id=provider.id, external_id="g-pkg", name="Finance Team", status="ACTIVE", is_privileged=False)
+        role = Role(provider_id=provider.id, external_id="r-pkg", name="Finance Reports Reader", role_type="DIRECTORY_ROLE", status="ACTIVE")
+        session.add_all([group, role])
+        await session.flush()
+        package = AccessPackage(name="Finance Starter Kit", status="ACTIVE")
+        session.add(package)
+        await session.flush()
+        session.add_all([
+            AccessPackageItem(package_id=package.id, resource_type="GROUP", resource_id=group.id),
+            AccessPackageItem(package_id=package.id, resource_type="ROLE", resource_id=role.id),
+        ])
+        await session.commit()
+        return {"provider_id": provider.id, "group_id": group.id, "role_id": role.id, "package_id": package.id}
+
+
+@pytest.mark.asyncio
+async def test_a_birthright_policy_can_grant_a_package(db_override):
+    """PACKAGE isn't a single-resource target — a matching birthright policy should fan out into one
+    birthright-tagged AccessAssignment per item in the package, live-resolved against its current items."""
+    seeded = await _seed_package_with_two_items(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/policies/birthright", json={"name": "Finance -> Starter Kit", "match_field": "department", "match_value": "Finance", "resource_type": "PACKAGE", "resource_id": str(seeded["package_id"])})
+    assert created.status_code == 201
+    assert created.json()["resource_type"] == "PACKAGE"
+
+    async with db_override.factory() as session:
+        user = User(provider_id=seeded["provider_id"], external_id="u-pkg", email="pkg.user@x.com", display_name="Pkg User", status="ACTIVE", department="Finance")
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+        user_id = user.id
+
+        from app.services.birthright import evaluate_birthright_policies
+        granted = await evaluate_birthright_policies(session, user_id, "admin-oid", "req-pkg-1")
+        assert len(granted) == 2
+
+        assignments = (await session.execute(select(AccessAssignment).where(AccessAssignment.user_id == user_id))).scalars().all()
+    resource_types = sorted(a.resource_type for a in assignments)
+    assert resource_types == ["GROUP", "ROLE"]
+    assert all(a.status == "ELIGIBLE" for a in assignments)
+    assert all(a.birthright_policy_id is not None for a in assignments)
+
+
+@pytest.mark.asyncio
+async def test_re_evaluating_a_package_birthright_policy_does_not_duplicate_items(db_override):
+    seeded = await _seed_package_with_two_items(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/policies/birthright", json={"name": "Finance -> Starter Kit", "match_field": "department", "match_value": "Finance", "resource_type": "PACKAGE", "resource_id": str(seeded["package_id"])})
+
+    async with db_override.factory() as session:
+        user = User(provider_id=seeded["provider_id"], external_id="u-pkg2", email="pkg.user2@x.com", display_name="Pkg User 2", status="ACTIVE", department="Finance")
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+        user_id = user.id
+
+        from app.services.birthright import evaluate_birthright_policies
+        first = await evaluate_birthright_policies(session, user_id, "admin-oid", "req-pkg-2")
+        assert len(first) == 2
+        second = await evaluate_birthright_policies(session, user_id, "admin-oid", "req-pkg-3")
+        assert second == []
+
+        assignments = (await session.execute(select(AccessAssignment).where(AccessAssignment.user_id == user_id))).scalars().all()
+    assert len(assignments) == 2
+
+
+@pytest.mark.asyncio
+async def test_package_birthright_grants_are_linked_to_their_package_and_backfill_repairs_old_ones(db_override):
+    """Regression: birthright PACKAGE grants used to be invisible to anything package-aware (My Access's package
+    column, User Detail, Access Review's PACKAGE scope) because no AccessPackageAssignment link was recorded."""
+    from app.models import AccessPackageAssignment
+    from app.services.birthright import backfill_birthright_package_links, evaluate_birthright_policies
+
+    seeded = await _seed_package_with_two_items(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/policies/birthright", json={"name": "Finance -> Starter Kit", "match_field": "department", "match_value": "Finance", "resource_type": "PACKAGE", "resource_id": str(seeded["package_id"])})
+
+    async with db_override.factory() as session:
+        user = User(provider_id=seeded["provider_id"], external_id="u-pkg-link", email="pkg.link@x.com", display_name="Pkg Link", status="ACTIVE", department="Finance")
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+
+        granted = await evaluate_birthright_policies(session, user.id, "admin-oid", "req-link-1")
+        links = (await session.execute(select(AccessPackageAssignment).where(AccessPackageAssignment.user_id == user.id))).scalars().all()
+        assert {l.assignment_id for l in links} == set(granted)
+        assert {l.package_id for l in links} == {seeded["package_id"]}
+        assert len({l.package_assignment_id for l in links}) == 1  # one batch per package grant
+
+        # Simulate grants made before this fix: remove the links, then backfill restores exactly them.
+        for link in links:
+            await session.delete(link)
+        await session.commit()
+        assert await backfill_birthright_package_links(session) == 2
+        assert await backfill_birthright_package_links(session) == 0  # idempotent
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_revokes_every_item_of_a_disabled_package_birthright_policy(db_override):
+    """The existing mover-reconciliation loop revokes purely by birthright_policy_id, regardless of
+    resource_type — proves it covers every one of a PACKAGE policy's item-level assignments automatically, with
+    no changes of its own needed for this feature."""
+    from app.services.birthright import evaluate_birthright_policies, reconcile_birthright_policies_for_user
+
+    seeded = await _seed_package_with_two_items(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/policies/birthright", json={"name": "Finance -> Starter Kit", "match_field": "department", "match_value": "Finance", "resource_type": "PACKAGE", "resource_id": str(seeded["package_id"])})
+        policy_id = created.json()["id"]
+
+    async with db_override.factory() as session:
+        user = User(provider_id=seeded["provider_id"], external_id="u-pkg3", email="pkg.user3@x.com", display_name="Pkg User 3", status="ACTIVE", department="Finance")
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+        user_id = user.id
+        granted = await evaluate_birthright_policies(session, user_id, "admin-oid", "req-pkg-4")
+        assert len(granted) == 2
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        authenticate_as("AccessPilot.Admin")
+        await client.patch(f"/api/v1/policies/birthright/{policy_id}", json={"status": "DISABLED"})
+
+    async with db_override.factory() as session:
+        result = await reconcile_birthright_policies_for_user(session, user_id, "admin-oid", "req-pkg-5")
+        assert len(result["revoked"]) == 2
+        assignments = (await session.execute(select(AccessAssignment).where(AccessAssignment.user_id == user_id))).scalars().all()
+    assert all(a.status == "REVOKED" for a in assignments)
+
+
+@pytest.mark.asyncio
+async def test_a_birthright_policy_referencing_a_nonexistent_package_is_rejected(db_override):
+    await _seed_package_with_two_items(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/policies/birthright", json={"name": "Bad package rule", "match_field": "department", "match_value": "Finance", "resource_type": "PACKAGE", "resource_id": "00000000-0000-0000-0000-000000000000"})
+    assert response.status_code == 404
+
+
+async def _seed_json_rule_targets(factory) -> dict:
+    async with factory() as session:
+        provider = IdentityProvider(name="Directory", type="MOCK", status="CONNECTED", tenant_id="t")
+        session.add(provider)
+        await session.flush()
+        group = Group(provider_id=provider.id, external_id="GRP-IT-EMPLOYEES", name="IT Employees Group", status="ACTIVE", is_privileged=False)
+        application = Application(provider_id=provider.id, external_id="app-ext-1", name="Microsoft-365", status="ACTIVE", app_roles=[{"id": "approle-e3", "name": "E3 User"}])
+        session.add_all([group, application])
+        await session.commit()
+        await session.refresh(group)
+        await session.refresh(application)
+        return {"provider_id": provider.id, "group_id": group.id, "application_id": application.id}
+
+
+def _it_employee_json_policy() -> dict:
+    return {
+        "policyId": "BR-001",
+        "policyType": "BIRTHRIGHT",
+        "name": "IT Employee Access",
+        "scope": {"identityType": "EMPLOYEE"},
+        "rule": {"operator": "AND", "conditions": [
+            {"field": "department", "operator": "EQUALS", "value": "IT"},
+            {"field": "employmentStatus", "operator": "EQUALS", "value": "ACTIVE"},
+        ]},
+        "actions": [
+            {"action": "ASSIGN", "resourceType": "GROUP", "resource": "GRP-IT-EMPLOYEES"},
+            {"action": "ASSIGN", "resourceType": "APPLICATION", "resource": "Microsoft-365", "appRoleExternalId": "approle-e3"},
+        ],
+        "reconciliation": {"enabled": True, "removeWhenConditionFails": True},
+        "audit": {"enabled": True},
+    }
+
+
+@pytest.mark.asyncio
+async def test_creating_a_policy_via_json_matches_the_requested_shape(db_override):
+    await _seed_json_rule_targets(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/policies/birthright/json", json=_it_employee_json_policy())
+    assert response.status_code == 201
+    body = response.json()
+    assert body["policyId"] == "BR-001"
+    assert body["policyType"] == "BIRTHRIGHT"
+    assert body["rule"]["operator"] == "AND"
+    assert len(body["rule"]["conditions"]) == 2
+    assert {a["resourceType"] for a in body["actions"]} == {"GROUP", "APPLICATION"}
+    # The human-readable resource key resolves to the real target's own display name on read-back.
+    assert {a["resource"] for a in body["actions"]} == {"IT Employees Group", "Microsoft-365"}
+    assert body["reconciliation"] == {"enabled": True, "removeWhenConditionFails": True}
+    assert body["audit"] == {"enabled": True}
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        listed = await client.get("/api/v1/policies/birthright")
+    assert any(p["id"] == body["id"] and p["is_advanced"] and p["conditions_count"] == 2 and p["actions_count"] == 2 for p in listed.json())
+
+
+@pytest.mark.asyncio
+async def test_json_policy_grants_only_when_all_and_conditions_match(db_override):
+    seeded = await _seed_json_rule_targets(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/policies/birthright/json", json=_it_employee_json_policy())
+
+    async with db_override.factory() as session:
+        full_match = User(provider_id=seeded["provider_id"], external_id="u-full", email="full@x.com", display_name="Full Match", status="ACTIVE", department="IT")
+        partial_match = User(provider_id=seeded["provider_id"], external_id="u-partial", email="partial@x.com", display_name="Partial Match", status="DISABLED", department="IT")
+        session.add_all([full_match, partial_match])
+        await session.commit()
+        await session.refresh(full_match)
+        await session.refresh(partial_match)
+
+        from app.services.birthright import evaluate_birthright_policies
+        full_granted = await evaluate_birthright_policies(session, full_match.id, "admin-oid", "req-json-1")
+        partial_granted = await evaluate_birthright_policies(session, partial_match.id, "admin-oid", "req-json-2")
+    assert len(full_granted) == 2  # GROUP + APPLICATION
+    assert partial_granted == []  # status != ACTIVE fails the second AND condition
+
+
+@pytest.mark.asyncio
+async def test_json_policy_with_or_operator_matches_either_condition(db_override):
+    seeded = await _seed_json_rule_targets(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    or_policy = {**_it_employee_json_policy(), "name": "IT or Finance", "policyId": "BR-002", "rule": {"operator": "OR", "conditions": [
+        {"field": "department", "operator": "EQUALS", "value": "IT"},
+        {"field": "department", "operator": "EQUALS", "value": "Finance"},
+    ]}, "actions": [{"action": "ASSIGN", "resourceType": "GROUP", "resource": "GRP-IT-EMPLOYEES"}]}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/policies/birthright/json", json=or_policy)
+
+    async with db_override.factory() as session:
+        finance_user = User(provider_id=seeded["provider_id"], external_id="u-finance", email="finance@x.com", display_name="Finance User", status="ACTIVE", department="Finance")
+        session.add(finance_user)
+        await session.commit()
+        await session.refresh(finance_user)
+
+        from app.services.birthright import evaluate_birthright_policies
+        granted = await evaluate_birthright_policies(session, finance_user.id, "admin-oid", "req-json-3")
+    assert len(granted) == 1
+
+
+@pytest.mark.asyncio
+async def test_viewing_a_legacy_policy_as_json_wraps_its_single_condition_and_action(db_override):
+    group_id = await _seed_group(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/policies/birthright", json={"name": "Finance -> Finance Team", "match_field": "department", "match_value": "Finance", "resource_type": "GROUP", "resource_id": group_id})
+        policy_id = created.json()["id"]
+        response = await client.get(f"/api/v1/policies/birthright/{policy_id}/json")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["rule"]["conditions"] == [{"field": "department", "operator": "EQUALS", "value": "Finance"}]
+    assert len(body["actions"]) == 1
+    assert body["actions"][0]["resourceType"] == "GROUP"
+
+
+@pytest.mark.asyncio
+async def test_editing_a_legacy_policy_as_json_converts_it_to_advanced_mode(db_override):
+    seeded_group = await _seed_group(db_override.factory)
+    seeded = await _seed_json_rule_targets(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/policies/birthright", json={"name": "Finance -> Finance Team", "match_field": "department", "match_value": "Finance", "resource_type": "GROUP", "resource_id": seeded_group})
+        policy_id = created.json()["id"]
+
+        edited = {**_it_employee_json_policy(), "name": "Finance -> Finance Team", "actions": [{"action": "ASSIGN", "resourceType": "GROUP", "resource": "GRP-IT-EMPLOYEES"}]}
+        response = await client.put(f"/api/v1/policies/birthright/{policy_id}/json", json=edited)
+    assert response.status_code == 200
+    assert response.json()["rule"]["conditions"][0]["field"] == "department"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        listed = await client.get("/api/v1/policies/birthright")
+    row = next(p for p in listed.json() if p["id"] == policy_id)
+    assert row["is_advanced"] is True
+    assert row["match_field"] is None
+
+
+@pytest.mark.asyncio
+async def test_non_sticky_policy_grant_is_revoked_when_condition_stops_matching(db_override):
+    seeded = await _seed_json_rule_targets(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    simple_policy = {
+        "policyId": "BR-010", "policyType": "BIRTHRIGHT", "name": "IT default reconciling",
+        "rule": {"operator": "AND", "conditions": [{"field": "department", "operator": "EQUALS", "value": "IT"}]},
+        "actions": [{"action": "ASSIGN", "resourceType": "GROUP", "resource": "GRP-IT-EMPLOYEES"}],
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/policies/birthright/json", json=simple_policy)
+
+    async with db_override.factory() as session:
+        user = User(provider_id=seeded["provider_id"], external_id="u-reconcile", email="reconcile@x.com", display_name="Reconcile Me", status="ACTIVE", department="IT")
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+        user_id = user.id
+
+        from app.services.birthright import evaluate_birthright_policies, reconcile_birthright_policies_for_user
+        granted = await evaluate_birthright_policies(session, user_id, "admin-oid", "req-recon-1")
+        assert len(granted) == 1
+
+        user.department = "Sales"
+        await session.commit()
+        result = await reconcile_birthright_policies_for_user(session, user_id, "admin-oid", "req-recon-2")
+    assert len(result["revoked"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_sticky_policy_grant_survives_when_condition_stops_matching(db_override):
+    seeded = await _seed_json_rule_targets(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    sticky_policy = {
+        "policyId": "BR-011", "policyType": "BIRTHRIGHT", "name": "IT sticky grant",
+        "rule": {"operator": "AND", "conditions": [{"field": "department", "operator": "EQUALS", "value": "IT"}]},
+        "actions": [{"action": "ASSIGN", "resourceType": "GROUP", "resource": "GRP-IT-EMPLOYEES"}],
+        "reconciliation": {"enabled": False, "removeWhenConditionFails": False},
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/policies/birthright/json", json=sticky_policy)
+
+    async with db_override.factory() as session:
+        user = User(provider_id=seeded["provider_id"], external_id="u-sticky", email="sticky@x.com", display_name="Sticky Grant", status="ACTIVE", department="IT")
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+        user_id = user.id
+
+        from app.services.birthright import evaluate_birthright_policies, reconcile_birthright_policies_for_user
+        granted = await evaluate_birthright_policies(session, user_id, "admin-oid", "req-sticky-1")
+        assert len(granted) == 1
+
+        user.department = "Sales"
+        await session.commit()
+        result = await reconcile_birthright_policies_for_user(session, user_id, "admin-oid", "req-sticky-2")
+        assert result["revoked"] == []
+
+        assignments = (await session.execute(select(AccessAssignment).where(AccessAssignment.user_id == user_id))).scalars().all()
+    assert len(assignments) == 1
+    assert assignments[0].status == "ELIGIBLE"  # never taken back automatically
+
+
+@pytest.mark.asyncio
+async def test_json_policy_rejects_disabling_audit(db_override):
+    await _seed_json_rule_targets(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    payload = {**_it_employee_json_policy(), "audit": {"enabled": False}}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/policies/birthright/json", json=payload)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "AUDIT_CANNOT_BE_DISABLED"
+
+
+@pytest.mark.asyncio
+async def test_json_policy_rejects_an_unsupported_condition_field(db_override):
+    await _seed_json_rule_targets(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    payload = {**_it_employee_json_policy(), "rule": {"operator": "AND", "conditions": [{"field": "favoriteColor", "operator": "EQUALS", "value": "blue"}]}}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/policies/birthright/json", json=payload)
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_json_policy_rejects_a_resource_that_does_not_exist(db_override):
+    await _seed_json_rule_targets(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    payload = {**_it_employee_json_policy(), "actions": [{"action": "ASSIGN", "resourceType": "GROUP", "resource": "NO-SUCH-GROUP"}]}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/policies/birthright/json", json=payload)
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_resolve_actions_reports_found_and_not_found_resources_without_saving(db_override):
+    """The JSON editor's 'Check resources' button — a preview only, never creates a policy."""
+    seeded = await _seed_json_rule_targets(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    payload = {"actions": [
+        {"action": "ASSIGN", "resourceType": "GROUP", "resource": "GRP-IT-EMPLOYEES"},
+        {"action": "ASSIGN", "resourceType": "APPLICATION", "resource": "Microsoft-365", "appRoleExternalId": "approle-e3"},
+        {"action": "ASSIGN", "resourceType": "GROUP", "resource": "NO-SUCH-GROUP"},
+    ]}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/policies/birthright/resolve-actions", json=payload)
+    assert response.status_code == 200
+    results = response.json()["results"]
+    assert len(results) == 3
+    assert results[0]["found"] is True
+    assert results[0]["resolvedId"] == str(seeded["group_id"])
+    assert results[0]["resolvedName"] == "IT Employees Group"
+    assert results[1]["found"] is True
+    assert results[1]["resolvedName"] == "Microsoft-365"
+    assert results[2]["found"] is False
+    assert results[2]["error"]
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        listed = await client.get("/api/v1/policies/birthright")
+    assert listed.json() == []  # nothing was actually created
+
+
+@pytest.mark.asyncio
+async def test_resolve_actions_requires_policy_create_permission(db_override):
+    await _seed_json_rule_targets(db_override.factory)
+    authenticate_as("AccessPilot.User", subject="regular-user-oid")
+    payload = {"actions": [{"action": "ASSIGN", "resourceType": "GROUP", "resource": "GRP-IT-EMPLOYEES"}]}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/policies/birthright/resolve-actions", json=payload)
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_json_policy_rejects_an_application_action_with_no_app_role(db_override):
+    await _seed_json_rule_targets(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    payload = {**_it_employee_json_policy(), "actions": [{"action": "ASSIGN", "resourceType": "APPLICATION", "resource": "Microsoft-365"}]}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/policies/birthright/json", json=payload)
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_json_policy_rejects_a_non_birthright_policy_type(db_override):
+    await _seed_json_rule_targets(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    payload = {**_it_employee_json_policy(), "policyType": "SOMETHING_ELSE"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/policies/birthright/json", json=payload)
+    assert response.status_code == 400
 
 
 @pytest.mark.asyncio

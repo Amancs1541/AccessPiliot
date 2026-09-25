@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
-from app.schemas.packages import PackageAssignCreate, PackageAssignMemberResult, PackageAssignResponse, PackageAssignmentBatch, PackageCreate, PackageEligibilityUpdate, PackageRequestCreate, PackageResponse, PackageUpdate
+from app.schemas.packages import PackageAssignCreate, PackageAssignMemberResult, PackageAssignResponse, PackageAssignmentBatch, PackageCreate, PackageEligibilityUpdate, PackageOwnerRename, PackageRequestCreate, PackageResponse, PackageUpdate
 from app.security.auth import AuthenticatedUser, require_authenticated_user, require_permission
 from app.services import packages as package_service
 
@@ -44,6 +44,23 @@ async def list_my_package_batches(actor: AuthenticatedUser = Depends(require_aut
 async def list_requestable_packages(actor: AuthenticatedUser = Depends(require_authenticated_user), db: AsyncSession = Depends(get_db)):
     """Active packages the caller is personally eligible to self-request — available to any authenticated user."""
     return await package_service.list_requestable_packages(db, actor.directory_object_id)
+
+
+@router.get("/owned", response_model=list[PackageResponse])
+async def list_owned_packages(actor: AuthenticatedUser = Depends(require_authenticated_user), db: AsyncSession = Depends(get_db)):
+    """Packages the caller owns — available to any authenticated user (object-level, like approvers)."""
+    return await package_service.list_owned_packages(db, actor.directory_object_id)
+
+
+@router.patch("/{package_id}/owner-rename", response_model=PackageResponse)
+async def owner_rename_package(package_id: UUID, data: PackageOwnerRename, request: Request, actor: AuthenticatedUser = Depends(require_authenticated_user), db: AsyncSession = Depends(get_db)):
+    return await package_service.owner_rename_package(db, package_id, data.name.strip(), actor.directory_object_id, request.state.request_id)
+
+
+@router.delete("/{package_id}/items/{item_id}", response_model=PackageResponse)
+async def owner_remove_item(package_id: UUID, item_id: UUID, request: Request, actor: AuthenticatedUser = Depends(require_authenticated_user), db: AsyncSession = Depends(get_db)):
+    """Owner-only: removes one item from a package the caller owns. Never adds items or touches anything else."""
+    return await package_service.owner_remove_item(db, package_id, item_id, actor.directory_object_id, request.state.request_id)
 
 
 @router.post("", response_model=PackageResponse, status_code=201)

@@ -130,6 +130,13 @@ class IdentityProvider(ABC):
         ...
 
     @abstractmethod
+    async def set_user_enabled(self, external_id: str, enabled: bool) -> bool:
+        """A real, consequential write flipping the identity's own accountEnabled state at the provider — used
+        to enable/disable a Privileged (PU) or Test (TU) shadow account (see app.services.privileged_accounts),
+        the human-user analog of set_application_enabled for a service principal."""
+        ...
+
+    @abstractmethod
     async def get_groups(self, query: str | None = None) -> list[NormalizedGroup]: ...
 
     @abstractmethod

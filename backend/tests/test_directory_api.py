@@ -224,6 +224,34 @@ async def test_user_access_summary_lists_active_assignments_and_package_name(db_
 
 
 @pytest.mark.asyncio
+async def test_user_access_summary_includes_eligible_assignments(db_override):
+    """ELIGIBLE is the core status of this app's whole eligible/activate model — a real gap where the User
+    Detail page's Groups/Applications/Roles/Access Packages sections silently never showed anything not yet
+    activated (or pending/scheduled), even though the exact same items are correctly visible everywhere else
+    (My Access, the Assignments admin table). Fixed by adding ELIGIBLE to this endpoint's status filter."""
+    async with db_override.factory() as session:
+        provider = IdentityProvider(name="Directory", type="MOCK", status="CONNECTED", tenant_id="t")
+        session.add(provider)
+        await session.flush()
+        target_user = User(provider_id=provider.id, external_id="target-user-2", email="target2@x.com", display_name="Target User 2", status="ACTIVE")
+        role = Role(provider_id=provider.id, external_id="r1", name="Reports Reader", role_type="DIRECTORY_ROLE", status="ACTIVE", is_privileged=False)
+        session.add_all([target_user, role])
+        await session.flush()
+        session.add(AccessAssignment(provider_id=provider.id, user_id=target_user.id, resource_type="ROLE", resource_id=role.id, assignment_type="PERMANENT", status="ELIGIBLE"))
+        await session.commit()
+        user_id = target_user.id
+
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/users/{user_id}/access-summary")
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["assignments"]) == 1
+    assert body["assignments"][0]["status"] == "ELIGIBLE"
+    assert body["assignments"][0]["resource_type"] == "ROLE"
+
+
+@pytest.mark.asyncio
 async def test_user_access_summary_includes_group_membership_added_directly_in_entra(db_override):
     """A group membership with no corresponding AccessAssignment (only a synced UserGroup row) means the user
     was added to the group directly in Entra, not through AccessPilot — must still show up."""

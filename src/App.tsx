@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Bot, Box, Check, ChevronLeft, ChevronRight, Clock3, Cloud, Copy, Database, ExternalLink, FileCheck2, FolderKanban, Gauge, Image, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Lock, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldAlert, ShieldCheck, SlidersHorizontal, UploadCloud, UserRound, Users, X } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Bot, Box, Check, ChevronLeft, ChevronRight, Clock3, Cloud, Copy, Database, ExternalLink, FileCheck2, FolderKanban, Gauge, GitBranch, Image, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Lock, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldAlert, ShieldCheck, SlidersHorizontal, UploadCloud, UserRound, Users, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { currentUser, policies, type RequestStatus, type Role } from './mock';
 import { mockService, useMockState } from './mockService';
@@ -10,14 +10,18 @@ import { BreakGlassDashboard } from './BreakGlassDashboard';
 import { IdleGuard, useRefreshSecuritySettings, useAppTimezone } from './IdleGuard';
 import logo from './assets/logo.png';
 
-interface ApiUser { id: string; provider_id: string; external_id: string; email: string; display_name: string; given_name: string | null; surname: string | null; department: string | null; job_title: string | null; status: string; employee_id: string | null; source: string | null; last_synced_at: string | null; }
+interface ApiUser { id: string; provider_id: string; external_id: string; email: string; display_name: string; given_name: string | null; surname: string | null; department: string | null; job_title: string | null; status: string; employee_id: string | null; source: string | null; account_type: string; linked_user_id: string | null; employee_category: string | null; manager_id: string | null; last_synced_at: string | null; }
+interface ApiHierarchyNode { id: string; display_name: string; email: string; status: string; employee_category: string | null; manager_id: string | null; }
+interface ApiLinkedAccount { id: string; display_name: string; email: string; account_type: string; status: string; }
+interface ApiPrivilegedAccountPolicy { account_type: string; default_approver_id: string | null; default_approver_display_name: string | null; approval_required: boolean; }
+interface ApiPrivilegedAccountRequest { id: string; requester_id: string; requester_display_name: string | null; account_type: string; status: string; approver_id: string | null; approver_display_name: string | null; justification: string | null; provisioned_user_id: string | null; provisioned_user_display_name: string | null; failure_reason: string | null; created_at: string; decided_at: string | null; }
 interface ApiGroup { id: string; external_id: string; name: string; description: string | null; is_privileged: boolean; status: string; last_synced_at: string | null; }
 interface ApiRole { id: string; external_id: string; name: string; description: string | null; role_type: string; is_privileged: boolean; status: string; }
 interface ApiApplicationRole { id: string; name: string; description: string | null; }
 interface ApiApplication { id: string; external_id: string; name: string; status: string; app_roles: ApiApplicationRole[] | null; last_synced_at: string | null; }
 interface ApiPackageItem { id: string; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; }
 interface ApiPackageEligiblePrincipal { principal_type: string; principal_id: string; display_name: string | null; }
-interface ApiPackage { id: string; name: string; description: string | null; status: string; items: ApiPackageItem[]; default_approver_id: string | null; default_fallback_approver_id: string | null; eligible_principals: ApiPackageEligiblePrincipal[]; created_at: string; }
+interface ApiPackage { id: string; name: string; description: string | null; status: string; items: ApiPackageItem[]; default_approver_id: string | null; default_fallback_approver_id: string | null; eligible_principals: ApiPackageEligiblePrincipal[]; owners: { user_id: string; display_name: string | null; email: string | null }[]; created_at: string; }
 interface ApiUserAccessItem { id: string | null; resource_type: string; resource_display_name: string | null; status: string; assignment_type: string; expiration_time: string | null; package_name: string | null; source: string; }
 interface ApiUserLicense { sku_id: string; name: string; }
 interface ApiUserAccessSummary { assignments: ApiUserAccessItem[]; licenses: ApiUserLicense[]; }
@@ -115,15 +119,23 @@ const nav = [
   { label: 'Request Packages', icon: Box, to: '/request-packages', roles: ['user'] },
   { label: 'My Requests', icon: ListChecks, to: '/my-requests', roles: ['user'] },
   { label: 'Approvals', icon: Check, to: '/approvals', roles: ['user','admin'] },
+  { label: 'My Access Reviews', icon: FileCheck2, to: '/my-access-reviews', roles: ['user','admin'] },
+  { label: 'My Packages', icon: Box, to: '/my-packages', roles: ['user','admin'] },
   { label: 'Profile', icon: UserRound, to: '/profile', roles: ['user','admin'] },
   { label: 'Users', icon: Users, to: '/admin/users', roles: ['admin'], section: 'ADMINISTRATION' },
+  { label: 'Org Chart', icon: GitBranch, to: '/admin/org-chart', roles: ['admin'] },
   { label: 'Groups', icon: Network, to: '/admin/groups', roles: ['admin'] },
   { label: 'Roles', icon: Shield, to: '/admin/roles', roles: ['admin'] },
   { label: 'Access Requests', icon: FolderKanban, to: '/admin/access-requests', roles: ['admin'], section: 'ACCESS MANAGEMENT' },
   { label: 'Assignments', icon: KeyRound, to: '/admin/assignments', roles: ['admin'] },
   { label: 'Access Packages', icon: Box, to: '/admin/access-packages', roles: ['admin'] },
   { label: 'Policies', icon: SlidersHorizontal, to: '/admin/policies', roles: ['admin'], section: 'GOVERNANCE' },
+  { label: 'Privileged/Test Activity', icon: ShieldCheck, to: '/admin/privileged-accounts', roles: ['admin'] },
   { label: 'Audit Logs', icon: BookOpen, to: '/admin/audit', roles: ['admin'] },
+  // Deliberately NOT gated behind an extra:-flag like SoD/SoC/NHI — AccessPilot.AccessReviewAdmin's backend
+  // permission set is a full Admin superset by design (see app/security/auth.py), so a holder's `role` itself
+  // already becomes 'admin' (see auth.tsx) and this plain `roles: ['admin']` entry already covers them too.
+  { label: 'Access Reviews', icon: FileCheck2, to: '/admin/access-reviews', roles: ['admin'], section: 'ACCESS REVIEW' },
   // Its own sidebar section, not folded into GOVERNANCE — exclusive to a real AccessPilot.SoDAdmin (see Shell's
   // nav filter, which checks auth.isSodAdmin for items marked extra: 'sod'). roles: [] is deliberate: a plain
   // Admin no longer sees this section at all, the same exclusive-to-its-own-role treatment SOC already has.
@@ -153,7 +165,7 @@ function App() {
   if (auth.breakglassActive && !auth.breakglassElevated) return <BreakGlassDashboard />;
   const role = auth.authConfigured ? auth.role : mockRole;
   const changeRole = (nextRole: Role) => { localStorage.setItem('accesspilot.mockRole', nextRole); setMockRole(nextRole); };
-  return <IdleGuard><Shell role={role} setRole={changeRole}><Routes><Route path="/" element={<Navigate to="/dashboard" replace />} /><Route path="/dashboard" element={<Dashboard role={role} />} /><Route path="/my-access" element={<MyAccess />} /><Route path="/request-access" element={<RequestAccess />} /><Route path="/request-packages" element={<RequestPackagesPage />} /><Route path="/my-requests" element={<Requests mine />} /><Route path="/approvals" element={<MyApprovalsPage />} /><Route path="/profile" element={<Profile />} /><Route path="/admin/users" element={<AdminOnly role={role}><UsersPage /></AdminOnly>} /><Route path="/admin/users/:id" element={<AdminOnly role={role}><UserDetail /></AdminOnly>} /><Route path="/admin/groups" element={<AdminOnly role={role}><GroupsPage /></AdminOnly>} /><Route path="/admin/groups/:id" element={<AdminOnly role={role}><GroupDetail /></AdminOnly>} /><Route path="/admin/roles" element={<AdminOnly role={role}><RolesPage /></AdminOnly>} /><Route path="/admin/access-requests" element={<AdminOnly role={role}><Requests /></AdminOnly>} /><Route path="/admin/access-requests/:id" element={<AdminOnly role={role}><RequestDetailInteractive /></AdminOnly>} /><Route path="/admin/assignments" element={<AdminOnly role={role}><AssignmentsInteractive /></AdminOnly>} /><Route path="/admin/access-packages" element={<AdminOnly role={role}><AccessPackagesInteractive /></AdminOnly>} /><Route path="/admin/policies" element={<AdminOnly role={role}><PoliciesPage /></AdminOnly>} /><Route path="/admin/audit" element={<AdminOnly role={role}><AuditPage /></AdminOnly>} /><Route path="/admin/providers" element={<AdminOnly role={role}><ProvidersPage /></AdminOnly>} /><Route path="/admin/sync" element={<AdminOnly role={role}><SyncPage /></AdminOnly>} /><Route path="/admin/onboarding" element={<AdminOnly role={role}><OnboardingPage /></AdminOnly>} /><Route path="/admin/security" element={<AdminOnly role={role}><SecurityPage /></AdminOnly>} /><Route path="/admin/branding" element={<AdminOnly role={role}><BrandingPage /></AdminOnly>} /><Route path="/admin/sod" element={auth.isSodAdmin ? <SodPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/sod/configuration" element={auth.isSodAdmin ? <SodConfigurationPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/soc" element={auth.isSocAdmin ? <SocDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health" element={auth.isServerAdmin ? <ServerHealthDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health/troubleshooting" element={auth.isServerAdmin ? <TroubleshootingDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi" element={auth.isNhiAdmin ? <NhiPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi/:id" element={auth.isNhiAdmin ? <NhiDetailPage /> : <Navigate to="/dashboard" replace />} /><Route path="*" element={<Navigate to="/dashboard" replace />} /></Routes></Shell></IdleGuard>;
+  return <IdleGuard><Shell role={role} setRole={changeRole}><Routes><Route path="/" element={<Navigate to="/dashboard" replace />} /><Route path="/dashboard" element={<Dashboard role={role} />} /><Route path="/my-access" element={<MyAccess />} /><Route path="/request-access" element={<RequestAccess />} /><Route path="/request-packages" element={<RequestPackagesPage />} /><Route path="/my-requests" element={<Requests mine />} /><Route path="/approvals" element={<MyApprovalsPage />} /><Route path="/profile" element={<Profile />} /><Route path="/admin/users" element={<AdminOnly role={role}><UsersPage /></AdminOnly>} /><Route path="/admin/users/:id" element={<AdminOnly role={role}><UserDetail /></AdminOnly>} /><Route path="/admin/org-chart" element={<AdminOnly role={role}><OrgChartPage /></AdminOnly>} /><Route path="/admin/groups" element={<AdminOnly role={role}><GroupsPage /></AdminOnly>} /><Route path="/admin/groups/:id" element={<AdminOnly role={role}><GroupDetail /></AdminOnly>} /><Route path="/admin/roles" element={<AdminOnly role={role}><RolesPage /></AdminOnly>} /><Route path="/admin/access-requests" element={<AdminOnly role={role}><Requests /></AdminOnly>} /><Route path="/admin/access-requests/:id" element={<AdminOnly role={role}><RequestDetailInteractive /></AdminOnly>} /><Route path="/admin/assignments" element={<AdminOnly role={role}><AssignmentsInteractive /></AdminOnly>} /><Route path="/admin/access-packages" element={<AdminOnly role={role}><AccessPackagesInteractive /></AdminOnly>} /><Route path="/admin/policies" element={<AdminOnly role={role}><PoliciesPage /></AdminOnly>} /><Route path="/admin/privileged-accounts" element={<AdminOnly role={role}><PrivilegedAccountActivityPage /></AdminOnly>} /><Route path="/admin/access-reviews" element={<AdminOnly role={role}><AccessReviewsPage /></AdminOnly>} /><Route path="/admin/access-reviews/:id" element={<AdminOnly role={role}><AccessReviewDetailPage /></AdminOnly>} /><Route path="/my-packages" element={<MyPackagesPage />} /><Route path="/my-access-reviews" element={<MyAccessReviewsPage />} /><Route path="/admin/audit" element={<AdminOnly role={role}><AuditPage /></AdminOnly>} /><Route path="/admin/providers" element={<AdminOnly role={role}><ProvidersPage /></AdminOnly>} /><Route path="/admin/sync" element={<AdminOnly role={role}><SyncPage /></AdminOnly>} /><Route path="/admin/onboarding" element={<AdminOnly role={role}><OnboardingPage /></AdminOnly>} /><Route path="/admin/security" element={<AdminOnly role={role}><SecurityPage /></AdminOnly>} /><Route path="/admin/branding" element={<AdminOnly role={role}><BrandingPage /></AdminOnly>} /><Route path="/admin/sod" element={auth.isSodAdmin ? <SodPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/sod/configuration" element={auth.isSodAdmin ? <SodConfigurationPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/soc" element={auth.isSocAdmin ? <SocDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health" element={auth.isServerAdmin ? <ServerHealthDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health/troubleshooting" element={auth.isServerAdmin ? <TroubleshootingDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi" element={auth.isNhiAdmin ? <NhiPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi/:id" element={auth.isNhiAdmin ? <NhiDetailPage /> : <Navigate to="/dashboard" replace />} /><Route path="*" element={<Navigate to="/dashboard" replace />} /></Routes></Shell></IdleGuard>;
 }
 function SignInScreen() {
   const auth = useAuth();
@@ -1482,7 +1494,7 @@ function Dashboard({ role }: { role: Role }) {
       </div>
     </div>}
     <div className="grid-2"><section className="panel"><div className="panel-head"><h2>{admin ? 'Recent access requests' : 'Recent activity'}</h2><Link to={admin ? '/admin/audit' : '/my-requests'} className="panel-link">View all <ChevronRight size={12}/></Link></div>{admin ? (!recentAudit || recentAudit.length === 0 ? <div className="empty">No recent activity.</div> : recentAudit.slice(0,6).map(entry => <div className="activity" key={entry.id}><div className="activity-row"><span className="activity-dot"/><div className="activity-copy"><strong>{entry.action}</strong><small>{entry.actor_display_name || 'System'}{entry.target_user_display_name ? ` · ${entry.target_user_display_name}` : ''} · {formatDateTime(entry.timestamp, timezone)}</small></div><StatusBadge status={entry.result}/></div></div>)) : (myRecentActivity.length === 0 ? <div className="empty">No activity yet.</div> : myRecentActivity.map(item => <div className="activity" key={item.id}><div className="activity-row"><span className="activity-dot"/><div className="activity-copy"><strong>{item.resource_display_name || item.resource_type}{item.package_name ? ` (${item.package_name})` : ''}</strong><small>{item.resource_type} · {formatDateTime(item.activated_at || item.created_at, timezone)}</small></div><StatusBadge status={item.status}/></div></div>))}</section><section className="panel"><div className="panel-head"><h2>{admin ? 'Provider status' : 'Current active access'}</h2>{admin && <StatusBadge status={dashboard?.provider?.status || 'NOT_CONFIGURED'}/>}</div>{admin ? <div className="detail-section"><div className="user-cell"><span className="avatar" style={{background:'#e4f1f5',color:'#33758a'}}><Cloud size={15}/></span><div><div className="user-name">{dashboard?.provider?.name || 'No provider configured'}</div><div className="user-email">{dashboard?.provider ? `${dashboard.provider.status} · Last sync ${lastSyncLabel}` : 'Configure a provider to begin syncing.'}</div></div></div><div className="key-grid" style={{marginTop:24}}><div className="key"><span>Users synced</span><strong>{dashboard ? dashboard.users : '—'}</strong></div><div className="key"><span>Groups synced</span><strong>{dashboard ? dashboard.groups : '—'}</strong></div><div className="key"><span>Directory roles</span><strong>{dashboard ? dashboard.roles : '—'}</strong></div><div className="key"><span>Last sync</span><strong>{lastSyncLabel}</strong></div></div></div> : (myActiveAccess.length === 0 ? <div className="detail-section"><div className="empty">No active access right now. Check My Access for anything eligible to activate.</div></div> : <div className="table-wrap"><table><thead><tr><th>Resource</th><th>Type</th><th>Expires</th></tr></thead><tbody>{myActiveAccess.map(item => <tr key={item.id}><td className="user-name">{item.resource_display_name || item.resource_type}{item.package_name ? <div className="user-email">{item.package_name}</div> : null}</td><td>{item.resource_type}</td><td>{item.expiration_time ? formatDateTime(item.expiration_time, timezone) : 'Permanent'}</td></tr>)}</tbody></table></div>)}</section></div></Page>; }
-function StatusBadge({ status }: { status: string }) { const cls = ['APPROVED','ACTIVE','COMPLETED','CONNECTED','ELIGIBLE','SUCCESS','Healthy','Active'].includes(status) ? 'success' : ['PENDING','PENDING_APPROVAL','SCHEDULED','RUNNING','PARTIAL','Medium'].includes(status) ? 'warning' : ['REJECTED','EXPIRED','REVOKED','FAILED','Disabled','High'].includes(status) ? 'danger' : 'neutral'; return <span className={`badge ${cls}`}>{status}</span>; }
+function StatusBadge({ status }: { status: string }) { const cls = ['APPROVED','ACTIVE','COMPLETED','CONNECTED','ELIGIBLE','SUCCESS','Healthy','Active'].includes(status) ? 'success' : ['PENDING','PENDING_APPROVAL','SCHEDULED','RUNNING','PARTIAL','Medium','AUTO_REVOKED'].includes(status) ? 'warning' : ['REJECTED','EXPIRED','REVOKED','FAILED','Disabled','High'].includes(status) ? 'danger' : 'neutral'; return <span className={`badge ${cls}`}>{status}</span>; }
 function TablePanel({ children, toolbar }: { children: React.ReactNode; toolbar?: React.ReactNode }) { return <><div className="toolbar">{toolbar}</div><section className="panel"><div className="table-wrap">{children}</div></section></>; }
 interface FilterOption { value: string; label: string; }
 function Toolbar({ placeholder = 'Search', searchValue, onSearchChange, filterLabel = 'All statuses', filterValue = '', onFilterChange, filterOptions }: { placeholder?: string; searchValue?: string; onSearchChange?: (value: string) => void; filterLabel?: string; filterValue?: string; onFilterChange?: (value: string) => void; filterOptions?: FilterOption[]; }) {
@@ -1556,6 +1568,48 @@ function UsersPage() {
     {users && users.length > 0 && <p className="footer-note">Showing {filteredUsers.length} of {users.length} users</p>}
   </Page>;
 }
+function OrgChartNode({ node, byManager, collapsed, toggle, depth }: { node: ApiHierarchyNode; byManager: Map<string, ApiHierarchyNode[]>; collapsed: Set<string>; toggle: (id: string) => void; depth: number }) {
+  const children = byManager.get(node.id) || [];
+  const isCollapsed = collapsed.has(node.id);
+  return <li>
+    <div className="user-cell" style={{padding:'6px 0'}}>
+      {children.length > 0 ? <button type="button" className="btn" aria-label={isCollapsed ? 'Expand' : 'Collapse'} onClick={() => toggle(node.id)} style={{padding:'2px 7px',marginRight:8}}>{isCollapsed ? <ChevronRight size={12}/> : <ChevronLeft size={12} style={{transform:'rotate(-90deg)'}}/>}</button> : <span style={{display:'inline-block',width:28}}/>}
+      <span className="avatar" style={{width:30,height:30,fontSize:12}}>{initialsFor(node.display_name)}</span>
+      <span><Link to={`/admin/users/${node.id}`} className="user-name">{node.display_name}</Link><span className="user-email">{node.email}{node.employee_category ? ` · ${node.employee_category === 'MANAGER' ? 'Manager' : 'Employee'}` : ''}{children.length > 0 ? ` · ${children.length} direct report${children.length === 1 ? '' : 's'}` : ''}</span></span>
+    </div>
+    {!isCollapsed && children.length > 0 && <ul style={{listStyle:'none',margin:0,paddingLeft:36,borderLeft:'1px dashed #d5dde0'}}>{children.map(child => <OrgChartNode key={child.id} node={child} byManager={byManager} collapsed={collapsed} toggle={toggle} depth={depth + 1}/>)}</ul>}
+  </li>;
+}
+function OrgChartPage() {
+  const { data: nodes, loading, error, reload } = useApiResource<ApiHierarchyNode[]>('/api/v1/users/hierarchy-tree');
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const toggle = (id: string) => setCollapsed(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  const byManager = useMemo(() => {
+    const map = new Map<string, ApiHierarchyNode[]>();
+    (nodes || []).forEach(node => { if (node.manager_id) { if (!map.has(node.manager_id)) map.set(node.manager_id, []); map.get(node.manager_id)!.push(node); } });
+    return map;
+  }, [nodes]);
+  // A "root" is anyone with no manager. Among those, a tagged Manager who nonetheless has direct reports is a
+  // real top-of-tree node; everyone else with no manager AND no reports is truly unassigned, shown separately
+  // rather than silently mixed into the tree as a false root.
+  const managedIds = useMemo(() => new Set((nodes || []).filter(n => n.manager_id).map(n => n.id)), [nodes]);
+  const roots = (nodes || []).filter(n => !n.manager_id && (byManager.has(n.id) || n.employee_category === 'MANAGER'));
+  const unassigned = (nodes || []).filter(n => !n.manager_id && !byManager.has(n.id) && n.employee_category !== 'MANAGER');
+  return <Page eyebrow="ADMINISTRATION" title="Org Chart" subtitle="The reporting hierarchy built from each user's Role &amp; Manager tag — AccessPilot-internal only, never synced to/from Entra." action={<button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button>}>
+    <section className="panel" style={{marginBottom:18}}>
+      <div className="panel-head"><h2>Reporting hierarchy</h2></div>
+      <div className="detail-section">
+        {loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : roots.length === 0 ? <div className="empty">No one is tagged as a Manager with reports yet — tag users from their own detail page.</div> : <ul style={{listStyle:'none',margin:0,padding:0}}>{roots.map(root => <OrgChartNode key={root.id} node={root} byManager={byManager} collapsed={collapsed} toggle={toggle} depth={0}/>)}</ul>}
+      </div>
+    </section>
+    <section className="panel">
+      <div className="panel-head"><h2>Unassigned</h2><span className="panel-link">{unassigned.length}</span></div>
+      <div className="detail-section">
+        {unassigned.length === 0 ? <div className="empty">Everyone is placed in the hierarchy above.</div> : <div className="table-wrap"><table><thead><tr><th>User</th><th>Tag</th></tr></thead><tbody>{unassigned.map(u => <tr key={u.id}><td><Link to={`/admin/users/${u.id}`} className="user-name">{u.display_name}</Link></td><td>{u.employee_category === 'EMPLOYEE' ? 'Employee' : 'Unclassified'}</td></tr>)}</tbody></table></div>}
+      </div>
+    </section>
+  </Page>;
+}
 function UserDetail() {
   const auth = useAuth();
   const timezone = useAppTimezone();
@@ -1565,6 +1619,23 @@ function UserDetail() {
   const [savingAttributes, setSavingAttributes] = useState(false);
   const [attributesMessage, setAttributesMessage] = useState('');
   useEffect(() => { if (user) setAttributesForm({ department: user.department || '', job_title: user.job_title || '' }); }, [user]);
+  const { data: hierarchyNodes, reload: reloadHierarchy } = useApiResource<ApiHierarchyNode[]>('/api/v1/users/hierarchy-tree');
+  const [hierarchyForm, setHierarchyForm] = useState({ employee_category: '', manager_id: '' });
+  const [savingHierarchy, setSavingHierarchy] = useState(false);
+  const [hierarchyMessage, setHierarchyMessage] = useState('');
+  useEffect(() => { if (user) setHierarchyForm({ employee_category: user.employee_category || '', manager_id: user.manager_id || '' }); }, [user]);
+  const saveHierarchy = async () => {
+    setSavingHierarchy(true); setHierarchyMessage('');
+    try {
+      const payload: Record<string, unknown> = {};
+      if (hierarchyForm.employee_category) payload.employee_category = hierarchyForm.employee_category; else payload.clear_employee_category = true;
+      if (hierarchyForm.manager_id) payload.manager_id = hierarchyForm.manager_id; else payload.clear_manager = true;
+      const response = await auth.apiRequest(`/api/v1/users/${id}/hierarchy`, { method: 'PATCH', body: JSON.stringify(payload) });
+      if (response.ok) { setHierarchyMessage('Saved.'); reloadUser(); reloadHierarchy(); }
+      else { const body = await response.json().catch(() => null); setHierarchyMessage(body?.error?.message || 'Unable to save this.'); }
+    } catch { setHierarchyMessage('Unable to reach the backend.'); } finally { setSavingHierarchy(false); }
+  };
+  const managerOptions = (hierarchyNodes || []).filter(n => n.employee_category === 'MANAGER' && n.id !== id);
   const saveAttributes = async () => {
     setSavingAttributes(true); setAttributesMessage('');
     try {
@@ -1574,7 +1645,16 @@ function UserDetail() {
     } catch { setAttributesMessage('Unable to reach the backend.'); } finally { setSavingAttributes(false); }
   };
   const { data: providers } = useApiResource<ApiProvider[]>('/api/v1/providers');
+  const { data: departments } = useApiResource<ApiDepartment[]>('/api/v1/policies/departments');
   const { data: access, error: accessError, loading: accessLoading, reload: reloadAccess } = useApiResource<ApiUserAccessSummary>(`/api/v1/users/${id}/access-summary`);
+  const { data: linkedAccounts, reload: reloadLinked } = useApiResource<ApiLinkedAccount[]>(`/api/v1/users/${id}/linked-accounts`);
+  const { data: linkedOwner } = useApiResource<ApiUser>(`/api/v1/users/${user?.linked_user_id}`, Boolean(user?.linked_user_id));
+  const [enabledBusyId, setEnabledBusyId] = useState<string | null>(null);
+  const toggleAccountEnabled = async (accountId: string, enable: boolean) => {
+    setEnabledBusyId(accountId);
+    try { await auth.apiRequest(`/api/v1/users/${accountId}/enabled`, { method: 'POST', body: JSON.stringify({ enabled: enable }) }); reloadLinked(); }
+    finally { setEnabledBusyId(null); }
+  };
   const groupItems = (access?.assignments || []).filter(item => item.resource_type === 'GROUP');
   const applicationItems = (access?.assignments || []).filter(item => item.resource_type === 'APPLICATION');
   const roleItems = (access?.assignments || []).filter(item => item.resource_type === 'ROLE');
@@ -1605,7 +1685,7 @@ function UserDetail() {
     {user.employee_id && <div className="key"><span>Employee ID (from CSV)</span><strong>{user.employee_id}</strong></div>}
     <div className="key"><span>Connector</span><strong>{connectorName}</strong></div>
     <div className="key"><span>Connector external ID</span><strong>{user.external_id}</strong></div>
-  </div>{isCsvOnly && <p className="subtitle" style={{marginTop:12}}>This identity has no real {providers?.some(p => p.provider_type === 'ENTRA') ? 'Entra' : providers?.some(p => p.provider_type === 'OKTA') ? 'Okta' : 'connector'} account yet — group/role membership shown below is AccessPilot-local (eligible) only. Re-uploading its CSV row after a real connector is available will provision one automatically.</p>}</div><div className="detail-section"><div className="detail-title"><h2>Department &amp; job title</h2></div><p className="subtitle" style={{marginTop:0,marginBottom:14}}>Editing either pushes a real write to {connectorName} (not just a local edit) and re-evaluates birthright policies — a mover loses any group a policy no longer grants and gains any newly-matching one, ELIGIBLE only, same as a new joiner.</p><div className="key-grid"><label className="key" style={{display:'block'}}><span>Department</span><input className="select" style={{width:'100%'}} value={attributesForm.department} onChange={event => setAttributesForm({...attributesForm, department: event.target.value})}/></label><label className="key" style={{display:'block'}}><span>Job title</span><input className="select" style={{width:'100%'}} value={attributesForm.job_title} onChange={event => setAttributesForm({...attributesForm, job_title: event.target.value})}/></label></div><div style={{display:'flex',alignItems:'center',gap:10,marginTop:14}}><button className="btn btn-primary" disabled={savingAttributes} onClick={saveAttributes}>{savingAttributes ? 'Saving...' : 'Save'}</button>{attributesMessage && <span className="footer-note" style={{margin:0}}>{attributesMessage}</span>}</div></div></section><aside className="panel">
+  </div>{isCsvOnly && <p className="subtitle" style={{marginTop:12}}>This identity has no real {providers?.some(p => p.provider_type === 'ENTRA') ? 'Entra' : providers?.some(p => p.provider_type === 'OKTA') ? 'Okta' : 'connector'} account yet — group/role membership shown below is AccessPilot-local (eligible) only. Re-uploading its CSV row after a real connector is available will provision one automatically.</p>}</div>{user.account_type !== 'NORMAL' && <div className="detail-section"><div className="detail-title"><h2>{user.account_type === 'PU' ? 'Privileged' : 'Test'} account</h2><span className="badge neutral">{user.account_type}</span></div><p className="subtitle" style={{marginTop:0}}>This is a {user.account_type === 'PU' ? 'Privileged (PU)' : 'Test (TU)'} account — deliberately excluded from Birthright and Group Role Mapping automation. Access to it is always granted manually.</p><div className="key-grid"><div className="key"><span>Linked to</span><strong>{linkedOwner ? <Link to={`/admin/users/${linkedOwner.id}`} className="user-name">{linkedOwner.display_name}</Link> : 'Not linked to a real user'}</strong></div></div></div>}{(linkedAccounts && linkedAccounts.length > 0) && <div className="detail-section"><div className="detail-title"><h2>Privileged / Test accounts</h2></div><p className="subtitle" style={{marginTop:0,marginBottom:12}}>Shadow accounts linked to this person for elevated admin work or QA/UAT — no mailbox, access granted manually only.</p><div className="table-wrap"><table><thead><tr><th>Account</th><th>Type</th><th>Status</th><th></th></tr></thead><tbody>{linkedAccounts.map(account => <tr key={account.id}><td className="user-name"><Link to={`/admin/users/${account.id}`} className="user-name">{account.display_name}</Link></td><td>{account.account_type}</td><td><StatusBadge status={account.status}/></td><td><button className="btn" disabled={enabledBusyId === account.id} onClick={() => void toggleAccountEnabled(account.id, account.status !== 'ACTIVE')}>{enabledBusyId === account.id ? 'Working...' : account.status === 'ACTIVE' ? 'Disable' : 'Enable'}</button></td></tr>)}</tbody></table></div></div>}<div className="detail-section"><div className="detail-title"><h2>Department &amp; job title</h2></div><p className="subtitle" style={{marginTop:0,marginBottom:14}}>Editing either pushes a real write to {connectorName} (not just a local edit) and re-evaluates birthright policies — a mover loses any group a policy no longer grants and gains any newly-matching one, ELIGIBLE only, same as a new joiner.</p><div className="key-grid"><label className="key" style={{display:'block'}}><span>Department</span><select className="select" style={{width:'100%'}} value={attributesForm.department} onChange={event => setAttributesForm({...attributesForm, department: event.target.value})}><option value="">No department</option>{attributesForm.department && !(departments || []).some(d => d.name === attributesForm.department) && <option value={attributesForm.department}>{attributesForm.department} (not in the managed list)</option>}{(departments || []).map(d => <option key={d.id} value={d.name}>{d.name}</option>)}</select></label><label className="key" style={{display:'block'}}><span>Job title</span><input className="select" style={{width:'100%'}} value={attributesForm.job_title} onChange={event => setAttributesForm({...attributesForm, job_title: event.target.value})}/></label></div><div style={{display:'flex',alignItems:'center',gap:10,marginTop:14}}><button className="btn btn-primary" disabled={savingAttributes} onClick={saveAttributes}>{savingAttributes ? 'Saving...' : 'Save'}</button>{attributesMessage && <span className="footer-note" style={{margin:0}}>{attributesMessage}</span>}</div></div><div className="detail-section"><div className="detail-title"><h2>Role &amp; manager</h2></div><p className="subtitle" style={{marginTop:0,marginBottom:14}}>AccessPilot-internal only — never pushed to Entra/Okta. Tag this person as an Employee or a Manager, and (for an Employee, or a Manager reporting further up) who they report to. Powers the Org Chart tab.</p><div className="key-grid"><label className="key" style={{display:'block'}}><span>Tag</span><select className="select" style={{width:'100%'}} value={hierarchyForm.employee_category} onChange={event => setHierarchyForm({...hierarchyForm, employee_category: event.target.value})}><option value="">Unclassified</option><option value="EMPLOYEE">Employee</option><option value="MANAGER">Manager</option></select></label><label className="key" style={{display:'block'}}><span>Reports to</span><select className="select" style={{width:'100%'}} value={hierarchyForm.manager_id} onChange={event => setHierarchyForm({...hierarchyForm, manager_id: event.target.value})}><option value="">No manager assigned</option>{managerOptions.map(m => <option key={m.id} value={m.id}>{m.display_name}</option>)}</select></label></div><div style={{display:'flex',alignItems:'center',gap:10,marginTop:14}}><button className="btn btn-primary" disabled={savingHierarchy} onClick={() => void saveHierarchy()}>{savingHierarchy ? 'Saving...' : 'Save'}</button>{hierarchyMessage && <span className="footer-note" style={{margin:0}}>{hierarchyMessage}</span>}</div></div></section><aside className="panel">
     <div className="panel-head"><h2>Groups</h2></div>
     <div className="detail-section">{accessLoading ? <div className="empty">Loading groups...</div> : accessError ? <div className="notice">{accessError}</div> : groupItems.length === 0 ? <div className="notice">Not a member of any group.</div> : <div className="timeline" style={{padding:0}}>{groupItems.map(renderAccessItem)}</div>}</div>
     <div className="panel-head"><h2>Applications</h2></div>
@@ -1672,6 +1752,7 @@ function MyAccess() {
   const { data: batches } = useApiResource<ApiPackageBatch[]>('/api/v1/packages/my-package-batches');
   const maxHours = policy?.max_self_activation_hours ?? 8;
   const [activateTarget, setActivateTarget] = useState<{ ids: string[]; label: string } | null>(null);
+  const [expandedPackages, setExpandedPackages] = useState<string[]>([]);
   const [durationHours, setDurationHours] = useState('');
   const [activateJustification, setActivateJustification] = useState('');
   const [activateMessage, setActivateMessage] = useState('');
@@ -1770,8 +1851,10 @@ function MyAccess() {
           const warnings = row.kind === 'single' ? (sodWarnings[row.assignment.id] || []) : Array.from(new Set(row.assignments.flatMap(a => sodWarnings[a.id] || [])));
           const warningTitle = warnings.length > 0 ? `Activating this may conflict with Separation-of-Duties polic${warnings.length === 1 ? 'y' : 'ies'}: ${warnings.join(', ')}` : undefined;
           return row.kind === 'single'
-          ? <div key={row.assignment.id} className="activity-row"><span className="avatar"><Shield size={14}/></span><div className="activity-copy"><strong>{row.assignment.resource_display_name || row.assignment.resource_id}</strong><small>{row.assignment.resource_type}{row.assignment.package_name ? ` · ${row.assignment.package_name}` : ''} · {row.assignment.assignment_type === 'TEMPORARY' && row.assignment.expiration_time ? `Activate by ${formatDateTime(row.assignment.expiration_time, timezone)}` : row.assignment.sod_exception_expires_at ? `Eligible until the SoD exception expires (${formatDateTime(row.assignment.sod_exception_expires_at, timezone)})` : 'No activation deadline'}</small></div>{warnings.length > 0 && <span className="badge danger" title={warningTitle} style={{marginRight:8}}>⚠ SoD conflict</span>}<button className="btn btn-primary" onClick={() => openActivate([row.assignment.id], row.assignment.resource_display_name || 'this access')}>Activate <ArrowRight size={13}/></button></div>
-          : <div key={row.batch.package_id} className="activity-row"><span className="avatar">📦</span><div className="activity-copy"><strong>{row.batch.package_name}</strong><small>PACKAGE · {row.assignments.length} items</small></div>{warnings.length > 0 && <span className="badge danger" title={warningTitle} style={{marginRight:8}}>⚠ SoD conflict</span>}<button className="btn btn-primary" onClick={() => openActivate(row.assignments.map(a => a.id), `"${row.batch.package_name}" (${row.assignments.length} items)`)}>Activate all <ArrowRight size={13}/></button></div>;
+          ? <div key={row.assignment.id} className="activity-row"><span className="avatar"><Shield size={14}/></span><div className="activity-copy"><strong>{row.assignment.resource_display_name || row.assignment.resource_id}</strong><small>{row.assignment.resource_type}{row.assignment.package_name ? ` · ${row.assignment.package_name}` : ''} · {row.assignment.assignment_type === 'TEMPORARY' && row.assignment.expiration_time ? `Activate by ${formatDateTime(row.assignment.expiration_time, timezone)}` : row.assignment.sod_exception_expires_at ? `Eligible until the SoD exception expires (${formatDateTime(row.assignment.sod_exception_expires_at, timezone)})` : 'No activation deadline'}</small></div><span style={{display:'flex',alignItems:'center',gap:8}}>{warnings.length > 0 && <span className="badge danger" title={warningTitle}>⚠ SoD conflict</span>}<button className="btn btn-primary" onClick={() => openActivate([row.assignment.id], row.assignment.resource_display_name || 'this access')}>Activate <ArrowRight size={13}/></button></span></div>
+          : <Fragment key={row.batch.package_id}><div className="activity-row"><span className="avatar">📦</span><div className="activity-copy"><button type="button" onClick={() => setExpandedPackages(prev => prev.includes(row.batch.package_id) ? prev.filter(id => id !== row.batch.package_id) : [...prev, row.batch.package_id])} style={{border:'none',background:'none',padding:0,display:'inline-flex',alignItems:'center',gap:6,fontWeight:700,color:'inherit',cursor:'pointer',font:'inherit'}}><ChevronRight size={14} style={{transform: expandedPackages.includes(row.batch.package_id) ? 'rotate(90deg)' : 'none', transition:'transform 0.1s'}}/>{row.batch.package_name}</button><small>PACKAGE · {row.assignments.length} items · click to activate just one</small></div><span style={{display:'flex',alignItems:'center',gap:8}}>{warnings.length > 0 && <span className="badge danger" title={warningTitle}>⚠ SoD conflict</span>}<button className="btn btn-primary" onClick={() => openActivate(row.assignments.map(a => a.id), `"${row.batch.package_name}" (${row.assignments.length} items)`)}>Activate all <ArrowRight size={13}/></button></span></div>
+            {expandedPackages.includes(row.batch.package_id) && row.assignments.map(a => <div key={a.id} className="activity-row" style={{paddingLeft:16,background:'#fafbfb'}}><span/><div className="activity-copy"><strong>{a.resource_display_name || a.resource_id}</strong><small>{a.resource_type} · from {row.batch.package_name}</small></div><span style={{display:'flex',alignItems:'center',gap:8}}>{(sodWarnings[a.id] || []).length > 0 && <span className="badge danger" title={`Activating this may conflict with Separation-of-Duties: ${(sodWarnings[a.id] || []).join(', ')}`}>⚠ SoD conflict</span>}<button className="btn" onClick={() => openActivate([a.id], a.resource_display_name || 'this access')}>Activate <ArrowRight size={13}/></button></span></div>)}
+          </Fragment>;
         })}
       </div>
     </div>
@@ -2092,7 +2175,7 @@ function AssignmentsInteractive() {
   </Page>;
 }
 function AssignmentsPage() { return <AssignmentsInteractive />; }
-const emptyPackageForm = { name: '', description: '', items: [] as { resource_type: string; resource_id: string; app_role_external_id: string }[], principals: [] as { principal_type: string; principal_id: string }[], default_approver_id: '', default_fallback_approver_id: '', fallback_unlock_hours: '' };
+const emptyPackageForm = { name: '', description: '', owner_ids: [] as string[], items: [] as { resource_type: string; resource_id: string; app_role_external_id: string }[], principals: [] as { principal_type: string; principal_id: string }[], default_approver_id: '', default_fallback_approver_id: '', fallback_unlock_hours: '' };
 const emptyPackageAssignForm = { target_type: 'USER', user_id: '', group_id: '', assignment_type: 'PERMANENT', start_date: '', start_clock: '', end_date: '', end_clock: '', approver_id: '', justification: '' };
 function AccessPackagesInteractive() {
   const auth = useAuth();
@@ -2158,7 +2241,7 @@ function AccessPackagesInteractive() {
   const openCreate = () => { setEditingPackageId(null); setForm(emptyPackageForm); setFormMessage(''); setOpen(true); };
   const openEdit = (pkg: ApiPackage) => {
     setEditingPackageId(pkg.id);
-    setForm({ name: pkg.name, description: pkg.description || '', items: pkg.items.map(item => ({ resource_type: item.resource_type, resource_id: item.resource_id, app_role_external_id: item.app_role_external_id || '' })), principals: [], default_approver_id: '', default_fallback_approver_id: '', fallback_unlock_hours: '' });
+    setForm({ name: pkg.name, description: pkg.description || '', owner_ids: (pkg.owners || []).map(o => o.user_id), items: pkg.items.map(item => ({ resource_type: item.resource_type, resource_id: item.resource_id, app_role_external_id: item.app_role_external_id || '' })), principals: [], default_approver_id: '', default_fallback_approver_id: '', fallback_unlock_hours: '' });
     setFormMessage(''); setOpen(true);
   };
 
@@ -2174,6 +2257,7 @@ function AccessPackagesInteractive() {
     setSaving(true); setFormMessage('');
     try {
       const payload: Record<string, unknown> = { name: form.name.trim(), description: form.description.trim() || undefined, items: form.items.map(item => ({ resource_type: item.resource_type, resource_id: item.resource_id, app_role_external_id: item.resource_type === 'APPLICATION' ? item.app_role_external_id : undefined })) };
+      payload.owner_ids = form.owner_ids;
       if (!editingPackageId) {
         payload.principals = form.principals;
         if (form.default_approver_id) payload.default_approver_id = form.default_approver_id;
@@ -2232,6 +2316,11 @@ function AccessPackagesInteractive() {
         <div className="key-grid">
           <label className="key"><span>Name</span><input className="select" style={{width:'100%'}} value={form.name} onChange={event => setForm({...form, name: event.target.value})}/></label>
           <label className="key"><span>Description (optional)</span><input className="select" style={{width:'100%'}} value={form.description} onChange={event => setForm({...form, description: event.target.value})}/></label>
+        </div>
+        <div style={{marginTop:14}}>
+          <div className="key"><span>Owners — can rename this package and remove items from it in their own portal (My Packages), nothing else</span></div>
+          <select className="select" value="" onChange={event => { const id = event.target.value; if (id && !form.owner_ids.includes(id)) setForm({...form, owner_ids: [...form.owner_ids, id]}); }}><option value="">Add an owner…</option>{(users || []).filter(u => !form.owner_ids.includes(u.id)).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select>
+          {form.owner_ids.length > 0 && <div style={{display:'flex',flexWrap:'wrap',gap:8,marginTop:8}}>{form.owner_ids.map(id => <span key={id} className="badge neutral" style={{display:'inline-flex',alignItems:'center',gap:6}}>{(users || []).find(u => u.id === id)?.display_name || id}<button type="button" className="btn" aria-label="Remove owner" onClick={() => setForm({...form, owner_ids: form.owner_ids.filter(x => x !== id)})} style={{padding:'0 6px',minWidth:0}}><X size={11}/></button></span>)}</div>}
         </div>
         {!editingPackageId && <>
           <div className="key" style={{marginTop:18,marginBottom:8}}><span>1. Approval flow — set this up before adding items</span></div>
@@ -2465,12 +2554,68 @@ function GroupsPage() {
   </Page>;
 }
 
+interface ApiGroupRoleMapping { id: string; source_group_id: string; source_group_name: string; resource_type: string; resource_id: string; resource_display_name: string; app_role_external_id: string | null; assignment_type: string; status: string; created_at: string; updated_at: string; }
+const emptyGroupRoleMappingForm = { resource_type: 'ROLE', resource_id: '', app_role_external_id: '', assignment_type: 'PERMANENT' };
+interface ApiGroupOwner { user_id: string; display_name: string | null; email: string | null; }
+// AccessPilot-side group owners (nothing is written to Entra) — used e.g. to suggest a reviewer when an Access
+// Review is scoped to this group.
+function GroupOwnersSection({ groupId }: { groupId: string }) {
+  const auth = useAuth();
+  const { data: owners, reload } = useApiResource<ApiGroupOwner[]>(`/api/v1/groups/${groupId}/owners`);
+  const { data: users } = useApiResource<ApiUser[]>('/api/v1/users');
+  const [message, setMessage] = useState('');
+  const save = async (userIds: string[]) => {
+    setMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/groups/${groupId}/owners`, { method: 'PUT', body: JSON.stringify({ user_ids: userIds }) });
+      if (response.ok) reload(); else setMessage((await response.json().catch(() => null))?.error?.message || 'Unable to update owners.');
+    } catch { setMessage('Unable to reach the backend.'); }
+  };
+  const ids = (owners || []).map(o => o.user_id);
+  return <>
+    <div className="detail-title"><h2>Owners</h2></div>
+    <p className="subtitle" style={{marginTop:-8,marginBottom:12}}>People accountable for this group. Recorded in AccessPilot only — used to suggest the reviewer of an Access Review for this group; nothing changes in Entra.</p>
+    <select className="select" value="" onChange={event => { const id = event.target.value; if (id && !ids.includes(id)) void save([...ids, id]); }}><option value="">Add an owner…</option>{(users || []).filter(u => !ids.includes(u.id)).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select>
+    {message && <div className="notice" style={{marginTop:10}}>{message}</div>}
+    {(owners || []).length === 0 ? <p className="subtitle" style={{marginTop:10}}>No owners yet.</p> : <div style={{display:'flex',flexWrap:'wrap',gap:8,marginTop:10}}>{(owners || []).map(o => <span key={o.user_id} className="badge neutral" style={{display:'inline-flex',alignItems:'center',gap:6}}>{o.display_name || o.user_id}<button type="button" className="btn" aria-label="Remove owner" onClick={() => void save(ids.filter(x => x !== o.user_id))} style={{padding:'0 6px',minWidth:0}}><X size={11}/></button></span>)}</div>}
+  </>;
+}
 function GroupDetail() {
+  const auth = useAuth();
   const timezone = useAppTimezone();
   const { id } = useParams();
   const { data: group, error, loading } = useApiResource<ApiGroup>(`/api/v1/groups/${id}`);
   const { data: members, error: membersError, loading: membersLoading } = useApiResource<ApiUser[]>(`/api/v1/groups/${id}/members`);
   const { data: summary } = useApiResource<ApiGroupAccessSummary>(`/api/v1/groups/${id}/access-summary`);
+  const { data: mappings, error: mappingsError, loading: mappingsLoading, reload: reloadMappings } = useApiResource<ApiGroupRoleMapping[]>(`/api/v1/policies/group-role-mappings?group_id=${id}`);
+  const { data: roles } = useApiResource<ApiRole[]>('/api/v1/roles');
+  const { data: applications } = useApiResource<ApiApplication[]>('/api/v1/applications');
+  const [mappingOpen, setMappingOpen] = useState(false);
+  const [mappingSaving, setMappingSaving] = useState(false);
+  const [mappingMessage, setMappingMessage] = useState('');
+  const [mappingForm, setMappingForm] = useState(emptyGroupRoleMappingForm);
+  const mappingTargets: Array<ApiRole | ApiApplication> = mappingForm.resource_type === 'ROLE' ? (roles || []) : (applications || []);
+  const selectedApplication = mappingForm.resource_type === 'APPLICATION' ? (applications || []).find(a => a.id === mappingForm.resource_id) : undefined;
+
+  const createMapping = async () => {
+    if (!mappingForm.resource_id) { setMappingMessage('Select a target.'); return; }
+    setMappingSaving(true); setMappingMessage('');
+    try {
+      const response = await auth.apiRequest('/api/v1/policies/group-role-mappings', { method: 'POST', body: JSON.stringify({ source_group_id: id, resource_type: mappingForm.resource_type, resource_id: mappingForm.resource_id, app_role_external_id: mappingForm.app_role_external_id || undefined, assignment_type: mappingForm.assignment_type }) });
+      const body = await response.json().catch(() => null);
+      if (response.ok) { setMappingOpen(false); setMappingForm(emptyGroupRoleMappingForm); reloadMappings(); }
+      else setMappingMessage(body?.error?.message || 'Unable to create this mapping.');
+    } catch { setMappingMessage('Unable to reach the backend.'); } finally { setMappingSaving(false); }
+  };
+  const toggleMappingStatus = async (mapping: ApiGroupRoleMapping) => {
+    await auth.apiRequest(`/api/v1/policies/group-role-mappings/${mapping.id}`, { method: 'PATCH', body: JSON.stringify({ status: mapping.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE' }) });
+    reloadMappings();
+  };
+  const removeMapping = async (mapping: ApiGroupRoleMapping) => {
+    if (!window.confirm(`Delete this mapping to "${mapping.resource_display_name}"? This does not remove access already granted.`)) return;
+    await auth.apiRequest(`/api/v1/policies/group-role-mappings/${mapping.id}`, { method: 'DELETE' });
+    reloadMappings();
+  };
 
   if (loading) return <Page eyebrow="ADMINISTRATION" title="Loading..." subtitle=""><div className="empty">Loading group...</div></Page>;
   if (error || !group) return <Page eyebrow="ADMINISTRATION" title="Group" subtitle=""><div className="empty">{error || 'Group not found.'}</div></Page>;
@@ -2488,6 +2633,7 @@ function GroupDetail() {
             <div className="key"><span>Last synced</span><strong>{group.last_synced_at ? formatDateTime(group.last_synced_at, timezone) : 'Never'}</strong></div>
           </div>
         </div>
+        <div className="detail-section"><GroupOwnersSection groupId={id || ''}/></div>
         <div className="detail-section">
           <div className="detail-title"><h2>Members</h2></div>
           {membersLoading ? <div className="empty">Loading members...</div> : membersError ? <div className="empty">{membersError}</div> : !members || members.length === 0 ? <div className="empty">No members synced for this group.</div> : <div className="table-wrap"><table><thead><tr><th>User</th><th>Department</th><th>Status</th></tr></thead><tbody>
@@ -2512,6 +2658,26 @@ function GroupDetail() {
         </div>
       </section>
     </div>
+
+    <section className="panel">
+      <div className="panel-head"><h2>Role &amp; app mappings</h2><button className="btn btn-primary" onClick={() => { setMappingOpen(true); setMappingMessage(''); }}><Plus size={14}/> Add mapping</button></div>
+      <div className="detail-section">
+        <p className="subtitle" style={{ marginTop: 0, marginBottom: 14 }}>Membership-driven auto-assignment: everyone currently in <strong>{group.name}</strong> becomes <strong>eligible</strong> for the linked Role or Application(+app role) — the same real, audited grant a birthright policy makes, just triggered by group membership instead of a department/job-title match. Re-evaluated automatically whenever someone joins or leaves this group, and immediately whenever a mapping here is added, disabled, or removed.</p>
+        {mappingOpen && <div className="notice" style={{ marginBottom: 14 }}>
+          <div className="key-grid" style={{ marginBottom: 10 }}>
+            <label className="key"><span>Grant</span><select className="select" value={mappingForm.resource_type} onChange={event => setMappingForm({ ...mappingForm, resource_type: event.target.value, resource_id: '', app_role_external_id: '' })}><option value="ROLE">Directory role</option><option value="APPLICATION">Application</option></select></label>
+            <label className="key"><span>Target</span><select className="select" value={mappingForm.resource_id} onChange={event => setMappingForm({ ...mappingForm, resource_id: event.target.value, app_role_external_id: '' })}><option value="">Select a target</option>{mappingTargets.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
+            {mappingForm.resource_type === 'APPLICATION' && selectedApplication && selectedApplication.app_roles && selectedApplication.app_roles.length > 0 && <label className="key"><span>App role</span><select className="select" value={mappingForm.app_role_external_id} onChange={event => setMappingForm({ ...mappingForm, app_role_external_id: event.target.value })}><option value="">Default access</option>{selectedApplication.app_roles.map(role => <option key={role.id} value={role.id}>{role.name}</option>)}</select></label>}
+            <label className="key"><span>Assignment type</span><select className="select" value={mappingForm.assignment_type} onChange={event => setMappingForm({ ...mappingForm, assignment_type: event.target.value })}><option value="PERMANENT">Permanent</option><option value="TEMPORARY">Temporary</option></select></label>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}><button className="btn btn-primary" disabled={mappingSaving} onClick={() => void createMapping()}>{mappingSaving ? 'Saving...' : 'Create mapping'}</button><button className="btn" onClick={() => { setMappingOpen(false); setMappingForm(emptyGroupRoleMappingForm); }}>Cancel</button></div>
+        </div>}
+        {mappingMessage && <div className="notice" style={{ marginBottom: 14 }}>{mappingMessage}</div>}
+        <div className="table-wrap">{mappingsLoading ? <div className="empty">Loading...</div> : mappingsError ? <div className="empty">{mappingsError}</div> : !mappings || mappings.length === 0 ? <div className="empty">No role or app mappings for this group yet.</div> : <table><thead><tr><th>Grants</th><th>Type</th><th>Status</th><th></th></tr></thead><tbody>
+          {mappings.map(mapping => <tr key={mapping.id}><td className="user-name">{mapping.resource_type === 'ROLE' ? 'Role' : 'Application'}: {mapping.resource_display_name}</td><td>{mapping.assignment_type}</td><td><StatusBadge status={mapping.status}/></td><td style={{ display: 'flex', gap: 6 }}><button className="btn" onClick={() => void toggleMappingStatus(mapping)}>{mapping.status === 'ACTIVE' ? 'Disable' : 'Enable'}</button><button className="btn" onClick={() => void removeMapping(mapping)}>Delete</button></td></tr>)}
+        </tbody></table>}</div>
+      </div>
+    </section>
   </Page>;
 }
 function RolesPage() {
@@ -2524,20 +2690,89 @@ function RolesPage() {
   const filteredRoles = (roles || []).filter(r => (!privilegedFilter || String(r.is_privileged) === privilegedFilter) && (!search || r.name.toLowerCase().includes(search.toLowerCase())));
   return <Page eyebrow="ADMINISTRATION" title="Directory roles" subtitle="Privileged and standard roles available through AccessPilot."><TablePanel toolbar={<Toolbar placeholder="Search roles" searchValue={search} onSearchChange={setSearch} filterLabel="All roles" filterValue={privilegedFilter} onFilterChange={setPrivilegedFilter} filterOptions={[{value:'true',label:'Privileged'},{value:'false',label:'Standard'}]}/>}>{loading ? <div className="empty">Loading roles...</div> : error ? <div className="empty">{error}</div> : !roles || roles.length === 0 ? <div className="empty">No roles found.</div> : filteredRoles.length === 0 ? <div className="empty">No roles match this filter.</div> : <table><thead><tr><th>Role</th><th>Description</th><th>Provider</th><th>Privileged</th><th>Status</th></tr></thead><tbody>{filteredRoles.map(r => <tr key={r.id}><td className="user-name">{r.name}</td><td>{r.description || '—'}</td><td>Microsoft Entra ID</td><td><span className={`risk ${r.is_privileged ? 'risk-high' : 'risk-low'}`}>{r.is_privileged ? 'Yes' : 'No'}</span></td><td><StatusBadge status={r.status}/></td></tr>)}</tbody></table>}</TablePanel></Page>;
 }
-interface ApiBirthrightPolicy { id: string; name: string; match_field: string; match_value: string; resource_type: string; resource_id: string; app_role_external_id: string | null; assignment_type: string; status: string; created_at: string; }
+interface ApiBirthrightPolicy { id: string; name: string; match_field: string | null; match_value: string | null; resource_type: string | null; resource_id: string | null; app_role_external_id: string | null; assignment_type: string; status: string; external_policy_id: string | null; is_advanced: boolean; conditions_count: number; actions_count: number; reconciliation_enabled: boolean; created_at: string; }
+interface ApiBirthrightActionResolution { resourceType: string; resource: string; found: boolean; resolvedId: string | null; resolvedName: string | null; error: string | null; }
+const birthrightJsonTemplate = `{
+  "policyId": "BR-001",
+  "policyType": "BIRTHRIGHT",
+  "name": "IT Employee Access",
+  "scope": { "identityType": "EMPLOYEE" },
+  "rule": {
+    "operator": "AND",
+    "conditions": [
+      { "field": "department", "operator": "EQUALS", "value": "IT" },
+      { "field": "employmentStatus", "operator": "EQUALS", "value": "ACTIVE" }
+    ]
+  },
+  "actions": [
+    { "action": "ASSIGN", "resourceType": "GROUP", "resource": "GRP-IT-EMPLOYEES" },
+    { "action": "ASSIGN", "resourceType": "APPLICATION", "resource": "Microsoft-365", "appRoleExternalId": "" }
+  ],
+  "reconciliation": { "enabled": true, "removeWhenConditionFails": true },
+  "audit": { "enabled": true }
+}`;
 function BirthrightPoliciesPanel() {
   const auth = useAuth();
   const { data: birthrightPolicies, error: birthrightError, loading: birthrightLoading, reload: reloadBirthright } = useApiResource<ApiBirthrightPolicy[]>('/api/v1/policies/birthright');
   const { data: groups } = useApiResource<ApiGroup[]>('/api/v1/groups');
   const { data: roles } = useApiResource<ApiRole[]>('/api/v1/roles');
   const { data: applications } = useApiResource<ApiApplication[]>('/api/v1/applications');
+  const { data: packages } = useApiResource<ApiPackage[]>('/api/v1/packages');
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   const emptyForm = { name: '', match_field: 'department', match_value: '', resource_type: 'GROUP', resource_id: '', assignment_type: 'PERMANENT' };
   const [form, setForm] = useState(emptyForm);
-  const targets: Array<ApiGroup | ApiRole | ApiApplication> = form.resource_type === 'GROUP' ? (groups || []) : form.resource_type === 'ROLE' ? (roles || []) : (applications || []);
-  const resourceLabel = (p: ApiBirthrightPolicy) => (p.resource_type === 'GROUP' ? groups : p.resource_type === 'ROLE' ? roles : applications)?.find(t => t.id === p.resource_id)?.name || p.resource_id;
+  const targets: Array<ApiGroup | ApiRole | ApiApplication | ApiPackage> = form.resource_type === 'GROUP' ? (groups || []) : form.resource_type === 'ROLE' ? (roles || []) : form.resource_type === 'APPLICATION' ? (applications || []) : (packages || []);
+  const resourceLabel = (p: ApiBirthrightPolicy) => (p.resource_type === 'GROUP' ? groups : p.resource_type === 'ROLE' ? roles : p.resource_type === 'APPLICATION' ? applications : packages)?.find(t => t.id === p.resource_id)?.name || p.resource_id;
+
+  // JSON create/view/edit — a separate, additive path alongside the simple form above. `jsonPolicyId === 'new'`
+  // means creating (POST .../json); any other id means viewing/editing that existing policy (GET then PUT
+  // .../json) — works uniformly whether that policy was originally created here or via the simple form, since
+  // the backend represents any policy in this same JSON shape.
+  const [jsonPolicyId, setJsonPolicyId] = useState<string | null>(null);
+  const [jsonText, setJsonText] = useState('');
+  const [jsonSaving, setJsonSaving] = useState(false);
+  const [jsonMessage, setJsonMessage] = useState('');
+  const [checkResults, setCheckResults] = useState<ApiBirthrightActionResolution[] | null>(null);
+  const [checking, setChecking] = useState(false);
+  const openJsonCreate = () => { setJsonPolicyId('new'); setJsonText(birthrightJsonTemplate); setJsonMessage(''); setCheckResults(null); };
+  const openJsonView = async (policy: ApiBirthrightPolicy) => {
+    setJsonPolicyId(policy.id); setJsonText('Loading...'); setJsonMessage(''); setCheckResults(null);
+    try {
+      const response = await auth.apiRequest(`/api/v1/policies/birthright/${policy.id}/json`);
+      const body = await response.json().catch(() => null);
+      setJsonText(response.ok ? JSON.stringify(body, null, 2) : '');
+      if (!response.ok) setJsonMessage(body?.error?.message || 'Unable to load this policy.');
+    } catch { setJsonText(''); setJsonMessage('Unable to reach the backend.'); }
+  };
+  // "Check resources" — resolves every action's `resource` name (e.g. an Application name) against the real
+  // directory and shows what it found, so the admin can confirm (Yes) or go back and fix it (No) before saving.
+  // A preview only: hitting this never creates or changes anything.
+  const checkResources = async () => {
+    let parsed: { actions?: unknown };
+    try { parsed = JSON.parse(jsonText); } catch { setJsonMessage('Not valid JSON — fix the syntax and try again.'); return; }
+    if (!Array.isArray(parsed.actions) || parsed.actions.length === 0) { setJsonMessage('Add at least one entry under "actions" first.'); return; }
+    setChecking(true); setJsonMessage(''); setCheckResults(null);
+    try {
+      const response = await auth.apiRequest('/api/v1/policies/birthright/resolve-actions', { method: 'POST', body: JSON.stringify({ actions: parsed.actions }) });
+      const body = await response.json().catch(() => null);
+      if (response.ok) setCheckResults(body.results);
+      else setJsonMessage(body?.error?.message || 'Unable to check these resources.');
+    } catch { setJsonMessage('Unable to reach the backend.'); } finally { setChecking(false); }
+  };
+  const saveJson = async () => {
+    let parsed: unknown;
+    try { parsed = JSON.parse(jsonText); } catch { setJsonMessage('Not valid JSON — fix the syntax and try again.'); return; }
+    setJsonSaving(true); setJsonMessage('');
+    try {
+      const isNew = jsonPolicyId === 'new';
+      const response = await auth.apiRequest(isNew ? '/api/v1/policies/birthright/json' : `/api/v1/policies/birthright/${jsonPolicyId}/json`, { method: isNew ? 'POST' : 'PUT', body: JSON.stringify(parsed) });
+      const body = await response.json().catch(() => null);
+      if (response.ok) { setJsonPolicyId(null); reloadBirthright(); }
+      else setJsonMessage(body?.error?.message || 'Unable to save this policy.');
+    } catch { setJsonMessage('Unable to reach the backend.'); } finally { setJsonSaving(false); }
+  };
 
   const create = async () => {
     if (!form.name.trim() || !form.match_value.trim() || !form.resource_id) { setMessage('Complete every field.'); return; }
@@ -2560,22 +2795,136 @@ function BirthrightPoliciesPanel() {
   };
 
   return <section className="panel" style={{marginBottom:18}}>
-    <div className="panel-head"><h2>Birthright policies</h2><button className="btn btn-primary" onClick={() => { setOpen(true); setMessage(''); }}><Plus size={14}/> Add rule</button></div>
+    <div className="panel-head"><h2>Birthright policies</h2><div style={{display:'flex',gap:8}}><button className="btn" onClick={openJsonCreate}><Plus size={14}/> New via JSON</button><button className="btn btn-primary" onClick={() => { setOpen(true); setMessage(''); }}><Plus size={14}/> Add rule</button></div></div>
     <div className="detail-section">
-      <p className="subtitle" style={{marginBottom:14}}>Attribute-driven auto-assignment: when a joiner or mover's <code>department</code> or <code>job title</code> matches a rule, they're automatically made <strong>eligible</strong> for that Group, Role, or Application — same as any other assignment, still activated by hand. Evaluated automatically whenever an Onboarding CSV import is committed.</p>
+      <p className="subtitle" style={{marginBottom:14}}>Attribute-driven auto-assignment: when a joiner or mover's <code>department</code> or <code>job title</code> matches a rule, they're automatically made <strong>eligible</strong> for that Group, Role, Application, or every item in an Access Package — same as any other assignment, still activated by hand. A Package rule grants each of its items individually (not as one grouped package request), so mover reconciliation can revoke exactly the items whose rule no longer applies. For a rule with several AND/OR conditions or several grants at once, use <strong>New via JSON</strong> — any existing policy can also be opened as JSON via its <strong>View/Edit JSON</strong> action. Evaluated automatically whenever an Onboarding CSV import is committed.</p>
+      {jsonPolicyId && <form role="dialog" aria-modal="true" className="notice" style={{marginBottom:14}} onSubmit={event => { event.preventDefault(); void saveJson(); }}>
+        <div className="key" style={{marginBottom:8}}><span>{jsonPolicyId === 'new' ? 'New policy — JSON' : 'Edit policy — JSON'}</span></div>
+        <textarea className="select" style={{width:'100%',minHeight:320,fontFamily:'monospace',fontSize:12,whiteSpace:'pre'}} value={jsonText} onChange={event => { setJsonText(event.target.value); setCheckResults(null); }} spellCheck={false}/>
+        {jsonMessage && <div className="notice" style={{marginTop:10}}>{jsonMessage}</div>}
+        {checkResults && <div className="key-grid" style={{marginTop:12,marginBottom:4}}>
+          {checkResults.map((r, i) => <div key={i} className="key"><span>{r.resourceType}: {r.resource}</span><strong style={{color: r.found ? '#1a7f4f' : '#b3261e'}}>{r.found ? `✓ Found — "${r.resolvedName}"` : `✗ Not found${r.error ? ` — ${r.error}` : ''}`}</strong></div>)}
+        </div>}
+        <div style={{display:'flex',gap:8,marginTop:12,flexWrap:'wrap'}}>
+          <button type="button" className="btn" disabled={checking} onClick={() => void checkResources()}>{checking ? 'Checking...' : 'Check resources'}</button>
+          {checkResults && (checkResults.every(r => r.found)
+            ? <><button type="button" className="btn btn-primary" disabled={jsonSaving} onClick={() => void saveJson()}>Yes, looks correct — Save</button><button type="button" className="btn" onClick={() => setCheckResults(null)}>No, let me fix it</button></>
+            : <span className="footer-note">Fix the resource(s) marked ✗ above, then check again.</span>)}
+          <button type="submit" className="btn btn-primary" disabled={jsonSaving}>{jsonSaving ? 'Saving...' : 'Save'}</button>
+          <button type="button" className="btn" onClick={() => setJsonPolicyId(null)}>Cancel</button>
+        </div>
+      </form>}
       {open && <div className="notice" style={{marginBottom:14}}>
         <div className="key-grid" style={{marginBottom:10}}>
           <label className="key"><span>Rule name</span><input className="select" value={form.name} onChange={event => setForm({...form, name: event.target.value})} placeholder="e.g. Finance department access"/></label>
           <label className="key"><span>Match on</span><select className="select" value={form.match_field} onChange={event => setForm({...form, match_field: event.target.value})}><option value="department">Department</option><option value="job_title">Job title</option></select></label>
           <label className="key"><span>Equals</span><input className="select" value={form.match_value} onChange={event => setForm({...form, match_value: event.target.value})} placeholder="e.g. Finance"/></label>
-          <label className="key"><span>Grant</span><select className="select" value={form.resource_type} onChange={event => setForm({...form, resource_type: event.target.value, resource_id: ''})}><option value="GROUP">Group</option><option value="ROLE">Role</option><option value="APPLICATION">Application</option></select></label>
+          <label className="key"><span>Grant</span><select className="select" value={form.resource_type} onChange={event => setForm({...form, resource_type: event.target.value, resource_id: ''})}><option value="GROUP">Group</option><option value="ROLE">Role</option><option value="APPLICATION">Application</option><option value="PACKAGE">Access Package</option></select></label>
           <label className="key"><span>Target</span><select className="select" value={form.resource_id} onChange={event => setForm({...form, resource_id: event.target.value})}><option value="">Select a target</option>{targets.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
           <label className="key"><span>Assignment type</span><select className="select" value={form.assignment_type} onChange={event => setForm({...form, assignment_type: event.target.value})}><option value="PERMANENT">Permanent</option><option value="TEMPORARY">Temporary</option></select></label>
         </div>
         <div style={{display:'flex',gap:8}}><button className="btn btn-primary" disabled={saving} onClick={() => void create()}>{saving ? 'Saving...' : 'Create rule'}</button><button className="btn" onClick={() => { setOpen(false); setForm(emptyForm); }}>Cancel</button></div>
       </div>}
       {message && <div className="notice" style={{marginBottom:14}}>{message}</div>}
-      <div className="table-wrap">{birthrightLoading ? <div className="empty">Loading...</div> : birthrightError ? <div className="empty">{birthrightError}</div> : !birthrightPolicies || birthrightPolicies.length === 0 ? <div className="empty">No birthright policies yet.</div> : <table><thead><tr><th>Rule</th><th>Condition</th><th>Grants</th><th>Type</th><th>Status</th><th></th></tr></thead><tbody>{birthrightPolicies.map(p => <tr key={p.id}><td className="user-name">{p.name}</td><td>{p.match_field} = {p.match_value}</td><td>{p.resource_type.toLowerCase()}: {resourceLabel(p)}</td><td>{p.assignment_type}</td><td><StatusBadge status={p.status}/></td><td style={{display:'flex',gap:6}}><button className="btn" onClick={() => void toggleStatus(p)}>{p.status === 'ACTIVE' ? 'Disable' : 'Enable'}</button><button className="btn" onClick={() => void remove(p)}>Delete</button></td></tr>)}</tbody></table>}</div>
+      <div className="table-wrap">{birthrightLoading ? <div className="empty">Loading...</div> : birthrightError ? <div className="empty">{birthrightError}</div> : !birthrightPolicies || birthrightPolicies.length === 0 ? <div className="empty">No birthright policies yet.</div> : <table><thead><tr><th>Rule</th><th>Condition</th><th>Grants</th><th>Type</th><th>Status</th><th></th></tr></thead><tbody>{birthrightPolicies.map(p => <tr key={p.id}>
+        <td className="user-name">{p.name}{p.external_policy_id ? <span className="footer-note" style={{display:'block'}}>{p.external_policy_id}</span> : null}</td>
+        <td>{p.is_advanced ? `${p.conditions_count} condition${p.conditions_count === 1 ? '' : 's'} (JSON)` : `${p.match_field} = ${p.match_value}`}</td>
+        <td>{p.is_advanced ? `${p.actions_count} grant${p.actions_count === 1 ? '' : 's'}` : `${(p.resource_type || '').toLowerCase()}: ${resourceLabel(p)}`}</td>
+        <td>{p.is_advanced ? '—' : p.assignment_type}{!p.reconciliation_enabled && <span className="badge neutral" style={{marginLeft:6}} title="This policy's grants are never auto-revoked, even once the condition stops matching.">Sticky</span>}</td>
+        <td><StatusBadge status={p.status}/></td>
+        <td style={{display:'flex',gap:6}}><button className="btn" onClick={() => void openJsonView(p)}>View/Edit JSON</button><button className="btn" onClick={() => void toggleStatus(p)}>{p.status === 'ACTIVE' ? 'Disable' : 'Enable'}</button><button className="btn" onClick={() => void remove(p)}>Delete</button></td>
+      </tr>)}</tbody></table>}</div>
+    </div>
+  </section>;
+}
+function PrivilegedAccountsPanel() {
+  const auth = useAuth();
+  const timezone = useAppTimezone();
+  const { data: users } = useApiResource<ApiUser[]>('/api/v1/users');
+  const { data: puPolicy, reload: reloadPu } = useApiResource<ApiPrivilegedAccountPolicy>('/api/v1/privileged-accounts/policy/PU');
+  const { data: tuPolicy, reload: reloadTu } = useApiResource<ApiPrivilegedAccountPolicy>('/api/v1/privileged-accounts/policy/TU');
+  const { data: requests, error: requestsError, loading: requestsLoading, reload: reloadRequests } = useApiResource<ApiPrivilegedAccountRequest[]>('/api/v1/privileged-accounts/requests');
+  const [approverDrafts, setApproverDrafts] = useState<{ PU: string; TU: string }>({ PU: '', TU: '' });
+  const [savingType, setSavingType] = useState<string | null>(null);
+  const [message, setMessage] = useState('');
+  const [decisionBusyId, setDecisionBusyId] = useState<string | null>(null);
+  const normalUsers = (users || []).filter(u => u.account_type === 'NORMAL');
+
+  const saveApprover = async (accountType: 'PU' | 'TU') => {
+    setSavingType(accountType); setMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/privileged-accounts/policy/${accountType}`, { method: 'PATCH', body: JSON.stringify({ default_approver_id: approverDrafts[accountType] || null }) });
+      if (response.ok) { setApproverDrafts(prev => ({ ...prev, [accountType]: '' })); accountType === 'PU' ? reloadPu() : reloadTu(); }
+      else { const body = await response.json().catch(() => null); setMessage(body?.error?.message || 'Unable to save this policy.'); }
+    } catch { setMessage('Unable to save this policy.'); } finally { setSavingType(null); }
+  };
+
+  const decide = async (request: ApiPrivilegedAccountRequest, action: 'approve' | 'reject') => {
+    if (action === 'reject') {
+      const justification = window.prompt('Reason for rejecting this request?') || '';
+      if (justification.trim().length < 3) return;
+      setDecisionBusyId(request.id);
+      try { await auth.apiRequest(`/api/v1/privileged-accounts/requests/${request.id}/reject`, { method: 'POST', body: JSON.stringify({ justification: justification.trim() }) }); reloadRequests(); }
+      finally { setDecisionBusyId(null); }
+      return;
+    }
+    setDecisionBusyId(request.id);
+    try { await auth.apiRequest(`/api/v1/privileged-accounts/requests/${request.id}/approve`, { method: 'POST' }); reloadRequests(); }
+    finally { setDecisionBusyId(null); }
+  };
+
+  const renderPolicyRow = (accountType: 'PU' | 'TU', policy: ApiPrivilegedAccountPolicy | null) => <div className="key-grid" key={accountType} style={{marginBottom:14}}>
+    <div className="key"><span>{accountType === 'PU' ? 'Privileged (PU)' : 'Test (TU)'} accounts</span><strong>{policy?.approval_required ? `Requires approval — ${policy.default_approver_display_name || 'approver set'}` : 'Auto-provisions immediately (no approver configured)'}</strong></div>
+    <label className="key"><span>Set approver (leave blank for ASAP/auto)</span><select className="select" value={approverDrafts[accountType]} onChange={event => setApproverDrafts(prev => ({ ...prev, [accountType]: event.target.value }))}><option value="">No approver — auto-provision</option>{normalUsers.map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+    <div style={{display:'flex',alignItems:'flex-end'}}><button className="btn btn-primary" disabled={savingType === accountType} onClick={() => void saveApprover(accountType)}>{savingType === accountType ? 'Saving...' : 'Save'}</button></div>
+  </div>;
+
+  return <section className="panel" style={{marginBottom:18}}>
+    <div className="panel-head"><h2>Privileged (PU) / Test (TU) accounts</h2></div>
+    <div className="detail-section">
+      <p className="subtitle" style={{marginBottom:14}}>A separate, mailbox-free Entra identity used only for elevated admin work (PU) or QA/UAT (TU) — deliberately excluded from Birthright and Group Role Mapping automation. Access to anything is always granted manually, one grant at a time, and only once the account is linked to the real person requesting it.</p>
+      {renderPolicyRow('PU', puPolicy)}
+      {renderPolicyRow('TU', tuPolicy)}
+      {message && <div className="notice" style={{marginBottom:14}}>{message}</div>}
+      <div className="panel-head" style={{padding:'14px 0 10px'}}><h2 style={{fontSize:15}}>Requests</h2></div>
+      <div className="table-wrap">{requestsLoading ? <div className="empty">Loading...</div> : requestsError ? <div className="empty">{requestsError}</div> : !requests || requests.length === 0 ? <div className="empty">No privileged/test account requests yet.</div> : <table><thead><tr><th>Requester</th><th>Type</th><th>Justification</th><th>Status</th><th>Requested</th><th></th></tr></thead><tbody>{requests.map(r => <tr key={r.id}><td className="user-name">{r.requester_display_name || r.requester_id}</td><td>{r.account_type}</td><td>{r.justification || '—'}</td><td><StatusBadge status={r.status}/></td><td>{formatDateTime(r.created_at, timezone)}</td><td>{r.status === 'PENDING_APPROVAL' ? <span style={{display:'flex',gap:6}}><button className="btn" disabled={decisionBusyId === r.id} onClick={() => void decide(r, 'approve')}>Approve</button><button className="btn" disabled={decisionBusyId === r.id} onClick={() => void decide(r, 'reject')}>Reject</button></span> : r.failure_reason ? <span className="footer-note">{r.failure_reason}</span> : null}</td></tr>)}</tbody></table>}</div>
+    </div>
+  </section>;
+}
+interface ApiDepartment { id: string; name: string; created_at: string; }
+function DepartmentsPanel() {
+  const auth = useAuth();
+  const { data: departments, error, loading, reload } = useApiResource<ApiDepartment[]>('/api/v1/policies/departments');
+  const [name, setName] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+
+  const add = async () => {
+    if (!name.trim()) return;
+    setSaving(true); setMessage('');
+    try {
+      const response = await auth.apiRequest('/api/v1/policies/departments', { method: 'POST', body: JSON.stringify({ name: name.trim() }) });
+      const body = await response.json().catch(() => null);
+      if (response.ok) { setName(''); reload(); }
+      else setMessage(body?.error?.message || 'Unable to add this department.');
+    } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
+  };
+  const remove = async (department: ApiDepartment) => {
+    if (!window.confirm(`Remove "${department.name}" from the department list? This does not change any user's existing department value.`)) return;
+    await auth.apiRequest(`/api/v1/policies/departments/${department.id}`, { method: 'DELETE' });
+    reload();
+  };
+
+  return <section className="panel" style={{marginBottom:18}}>
+    <div className="panel-head"><h2>Departments</h2></div>
+    <div className="detail-section">
+      <p className="subtitle" style={{marginBottom:14}}>The managed list of department names — populates the Department dropdown on each user's detail page, so it's picked from a known, consistent set instead of free-typed.</p>
+      <div style={{display:'flex',gap:8,alignItems:'flex-end',marginBottom:14,flexWrap:'wrap'}}>
+        <label className="key" style={{minWidth:220}}><span>Department name</span><input className="select" style={{width:'100%'}} value={name} onChange={event => setName(event.target.value)} placeholder="e.g. AppDev" onKeyDown={event => { if (event.key === 'Enter') void add(); }}/></label>
+        <button className="btn btn-primary" disabled={saving || !name.trim()} onClick={() => void add()}><Plus size={14}/> {saving ? 'Adding...' : 'Add'}</button>
+      </div>
+      {message && <div className="notice" style={{marginBottom:14}}>{message}</div>}
+      {loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : !departments || departments.length === 0 ? <div className="empty">No departments added yet.</div> : <div style={{display:'flex',flexWrap:'wrap',gap:8}}>{departments.map(d => <span key={d.id} className="badge neutral" style={{display:'inline-flex',alignItems:'center',gap:6}}>{d.name}<button type="button" className="btn" aria-label={`Remove ${d.name}`} onClick={() => void remove(d)} style={{padding:'0 6px',minWidth:0}}><X size={11}/></button></span>)}</div>}
     </div>
   </section>;
 }
@@ -2597,7 +2946,9 @@ function PoliciesPage() {
   };
   return <Page eyebrow="GOVERNANCE" title="Policies" subtitle="Rules that govern access duration, approvals, and assurance." action={<button className="btn btn-primary"><Plus size={14}/> Create policy</button>}>
     {provider && <section className="panel" style={{marginBottom:18}}><div className="panel-head"><h2>Self-activation (PIM)</h2><span className="badge neutral">Up to {provider.max_self_activation_hours} hours</span></div><div className="detail-section"><p className="subtitle" style={{marginBottom:14}}>The single, universal maximum duration any end user may self-activate their own eligible access for — Group, Role, Application role, or Access Package alike — from their My Access dashboard, mirroring Entra PIM's activation cap. Raising this takes effect immediately for every eligible assignment across the whole tenant.</p><div style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap'}}><label className="key"><span>Maximum self-activation duration (hours)</span><input className="select" type="number" min={1} max={8760} placeholder={String(provider.max_self_activation_hours)} value={activationHoursValue} onChange={event => setActivationHoursValue(event.target.value)}/></label><button className="btn btn-primary" disabled={activationSaving || !activationHoursValue} onClick={() => void saveActivationCap(Number(activationHoursValue))}><Clock3 size={14}/> {activationSaving ? 'Saving...' : 'Save limit'}</button></div>{activationMessage && <div className="notice" style={{marginTop:12}}>{activationMessage}</div>}</div></section>}
+    <DepartmentsPanel/>
     <BirthrightPoliciesPanel/>
+    <PrivilegedAccountsPanel/>
     <TablePanel toolbar={<Toolbar placeholder="Search policies"/>}><table><thead><tr><th>Policy name</th><th>Description</th><th>Scope</th><th>Max duration</th><th>Approval</th><th>MFA</th><th>Ticket</th><th>Status</th><th></th></tr></thead><tbody>{policies.map(p => <tr key={p.name}><td className="user-name">{p.name}</td><td>{p.description}</td><td>{p.scope}</td><td>{p.max}</td><td>{p.approval}</td><td>{p.mfa}</td><td>{p.ticket}</td><td><StatusBadge status={p.status}/></td><td><button className="btn">Edit</button></td></tr>)}</tbody></table></TablePanel>
   </Page>;
 }
@@ -2613,6 +2964,567 @@ function AuditPage() {
   const resultOptions = useMemo(() => Array.from(new Set((logs || []).map(l => l.result))).sort().map(r => ({ value: r, label: r })), [logs]);
   const filteredLogs = (logs || []).filter(l => (!resultFilter || l.result === resultFilter) && (!search || `${l.action} ${l.actor_display_name || ''} ${l.target_type} ${l.target_user_display_name || ''}`.toLowerCase().includes(search.toLowerCase())));
   return <Page eyebrow="GOVERNANCE" title="Audit logs" subtitle="A tamper-evident record of identity and access activity." action={<button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button>}><TablePanel toolbar={<Toolbar placeholder="Search audit events" searchValue={search} onSearchChange={setSearch} filterLabel="All results" filterValue={resultFilter} onFilterChange={setResultFilter} filterOptions={resultOptions}/>}>{loading ? <div className="empty">Loading audit logs...</div> : error ? <div className="empty">{error}</div> : !logs || logs.length === 0 ? <div className="empty">No audit events found.</div> : filteredLogs.length === 0 ? <div className="empty">No audit events match this filter.</div> : <table><thead><tr><th>Timestamp</th><th>Actor</th><th>Action</th><th>Target</th><th>User</th><th>Provider</th><th>Result</th><th>Request ID</th></tr></thead><tbody>{filteredLogs.map(entry => <tr key={entry.id}><td>{formatDateTime(entry.timestamp, timezone)}</td><td className="user-name">{entry.actor_display_name || 'System'}</td><td>{entry.action}</td><td>{entry.target_type}</td><td>{entry.target_user_display_name ? `${entry.target_user_display_name}${entry.target_user_email ? ` (${entry.target_user_email})` : ''}` : '—'}</td><td>{entry.provider_name || '—'}</td><td><StatusBadge status={entry.result}/></td><td>{entry.request_id}</td></tr>)}</tbody></table>}</TablePanel></Page>;
+}
+interface ApiPrivilegedAccountActivity { id: string; display_name: string; email: string; account_type: string; status: string; linked_user_id: string | null; linked_user_display_name: string | null; created_at: string; last_sign_in_at: string | null; last_non_interactive_sign_in_at: string | null; sign_in_data_available: boolean; event_count: number; last_activity_at: string | null; }
+function PrivilegedAccountActivityPage() {
+  const timezone = useAppTimezone();
+  const { data: accounts, error, loading, reload } = useApiResource<ApiPrivilegedAccountActivity[]>('/api/v1/privileged-accounts/activity');
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const { data: timeline, loading: timelineLoading } = useApiResource<ApiAuditLog[]>(selectedId ? `/api/v1/privileged-accounts/${selectedId}/timeline` : '', Boolean(selectedId));
+  const selected = accounts?.find(a => a.id === selectedId) || null;
+
+  return <Page eyebrow="ADMINISTRATION" title="Privileged & Test Account Activity" subtitle="Every PU/TU shadow account — who it belongs to, when it was created, its last real sign-in, and everything AccessPilot has recorded about it." action={<button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button>}>
+    <TablePanel toolbar={undefined}>
+      {loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : !accounts || accounts.length === 0 ? <div className="empty">No Privileged (PU) or Test (TU) accounts exist yet.</div> : <table><thead><tr><th>Account</th><th>Type</th><th>Status</th><th>Linked to</th><th>Created</th><th>Last sign-in</th><th>Events</th><th>Last activity</th><th></th></tr></thead><tbody>
+        {accounts.map(a => <tr key={a.id} style={selectedId === a.id ? {background:'#f4f8f8'} : undefined}>
+          <td className="user-name">{a.display_name}</td>
+          <td><span className="badge neutral">{a.account_type}</span></td>
+          <td><StatusBadge status={a.status}/></td>
+          <td>{a.linked_user_id ? <Link to={`/admin/users/${a.linked_user_id}`} className="user-name">{a.linked_user_display_name || a.linked_user_id}</Link> : <span className="footer-note">Unassociated</span>}</td>
+          <td>{formatDateTime(a.created_at, timezone)}</td>
+          <td>{a.sign_in_data_available ? (a.last_sign_in_at ? formatDateTime(a.last_sign_in_at, timezone) : 'Never signed in') : <span className="footer-note" title="Needs the AuditLog.Read.All Graph permission granted on this tenant">Unknown</span>}</td>
+          <td>{a.event_count}</td>
+          <td>{a.last_activity_at ? formatDateTime(a.last_activity_at, timezone) : '—'}</td>
+          <td><button className="btn" onClick={() => setSelectedId(a.id)}>View timeline</button></td>
+        </tr>)}
+      </tbody></table>}
+    </TablePanel>
+    {selectedId && <div className="panel" style={{marginTop:18}}>
+      <div className="panel-head"><h2>Timeline — {selected?.display_name || 'account'}</h2><button className="btn" aria-label="Close" onClick={() => setSelectedId(null)}><X size={14}/></button></div>
+      <div className="detail-section">
+        {timelineLoading ? <div className="empty">Loading timeline...</div> : !timeline || timeline.length === 0 ? <div className="empty">No activity recorded yet.</div> : <div className="timeline" style={{padding:0}}>{timeline.map(entry => <div key={entry.id} className="timeline-item"><strong>{entry.action.replace(/_/g, ' ')}</strong><small>{formatDateTime(entry.timestamp, timezone)} · {entry.actor_display_name || 'System'}{entry.result !== 'SUCCESS' ? ` · ${entry.result}` : ''}</small></div>)}</div>}
+      </div>
+    </div>}
+  </Page>;
+}
+interface ApiScopeTargetResolved { resource_type: string; resource_id: string; resource_display_name: string | null; }
+interface ApiAccessReviewCampaign { id: string; name: string; description: string | null; scope_type: string; scope_resource_type: string | null; scope_resource_id: string | null; scope_targets: ApiScopeTargetResolved[] | null; scope_user_id: string | null; scope_account_type: string | null; scope_inactive_days: number | null; reviewer_id: string; reviewer_display_name: string | null; fallback_reviewer_id: string | null; fallback_reviewer_display_name: string | null; fallback_unlock_hours: number | null; status: string; due_at: string; frequency_days: number | null; schedule_day_of_month: number | null; schedule_time: string | null; schedule_every_months: number | null; schedule_due_days: number | null; next_run_at: string | null; parent_campaign_id: string | null; created_by: string | null; created_at: string; completed_at: string | null; item_count: number; decided_count: number; approved_count: number; revoked_count: number; auto_revoked_count: number; }
+interface ApiAccessReviewItem { id: string; campaign_id: string; campaign_name: string | null; assignment_id: string; user_id: string; user_display_name: string | null; user_email: string | null; granted_via: string | null; package_id: string | null; package_name: string | null; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; assignment_status_at_snapshot: string; decision: string; decided_by: string | null; decided_by_display_name: string | null; decided_at: string | null; justification: string | null; created_at: string; }
+interface ApiResourceTally { name: string; count: number; }
+interface ApiAccessReviewDashboard { total_campaigns: number; active_campaigns: number; completed_campaigns: number; recurring_campaigns: number; total_items: number; pending_items: number; approved_items: number; revoked_items: number; auto_revoked_items: number; top_groups: ApiResourceTally[]; top_applications: ApiResourceTally[]; }
+const emptyCampaignForm = { name: '', description: '', scope_type: 'ALL', scope_resource_type: 'GROUP', scope_resource_id: '', scope_targets: [] as { resource_type: string; resource_id: string; name: string }[], scope_user_id: '', scope_account_type: 'PU', scope_inactive_days: '90', reviewer_id: '', fallback_reviewer_id: '', fallback_unlock_hours: '', due_days: '30', frequency_days: '30', recurrence: 'none', schedule_day: '15', schedule_time: '09:00', schedule_every_months: '1' };
+const emptyEditForm = { name: '', description: '', reviewer_id: '', fallback_reviewer_id: '', fallback_unlock_hours: '', due_at: '', frequency_days: '30', recurrence: 'none', schedule_day: '15', schedule_time: '09:00', schedule_every_months: '1' };
+// Same local-time construction as the SoD exception form's datetime-local default (see defaultExpiry above) —
+// slicing an ISO string's UTC representation would silently shift a due date by the browser's UTC offset.
+function toLocalDateTimeInput(iso: string): string {
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function campaignFrequencyLabel(c: ApiAccessReviewCampaign): string {
+  if (c.schedule_day_of_month) return `Day ${c.schedule_day_of_month} · ${c.schedule_time} · ${c.schedule_every_months && c.schedule_every_months > 1 ? `every ${c.schedule_every_months} months` : 'monthly'}`;
+  return frequencyLabel(c.frequency_days);
+}
+interface RecurrenceState { recurrence: string; frequency_days: string; schedule_day: string; schedule_time: string; schedule_every_months: string; }
+// Two ways for a campaign to repeat (mutually exclusive): (1) "after it completes" — Monthly/Quarterly/Yearly, the
+// next one is created the moment this one closes; (2) "fixed day and time" — a new campaign STARTS on that day of
+// the month at that time (app timezone) whether or not the previous one has been closed early or late.
+function RecurrenceFields({ value, onChange, timezone }: { value: RecurrenceState; onChange: (patch: Partial<RecurrenceState>) => void; timezone: string }) {
+  const on = value.recurrence !== 'none';
+  return <div style={{marginBottom:14}}>
+    <label style={{display:'flex',alignItems:'center',gap:8,fontWeight:600,fontSize:13}}><input type="checkbox" checked={on} onChange={event => onChange(event.target.checked ? { recurrence: 'after', frequency_days: value.frequency_days || '30' } : { recurrence: 'none' })}/> Make this a recurring campaign</label>
+    {on && <div style={{marginTop:8,display:'grid',gap:10}}>
+      <label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,flexWrap:'wrap'}}><input type="radio" name="recurrence-mode" checked={value.recurrence === 'after'} onChange={() => onChange({ recurrence: 'after' })}/> Repeat after it completes:
+        <select className="select" disabled={value.recurrence !== 'after'} value={value.frequency_days} onChange={event => onChange({ frequency_days: event.target.value })}>{FREQUENCY_PRESETS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}</select></label>
+      <label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,flexWrap:'wrap'}}><input type="radio" name="recurrence-mode" checked={value.recurrence === 'fixed'} onChange={() => onChange({ recurrence: 'fixed' })}/> Start a new one on day
+        <input className="select" type="number" min={1} max={31} style={{width:70}} disabled={value.recurrence !== 'fixed'} value={value.schedule_day} onChange={event => onChange({ schedule_day: event.target.value })}/> at
+        <input className="select" type="time" disabled={value.recurrence !== 'fixed'} value={value.schedule_time} onChange={event => onChange({ schedule_time: event.target.value })}/> every
+        <select className="select" disabled={value.recurrence !== 'fixed'} value={value.schedule_every_months} onChange={event => onChange({ schedule_every_months: event.target.value })}><option value="1">month</option><option value="3">3 months</option><option value="6">6 months</option><option value="12">12 months</option></select></label>
+      <p className="subtitle" style={{margin:0}}>{value.recurrence === 'fixed' ? `A fresh campaign starts automatically on that day and time (${timezone}), with the same scope and reviewer, and stays open for the "Due in (days)" you set above. Day 31 means the last day of shorter months. If the previous one is still open then, that start is skipped.` : 'When this campaign completes, a new one with the same scope and reviewer is created automatically.'}</p>
+    </div>}
+  </div>;
+}
+function scopeSummary(c: ApiAccessReviewCampaign, groups?: ApiGroup[] | null, roles?: ApiRole[] | null, applications?: ApiApplication[] | null, packages?: ApiPackage[] | null, users?: ApiUser[] | null): string {
+  if (c.scope_type === 'ALL') return 'Every current grant';
+  if (c.scope_type === 'ACCOUNT_TYPE') return `${c.scope_account_type} accounts`;
+  if (c.scope_type === 'INACTIVE_USERS') return `No sign-in in ${c.scope_inactive_days}+ days`;
+  if (c.scope_type === 'USER') return users?.find(u => u.id === c.scope_user_id)?.display_name || 'One user';
+  if (c.scope_type === 'MULTIPLE_RESOURCES') return (c.scope_targets || []).map(t => t.resource_display_name || t.resource_id).join(', ') || '—';
+  const list = c.scope_resource_type === 'GROUP' ? groups : c.scope_resource_type === 'ROLE' ? roles : c.scope_resource_type === 'APPLICATION' ? applications : packages;
+  const name = list?.find(t => t.id === c.scope_resource_id)?.name;
+  return c.scope_type === 'RESOURCE_TYPE' ? `Every ${(c.scope_resource_type || '').toLowerCase()}` : (name || c.scope_resource_type || '—');
+}
+const FREQUENCY_PRESETS: Array<{ value: string; label: string }> = [
+  { value: '30', label: 'Monthly' },
+  { value: '90', label: 'Quarterly' },
+  { value: '365', label: 'Yearly' },
+];
+function frequencyLabel(days: number | null): string {
+  if (!days) return 'One-time';
+  const preset = FREQUENCY_PRESETS.find(p => Number(p.value) === days);
+  return preset ? preset.label : `Every ${days} days`;
+}
+const OUTCOME_STYLES = {
+  approved: { label: 'Approved', hint: 'Reviewer confirmed the access is still needed', color: '#3b9c7f', soft: '#e5f5ef', ink: '#277b67' },
+  revoked: { label: 'Revoked', hint: 'Reviewer removed the access', color: '#c95a5a', soft: '#fbe7e5', ink: '#ae4949' },
+  auto: { label: 'Auto-revoked', hint: 'Removed because the deadline passed or the campaign was closed undecided', color: '#e0a24d', soft: '#fff2df', ink: '#a66b21' },
+  pending: { label: 'Pending', hint: 'Still waiting for a decision', color: '#cdd6da', soft: '#edf1f3', ink: '#667780' },
+} as const;
+// One stacked bar showing how a set of review items ended up — used on the dashboard (all items) and in each
+// campaign row (that campaign's items), so the two always read the same way.
+function OutcomeBar({ approved, revoked, auto, pending, height = 10 }: { approved: number; revoked: number; auto: number; pending: number; height?: number }) {
+  const total = approved + revoked + auto + pending;
+  const parts: Array<[keyof typeof OUTCOME_STYLES, number]> = [['approved', approved], ['revoked', revoked], ['auto', auto], ['pending', pending]];
+  const title = parts.map(([key, value]) => `${OUTCOME_STYLES[key].label}: ${value}`).join(' · ');
+  return <div title={title} aria-label={title} style={{display:'flex',height,borderRadius:height,overflow:'hidden',background:'#edf1f3',minWidth:90}}>
+    {total > 0 && parts.filter(([, value]) => value > 0).map(([key, value]) => <div key={key} style={{width:`${(value / total) * 100}%`,background:OUTCOME_STYLES[key].color}}/>)}
+  </div>;
+}
+function AccessReviewDashboardPanel({ dashboard }: { dashboard: ApiAccessReviewDashboard | null }) {
+  const na = '—';
+  const tiles: Array<[string, string]> = [
+    ['Total reviews', dashboard ? String(dashboard.total_campaigns) : na],
+    ['Active', dashboard ? String(dashboard.active_campaigns) : na],
+    ['Completed', dashboard ? String(dashboard.completed_campaigns) : na],
+    ['Recurring', dashboard ? String(dashboard.recurring_campaigns) : na],
+  ];
+  const d = dashboard;
+  const outcomes: Array<[keyof typeof OUTCOME_STYLES, number]> = d ? [['approved', d.approved_items], ['revoked', d.revoked_items], ['auto', d.auto_revoked_items], ['pending', d.pending_items]] : [];
+  return <section className="panel" style={{marginBottom:18}}>
+    <div className="panel-head"><h2>Access Review Dashboard</h2></div>
+    <div className="detail-section">
+      <div className="stats">{tiles.map(([label, value]) => <div className="stat" key={label}><div className="stat-top"><span>{label}</span></div><div className="stat-value">{value}</div></div>)}</div>
+      <div className="key" style={{marginBottom:10}}><span>What happened to the reviewed items</span></div>
+      {!d ? <p className="subtitle" style={{margin:0}}>Loading...</p> : d.total_items === 0 ? <p className="subtitle" style={{margin:0}}>No items have been reviewed yet.</p> : <div style={{display:'flex',gap:18,alignItems:'stretch',flexWrap:'wrap'}}>
+        <div style={{border:'2px solid #28424c',borderRadius:10,padding:'18px 26px',display:'flex',flexDirection:'column',justifyContent:'center',minWidth:130}}>
+          <span className="user-email" style={{margin:0,textTransform:'uppercase',letterSpacing:1}}>Items</span>
+          <span style={{fontFamily:'Space Grotesk',fontSize:34,fontWeight:700,lineHeight:1.1}}>{d.total_items}</span>
+        </div>
+        <div style={{display:'flex',alignItems:'center',color:'#829198'}}><ArrowRight size={22}/></div>
+        <div style={{flex:1,minWidth:280,display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(170px,1fr))',gap:12}}>
+          {outcomes.map(([key, value]) => { const st = OUTCOME_STYLES[key]; const pct = d.total_items ? Math.round((value / d.total_items) * 100) : 0; return <div key={key} title={st.hint} style={{border:`1px solid ${st.color}`,borderLeft:`6px solid ${st.color}`,background:st.soft,borderRadius:8,padding:'12px 14px'}}>
+            <div style={{fontSize:12,fontWeight:700,color:st.ink}}>{st.label}</div>
+            <div style={{display:'flex',alignItems:'baseline',gap:8}}><span style={{fontFamily:'Space Grotesk',fontSize:26,fontWeight:700,color:'#1d2b31'}}>{value}</span><span style={{fontSize:11,color:st.ink}}>{pct}%</span></div>
+            <div style={{fontSize:10,color:'#718088',marginTop:2}}>{st.hint}</div>
+          </div>; })}
+        </div>
+      </div>}
+      {d && d.total_items > 0 && <div style={{marginTop:14}}><OutcomeBar approved={d.approved_items} revoked={d.revoked_items} auto={d.auto_revoked_items} pending={d.pending_items} height={12}/></div>}
+      {d && (d.top_groups.length > 0 || d.top_applications.length > 0) && <div className="grid-2" style={{marginTop:22}}>
+        <div><div className="key" style={{marginBottom:6}}><span>Most-reviewed groups</span></div>{d.top_groups.length === 0 ? <p className="subtitle" style={{margin:0}}>None yet.</p> : d.top_groups.map(g => <div key={g.name} className="user-cell" style={{padding:'4px 0'}}><span>{g.name}</span><span className="badge neutral" style={{marginLeft:'auto'}}>{g.count}</span></div>)}</div>
+        <div><div className="key" style={{marginBottom:6}}><span>Most-reviewed applications</span></div>{d.top_applications.length === 0 ? <p className="subtitle" style={{margin:0}}>None yet.</p> : d.top_applications.map(a => <div key={a.name} className="user-cell" style={{padding:'4px 0'}}><span>{a.name}</span><span className="badge neutral" style={{marginLeft:'auto'}}>{a.count}</span></div>)}</div>
+      </div>}
+    </div>
+  </section>;
+}
+function AccessReviewsPage() {
+  const auth = useAuth();
+  const timezone = useAppTimezone();
+  const { data: campaigns, error, loading, reload } = useApiResource<ApiAccessReviewCampaign[]>('/api/v1/access-reviews');
+  const { data: dashboard, reload: reloadDashboard } = useApiResource<ApiAccessReviewDashboard>('/api/v1/access-reviews/dashboard');
+  const { data: users } = useApiResource<ApiUser[]>('/api/v1/users');
+  const { data: groups } = useApiResource<ApiGroup[]>('/api/v1/groups');
+  const { data: roles } = useApiResource<ApiRole[]>('/api/v1/roles');
+  const { data: applications } = useApiResource<ApiApplication[]>('/api/v1/applications');
+  const { data: packages } = useApiResource<ApiPackage[]>('/api/v1/packages');
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState(emptyCampaignForm);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState(emptyEditForm);
+  const [editSaving, setEditSaving] = useState(false);
+  const [editMessage, setEditMessage] = useState('');
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const resourceTargets: Array<ApiGroup | ApiRole | ApiApplication | ApiPackage> = form.scope_resource_type === 'GROUP' ? (groups || []) : form.scope_resource_type === 'ROLE' ? (roles || []) : form.scope_resource_type === 'APPLICATION' ? (applications || []) : (packages || []);
+
+  // "ASAP" live updates: nobody has to manually refresh to see a decision someone else just made land in the
+  // list/progress counts or the dashboard tiles — same 20-30s polling convention every other live page here uses.
+  useEffect(() => {
+    const timer = setInterval(() => { reload(); reloadDashboard(); }, 20000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Reviewer suggestion: when scoping to a specific Application, pre-fill from its real ApplicationOwner
+  // record(s) via the NHI API — best-effort only. That endpoint is NHI_READ-gated (NHIAdmin-exclusive, not
+  // folded into plain Admin), so a plain Admin creating a campaign will simply get no suggestion and picks a
+  // reviewer manually — exactly the "Admin can always override" fallback the feature already relies on either way.
+  useEffect(() => {
+    if (!open || form.scope_type !== 'SPECIFIC_RESOURCE' || form.scope_resource_type !== 'APPLICATION' || !form.scope_resource_id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await auth.apiRequest(`/api/v1/nhi/${form.scope_resource_id}`);
+        if (!response.ok) return;
+        const body = await response.json();
+        const ownerId = body?.owners?.[0]?.user_id;
+        if (ownerId && !cancelled) setForm(prev => prev.reviewer_id ? prev : { ...prev, reviewer_id: ownerId });
+      } catch { /* best-effort suggestion only — silently skip */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, form.scope_type, form.scope_resource_type, form.scope_resource_id]);
+
+  // Reviewer suggestion #2 (manager, from the Org Chart's User.manager_id): shown as a visible, one-click
+  // suggestion under the Reviewer field — and still pre-filled if no reviewer is chosen yet. Never overrides a
+  // reviewer the Admin already picked. USER scope suggests that user's own manager; a specific GROUP scope
+  // suggests the manager who manages the most current members. Other scopes have no single natural manager.
+  // Owner suggestions: for a specific Package / Application / Group scope, the resource's owners (package and
+  // application owners are AccessPilot records; group owners are read live from Entra) — best-effort, one click
+  // to use, never overriding a reviewer already picked.
+  const [ownerSuggestions, setOwnerSuggestions] = useState<{ id: string; label: string }[]>([]);
+  useEffect(() => {
+    setOwnerSuggestions([]);
+    if (!open || form.scope_type !== 'SPECIFIC_RESOURCE' || !form.scope_resource_id || !['PACKAGE', 'APPLICATION', 'GROUP'].includes(form.scope_resource_type)) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await auth.apiRequest(`/api/v1/access-reviews/owner-suggestions?resource_type=${form.scope_resource_type}&resource_id=${form.scope_resource_id}`);
+        if (!response.ok) return;
+        const rows = (await response.json()) as { user_id: string; display_name: string; source: string }[];
+        if (!cancelled) setOwnerSuggestions(rows.map(r => ({ id: r.user_id, label: `${r.display_name} — ${r.source}` })));
+      } catch { /* best-effort suggestion only */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, form.scope_type, form.scope_resource_type, form.scope_resource_id]);
+  useEffect(() => {
+    if (ownerSuggestions.length > 0) setForm(prev => prev.reviewer_id ? prev : { ...prev, reviewer_id: ownerSuggestions[0].id });
+  }, [ownerSuggestions]);
+  const [managerSuggestion, setManagerSuggestion] = useState<{ id: string; label: string } | null>(null);
+  useEffect(() => {
+    setManagerSuggestion(null);
+    if (!open || !users) return;
+    const nameOf = (id: string) => users.find(u => u.id === id)?.display_name || 'manager';
+    if (form.scope_type === 'USER' && form.scope_user_id) {
+      const target = users.find(u => u.id === form.scope_user_id);
+      if (target?.manager_id) setManagerSuggestion({ id: target.manager_id, label: `${nameOf(target.manager_id)} — ${target.display_name}'s manager` });
+      return;
+    }
+    if (form.scope_type === 'SPECIFIC_RESOURCE' && form.scope_resource_type === 'GROUP' && form.scope_resource_id) {
+      let cancelled = false;
+      (async () => {
+        try {
+          const response = await auth.apiRequest(`/api/v1/groups/${form.scope_resource_id}/members`);
+          if (!response.ok) return;
+          const members = (await response.json()) as ApiUser[];
+          const counts = new Map<string, number>();
+          for (const m of members) if (m.manager_id) counts.set(m.manager_id, (counts.get(m.manager_id) || 0) + 1);
+          const top = Array.from(counts.entries()).sort((x, y) => y[1] - x[1])[0];
+          if (top && !cancelled) setManagerSuggestion({ id: top[0], label: `${nameOf(top[0])} — manages ${top[1]} of this group's ${members.length} members` });
+        } catch { /* best-effort suggestion only */ }
+      })();
+      return () => { cancelled = true; };
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, form.scope_type, form.scope_user_id, form.scope_resource_type, form.scope_resource_id, users]);
+  useEffect(() => {
+    if (managerSuggestion) setForm(prev => prev.reviewer_id ? prev : { ...prev, reviewer_id: managerSuggestion.id });
+  }, [managerSuggestion]);
+
+  const startCreate = () => { setForm(emptyCampaignForm); setOpen(true); setMessage(''); };
+  const create = async () => {
+    if (!form.name.trim() || !form.reviewer_id || !form.due_days) { setMessage('Complete every required field.'); return; }
+    if (form.scope_type === 'MULTIPLE_RESOURCES' && form.scope_targets.length === 0) { setMessage('Add at least one resource to review.'); return; }
+    setSaving(true); setMessage('');
+    try {
+      const payload: Record<string, unknown> = {
+        name: form.name.trim(), description: form.description.trim() || undefined, scope_type: form.scope_type,
+        reviewer_id: form.reviewer_id, fallback_reviewer_id: form.fallback_reviewer_id || undefined,
+        fallback_unlock_hours: form.fallback_unlock_hours ? Number(form.fallback_unlock_hours) : undefined,
+        due_at: new Date(Date.now() + Number(form.due_days) * 86400000).toISOString(),
+        frequency_days: form.recurrence === 'after' ? Number(form.frequency_days) : undefined,
+        ...(form.recurrence === 'fixed' ? { schedule_day_of_month: Number(form.schedule_day), schedule_time: form.schedule_time, schedule_every_months: Number(form.schedule_every_months), schedule_due_days: Number(form.due_days) } : {}),
+      };
+      if (form.scope_type === 'RESOURCE_TYPE') payload.scope_resource_type = form.scope_resource_type;
+      if (form.scope_type === 'SPECIFIC_RESOURCE') { payload.scope_resource_type = form.scope_resource_type; payload.scope_resource_id = form.scope_resource_id; }
+      if (form.scope_type === 'MULTIPLE_RESOURCES') payload.scope_targets = form.scope_targets.map(t => ({ resource_type: t.resource_type, resource_id: t.resource_id }));
+      if (form.scope_type === 'USER') payload.scope_user_id = form.scope_user_id;
+      if (form.scope_type === 'ACCOUNT_TYPE') payload.scope_account_type = form.scope_account_type;
+      if (form.scope_type === 'INACTIVE_USERS') payload.scope_inactive_days = Number(form.scope_inactive_days);
+      const response = await auth.apiRequest('/api/v1/access-reviews', { method: 'POST', body: JSON.stringify(payload) });
+      const body = await response.json().catch(() => null);
+      if (response.ok) { setOpen(false); setForm(emptyCampaignForm); reload(); }
+      else setMessage(body?.error?.message || 'Unable to create this campaign.');
+    } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
+  };
+  const complete = async (campaign: ApiAccessReviewCampaign) => {
+    if (!window.confirm(`Close "${campaign.name}" now? Every still-pending item will be auto-revoked immediately.`)) return;
+    await auth.apiRequest(`/api/v1/access-reviews/${campaign.id}/complete`, { method: 'POST' });
+    reload();
+  };
+  const startEdit = (campaign: ApiAccessReviewCampaign) => {
+    setOpen(false);
+    setEditingId(campaign.id);
+    setEditMessage('');
+    setEditForm({
+      name: campaign.name, description: campaign.description || '',
+      reviewer_id: campaign.reviewer_id, fallback_reviewer_id: campaign.fallback_reviewer_id || '',
+      fallback_unlock_hours: campaign.fallback_unlock_hours ? String(campaign.fallback_unlock_hours) : '',
+      due_at: toLocalDateTimeInput(campaign.due_at),
+      frequency_days: campaign.frequency_days ? String(campaign.frequency_days) : '30',
+      recurrence: campaign.schedule_day_of_month ? 'fixed' : campaign.frequency_days ? 'after' : 'none',
+      schedule_day: String(campaign.schedule_day_of_month || 15), schedule_time: campaign.schedule_time || '09:00', schedule_every_months: String(campaign.schedule_every_months || 1),
+    });
+  };
+  const saveEdit = async () => {
+    if (!editingId) return;
+    if (!editForm.name.trim() || !editForm.reviewer_id || !editForm.due_at) { setEditMessage('Complete every required field.'); return; }
+    setEditSaving(true); setEditMessage('');
+    try {
+      const payload: Record<string, unknown> = {
+        name: editForm.name.trim(), description: editForm.description.trim() || undefined,
+        reviewer_id: editForm.reviewer_id, due_at: new Date(editForm.due_at).toISOString(),
+        fallback_unlock_hours: editForm.fallback_unlock_hours ? Number(editForm.fallback_unlock_hours) : undefined,
+      };
+      if (editForm.fallback_reviewer_id) payload.fallback_reviewer_id = editForm.fallback_reviewer_id;
+      else payload.clear_fallback_reviewer = true;
+      if (editForm.recurrence === 'after') { payload.frequency_days = Number(editForm.frequency_days); payload.clear_schedule = true; }
+      else if (editForm.recurrence === 'fixed') { payload.schedule_day_of_month = Number(editForm.schedule_day); payload.schedule_time = editForm.schedule_time; payload.schedule_every_months = Number(editForm.schedule_every_months); payload.clear_frequency = true; }
+      else { payload.clear_frequency = true; payload.clear_schedule = true; }
+      const response = await auth.apiRequest(`/api/v1/access-reviews/${editingId}`, { method: 'PATCH', body: JSON.stringify(payload) });
+      const body = await response.json().catch(() => null);
+      if (response.ok) { setEditingId(null); reload(); }
+      else setEditMessage(body?.error?.message || 'Unable to save these changes.');
+    } catch { setEditMessage('Unable to reach the backend.'); } finally { setEditSaving(false); }
+  };
+
+  return <Page eyebrow="ACCESS REVIEW" title="Access Reviews" subtitle="Periodic recertification — confirm who still needs the access they hold, or revoke it." action={<button className="btn btn-primary" onClick={startCreate}><Plus size={14}/> New campaign</button>}>
+    {open && <div className="panel" style={{marginBottom:18}}><div className="detail-section">
+      <div className="detail-title"><h2>New campaign</h2></div>
+      <div className="key-grid" style={{marginBottom:10}}>
+        <label className="key"><span>Name</span><input className="select" value={form.name} onChange={event => setForm({...form, name: event.target.value})} placeholder="e.g. Finance Team Q1 Review"/></label>
+        <label className="key"><span>Description (optional)</span><input className="select" value={form.description} onChange={event => setForm({...form, description: event.target.value})}/></label>
+        <label className="key"><span>Scope</span><select className="select" value={form.scope_type} onChange={event => setForm({...form, scope_type: event.target.value, scope_targets: []})}><option value="ALL">Every current grant</option><option value="RESOURCE_TYPE">Every Group / Role / Application / Package grant</option><option value="SPECIFIC_RESOURCE">One specific Group / Role / Application / Package</option><option value="MULTIPLE_RESOURCES">Several specific Groups / Roles / Applications / Packages, mixed</option><option value="USER">One user's entire access</option><option value="ACCOUNT_TYPE">Every Privileged (PU) or Test (TU) account</option><option value="INACTIVE_USERS">Users inactive for N+ days</option></select></label>
+        {(form.scope_type === 'RESOURCE_TYPE' || form.scope_type === 'SPECIFIC_RESOURCE' || form.scope_type === 'MULTIPLE_RESOURCES') && <label className="key"><span>Resource type</span><select className="select" value={form.scope_resource_type} onChange={event => setForm({...form, scope_resource_type: event.target.value, scope_resource_id: ''})}><option value="GROUP">Group</option><option value="ROLE">Role</option><option value="APPLICATION">Application</option><option value="PACKAGE">Access Package</option></select></label>}
+        {form.scope_type === 'SPECIFIC_RESOURCE' && <label className="key"><span>Target</span><select className="select" value={form.scope_resource_id} onChange={event => setForm({...form, scope_resource_id: event.target.value})}><option value="">Select a target</option>{resourceTargets.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>}
+        {form.scope_type === 'MULTIPLE_RESOURCES' && <label className="key"><span>Add a target</span><div style={{display:'flex',gap:8}}><select className="select" style={{flex:1}} value={form.scope_resource_id} onChange={event => setForm({...form, scope_resource_id: event.target.value})}><option value="">Select a target</option>{resourceTargets.filter(t => !form.scope_targets.some(existing => existing.resource_type === form.scope_resource_type && existing.resource_id === t.id)).map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select><button type="button" className="btn" disabled={!form.scope_resource_id} onClick={() => { const target = resourceTargets.find(t => t.id === form.scope_resource_id); if (!target) return; setForm(prev => ({...prev, scope_resource_id: '', scope_targets: [...prev.scope_targets, { resource_type: prev.scope_resource_type, resource_id: target.id, name: target.name }]})); }}>Add</button></div></label>}
+        {form.scope_type === 'USER' && <label className="key"><span>User</span><select className="select" value={form.scope_user_id} onChange={event => setForm({...form, scope_user_id: event.target.value})}><option value="">Select a user</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>}
+        {form.scope_type === 'ACCOUNT_TYPE' && <label className="key"><span>Account type</span><select className="select" value={form.scope_account_type} onChange={event => setForm({...form, scope_account_type: event.target.value})}><option value="PU">Privileged (PU)</option><option value="TU">Test (TU)</option></select></label>}
+        {form.scope_type === 'INACTIVE_USERS' && <label className="key"><span>Inactive for at least (days)</span><input className="select" type="number" min={1} value={form.scope_inactive_days} onChange={event => setForm({...form, scope_inactive_days: event.target.value})}/></label>}
+        <label className="key"><span>Reviewer</span><select className="select" value={form.reviewer_id} onChange={event => setForm({...form, reviewer_id: event.target.value})}><option value="">Select a reviewer</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select>{ownerSuggestions.map(sg => <small key={sg.id} style={{display:'block',marginTop:4,fontWeight:400}}>Suggested (owner): {sg.label}{form.reviewer_id !== sg.id && <> · <button type="button" className="btn" style={{padding:'0 8px',minHeight:0}} onClick={() => setForm(prev => ({...prev, reviewer_id: sg.id}))}>Use</button></>}</small>)}{managerSuggestion && <small style={{display:'block',marginTop:4,fontWeight:400}}>Suggested (manager): {managerSuggestion.label}{form.reviewer_id !== managerSuggestion.id && <> · <button type="button" className="btn" style={{padding:'0 8px',minHeight:0}} onClick={() => setForm(prev => ({...prev, reviewer_id: managerSuggestion.id}))}>Use</button></>}</small>}</label>
+        <label className="key"><span>Fallback reviewer (optional)</span><select className="select" value={form.fallback_reviewer_id} onChange={event => setForm({...form, fallback_reviewer_id: event.target.value})}><option value="">None</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+        {form.fallback_reviewer_id && <label className="key"><span>Fallback unlocks after (hours)</span><input className="select" type="number" min={1} value={form.fallback_unlock_hours} onChange={event => setForm({...form, fallback_unlock_hours: event.target.value})}/></label>}
+        <label className="key"><span>Due in (days)</span><input className="select" type="number" min={1} value={form.due_days} onChange={event => setForm({...form, due_days: event.target.value})}/></label>
+      </div>
+      <RecurrenceFields value={form} onChange={patch => setForm(prev => ({...prev, ...patch}))} timezone={timezone}/>
+      {form.scope_type === 'INACTIVE_USERS' && <p className="subtitle" style={{marginTop:-4,marginBottom:14}}>Needs Microsoft Graph AuditLog.Read.All to read last-sign-in data — if that permission isn't granted on this tenant, creating this campaign will fail with a clear error rather than silently reviewing nobody.</p>}
+      {form.scope_type === 'MULTIPLE_RESOURCES' && <div style={{marginBottom:14}}>
+        <div className="key" style={{marginBottom:6}}><span>In this review ({form.scope_targets.length})</span></div>
+        {form.scope_targets.length === 0 ? <p className="subtitle" style={{margin:0}}>Nothing added yet — pick a resource type and target above, then Add.</p> : <div style={{display:'flex',flexWrap:'wrap',gap:8}}>{form.scope_targets.map((t, i) => <span key={`${t.resource_type}-${t.resource_id}`} className="badge neutral" style={{display:'inline-flex',alignItems:'center',gap:6}}>{t.resource_type.toLowerCase()}: {t.name}<button type="button" className="btn" aria-label={`Remove ${t.name}`} onClick={() => setForm(prev => ({...prev, scope_targets: prev.scope_targets.filter((_, idx) => idx !== i)}))} style={{padding:'0 6px',minWidth:0}}><X size={11}/></button></span>)}</div>}
+      </div>}
+      {message && <div className="notice" style={{marginBottom:14}}>{message}</div>}
+      <div style={{display:'flex',gap:8}}><button className="btn btn-primary" disabled={saving} onClick={() => void create()}>{saving ? 'Creating...' : 'Create campaign'}</button><button className="btn" onClick={() => setOpen(false)}>Cancel</button></div>
+    </div></div>}
+    {editingId && <div className="panel" style={{marginBottom:18}}><div className="detail-section">
+      <div className="detail-title"><h2>Edit campaign</h2></div>
+      <p className="subtitle" style={{marginTop:-4,marginBottom:14}}>Scope and its snapshotted items can't be changed after creation — only the campaign's own details below.</p>
+      <div className="key-grid" style={{marginBottom:10}}>
+        <label className="key"><span>Name</span><input className="select" value={editForm.name} onChange={event => setEditForm({...editForm, name: event.target.value})}/></label>
+        <label className="key"><span>Description (optional)</span><input className="select" value={editForm.description} onChange={event => setEditForm({...editForm, description: event.target.value})}/></label>
+        <label className="key"><span>Reviewer</span><select className="select" value={editForm.reviewer_id} onChange={event => setEditForm({...editForm, reviewer_id: event.target.value})}><option value="">Select a reviewer</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+        <label className="key"><span>Fallback reviewer (optional)</span><select className="select" value={editForm.fallback_reviewer_id} onChange={event => setEditForm({...editForm, fallback_reviewer_id: event.target.value})}><option value="">None</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+        {editForm.fallback_reviewer_id && <label className="key"><span>Fallback unlocks after (hours)</span><input className="select" type="number" min={1} value={editForm.fallback_unlock_hours} onChange={event => setEditForm({...editForm, fallback_unlock_hours: event.target.value})}/></label>}
+        <label className="key" style={{display:'block'}}><span>Due (your device's local time)</span><input className="select" style={{width:'100%'}} type="datetime-local" value={editForm.due_at} onChange={event => setEditForm({...editForm, due_at: event.target.value})}/></label>
+      </div>
+      <RecurrenceFields value={editForm} onChange={patch => setEditForm(prev => ({...prev, ...patch}))} timezone={timezone}/>
+      {editMessage && <div className="notice" style={{marginBottom:14}}>{editMessage}</div>}
+      <div style={{display:'flex',gap:8}}><button className="btn btn-primary" disabled={editSaving} onClick={() => void saveEdit()}>{editSaving ? 'Saving...' : 'Save changes'}</button><button className="btn" onClick={() => setEditingId(null)}>Cancel</button></div>
+    </div></div>}
+    <AccessReviewDashboardPanel dashboard={dashboard}/>
+    <TablePanel toolbar={undefined}>
+      {loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : !campaigns || campaigns.length === 0 ? <div className="empty">No access review campaigns yet.</div> : <table><thead><tr><th>Campaign</th><th>Scope</th><th>Reviewer</th><th>Progress</th><th>Status</th><th>Due</th><th>Frequency</th><th></th></tr></thead><tbody>
+        {campaigns.map(c => <Fragment key={c.id}>
+        <tr>
+          <td className="user-name"><button type="button" className="btn" style={{border:'none',background:'none',padding:0,display:'inline-flex',alignItems:'center',gap:6,fontWeight:600,color:'inherit'}} onClick={() => setExpandedId(expandedId === c.id ? null : c.id)}><ChevronRight size={14} style={{transform: expandedId === c.id ? 'rotate(90deg)' : 'none', transition:'transform 0.1s'}}/> {c.name}</button></td>
+          <td style={{whiteSpace:'normal',maxWidth:260}}>{scopeSummary(c, groups, roles, applications, packages, users)}</td>
+          <td>{c.reviewer_display_name || c.reviewer_id}</td>
+          <td style={{minWidth:190}}>
+            <div style={{fontSize:12,marginBottom:5}}>{c.decided_count} / {c.item_count} decided</div>
+            <OutcomeBar approved={c.approved_count} revoked={c.revoked_count} auto={c.auto_revoked_count} pending={c.item_count - c.decided_count}/>
+            <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:5,fontSize:10}}>
+              {c.approved_count > 0 && <span style={{color:OUTCOME_STYLES.approved.ink}}>✓ {c.approved_count} approved</span>}
+              {c.revoked_count > 0 && <span style={{color:OUTCOME_STYLES.revoked.ink}}>✕ {c.revoked_count} revoked</span>}
+              {c.auto_revoked_count > 0 && <span style={{color:OUTCOME_STYLES.auto.ink}} title={OUTCOME_STYLES.auto.hint}>⏱ {c.auto_revoked_count} auto-revoked</span>}
+              {c.item_count - c.decided_count > 0 && <span style={{color:OUTCOME_STYLES.pending.ink}}>{c.item_count - c.decided_count} pending</span>}
+            </div>
+          </td>
+          <td><StatusBadge status={c.status}/></td>
+          <td>{formatDateTime(c.due_at, timezone)}</td>
+          <td style={{whiteSpace:'normal'}}>{campaignFrequencyLabel(c)}{c.next_run_at && <div className="user-email">Next start {formatDateTime(c.next_run_at, timezone)}</div>}</td>
+          <td><span style={{display:'flex',gap:6}}>{c.status === 'ACTIVE' && <><button className="btn" onClick={() => startEdit(c)}>Edit</button><button className="btn" onClick={() => void complete(c)}>Close now</button></>}<Link to={`/admin/access-reviews/${c.id}`} className="btn" aria-label="Open full page"><ExternalLink size={13}/></Link></span></td>
+        </tr>
+        {expandedId === c.id && <tr><td colSpan={8} style={{padding:0,background:'#fafbfb'}}><CampaignItemsPanel campaignId={c.id} onChanged={reload}/></td></tr>}
+        </Fragment>)}
+      </tbody></table>}
+    </TablePanel>
+  </Page>;
+}
+type ReviewRow =
+  | { kind: 'single'; item: ApiAccessReviewItem }
+  | { kind: 'package'; key: string; packageName: string; items: ApiAccessReviewItem[] };
+// Items granted through the same access package to the same user collapse into ONE package row (approve/revoke
+// the whole package for that user in one action, or expand it and decide each item individually).
+function groupReviewItems(items: ApiAccessReviewItem[]): ReviewRow[] {
+  const rows: ReviewRow[] = [];
+  const index = new Map<string, number>();
+  for (const item of items) {
+    if (!item.package_id) { rows.push({ kind: 'single', item }); continue; }
+    const key = `${item.user_id}:${item.package_id}`;
+    const at = index.get(key);
+    if (at === undefined) { index.set(key, rows.length); rows.push({ kind: 'package', key, packageName: item.package_name || 'Package', items: [item] }); }
+    else (rows[at] as Extract<ReviewRow, { kind: 'package' }>).items.push(item);
+  }
+  return rows;
+}
+function useReviewDecisions(onChanged: () => void) {
+  const auth = useAuth();
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+  const decide = async (targets: ApiAccessReviewItem[], decision: 'APPROVED' | 'REVOKED', label: string, key: string) => {
+    const pending = targets.filter(t => t.decision === 'PENDING');
+    if (pending.length === 0) return;
+    const justification = window.prompt(`Justification for ${decision === 'APPROVED' ? 'approving' : 'revoking'} ${label}?`);
+    if (justification === null) return;
+    if (justification.trim().length < 3) { window.alert('A justification (at least 3 characters) is required.'); return; }
+    setBusyKey(key);
+    let failed = 0; let firstError = '';
+    try {
+      for (const target of pending) {
+        const response = await auth.apiRequest(`/api/v1/access-reviews/items/${target.id}/decide`, { method: 'POST', body: JSON.stringify({ decision, justification: justification.trim() }) });
+        if (!response.ok) { failed += 1; if (!firstError) firstError = (await response.json().catch(() => null))?.error?.message || ''; }
+      }
+    } finally { setBusyKey(null); onChanged(); }
+    if (failed > 0) window.alert(`${failed} of ${pending.length} decision${pending.length === 1 ? '' : 's'} could not be recorded${firstError ? `: ${firstError}` : '.'}`);
+  };
+  return { busyKey, decide };
+}
+function ReviewItemsTable({ items, variant, onChanged }: { items: ApiAccessReviewItem[]; variant: 'admin' | 'mine'; onChanged: () => void }) {
+  const { busyKey, decide } = useReviewDecisions(onChanged);
+  const [expanded, setExpanded] = useState<string[]>([]);
+  const admin = variant === 'admin';
+  const rows = useMemo(() => groupReviewItems(items), [items]);
+  const userCell = (item: ApiAccessReviewItem) => {
+    const body = <><span className="avatar">{initialsFor(item.user_display_name || '?')}</span><span><span className="user-name">{item.user_display_name || item.user_id}</span>{item.user_email && <span className="user-email">{item.user_email}</span>}</span></>;
+    return admin ? <Link to={`/admin/users/${item.user_id}`} className="user-cell">{body}</Link> : <span className="user-cell">{body}</span>;
+  };
+  const buttons = (targets: ApiAccessReviewItem[], label: string, key: string) => {
+    const pending = targets.filter(t => t.decision === 'PENDING').length;
+    if (pending === 0) return null;
+    const all = targets.length > 1;
+    return <span style={{display:'flex',gap:6}}><button className="btn" disabled={busyKey === key} onClick={() => void decide(targets, 'APPROVED', label, key)}>{all ? 'Approve all' : 'Approve'}</button><button className="btn" disabled={busyKey === key} onClick={() => void decide(targets, 'REVOKED', label, key)}>{all ? 'Revoke all' : 'Revoke'}</button></span>;
+  };
+  const itemRow = (item: ApiAccessReviewItem, nested: boolean) => <tr key={item.id} style={nested ? { background: '#fafbfb' } : undefined}>
+    <td>{nested ? <span style={{paddingLeft:28,display:'inline-block'}} className="user-email">↳ individual item</span> : userCell(item)}</td>
+    <td style={{whiteSpace:'normal',maxWidth:280}}>{item.resource_type.toLowerCase()}: {item.resource_display_name || item.resource_id}</td>
+    <td style={{whiteSpace:'normal',maxWidth:240}}>{item.granted_via || '—'}</td>
+    {admin && <><td>{item.assignment_status_at_snapshot}</td><td><StatusBadge status={item.decision}/></td><td>{item.decided_by_display_name || '—'}</td></>}
+    <td>{buttons([item], `${item.user_display_name || 'this user'}'s access to ${item.resource_display_name || item.resource_type}`, item.id)}</td>
+  </tr>;
+  return <div className="table-wrap"><table><thead><tr><th>User</th><th>Resource</th><th>Granted via</th>{admin && <><th>Held as of snapshot</th><th>Decision</th><th>Decided by</th></>}<th></th></tr></thead><tbody>
+    {rows.map(row => {
+      if (row.kind === 'single') return itemRow(row.item, false);
+      const first = row.items[0];
+      const pending = row.items.filter(i => i.decision === 'PENDING').length;
+      const open = expanded.includes(row.key);
+      return <Fragment key={row.key}>
+        <tr>
+          <td>{userCell(first)}</td>
+          <td><button type="button" onClick={() => setExpanded(prev => open ? prev.filter(k => k !== row.key) : [...prev, row.key])} style={{border:'none',background:'none',padding:0,display:'inline-flex',alignItems:'center',gap:6,fontWeight:700,color:'inherit',cursor:'pointer',font:'inherit'}}><ChevronRight size={14} style={{transform: open ? 'rotate(90deg)' : 'none', transition:'transform 0.1s'}}/>📦 {row.packageName} · {row.items.length} item{row.items.length === 1 ? '' : 's'}</button></td>
+          <td style={{whiteSpace:'normal',maxWidth:240}}>Package: {row.packageName}</td>
+          {admin && <><td>—</td><td>{pending > 0 ? <span className="badge warning">{pending} PENDING</span> : <span className="badge success">ALL DECIDED</span>}</td><td>—</td></>}
+          <td>{buttons(row.items, `${first.user_display_name || 'this user'}'s access to package "${row.packageName}" (${row.items.length} items)`, row.key)}</td>
+        </tr>
+        {open && row.items.map(item => itemRow(item, true))}
+      </Fragment>;
+    })}
+  </tbody></table></div>;
+}
+// Shared by AccessReviewDetailPage (the full standalone page) and the inline expandable row on the list page —
+// one place for the items fetch, so the two surfaces can never drift apart.
+function CampaignItemsPanel({ campaignId, onChanged }: { campaignId: string; onChanged?: () => void }) {
+  const { data: items, loading, error, reload: reloadItems } = useApiResource<ApiAccessReviewItem[]>(`/api/v1/access-reviews/${campaignId}/items`);
+  if (loading) return <div className="empty">Loading...</div>;
+  if (error) return <div className="empty">{error}</div>;
+  if (!items || items.length === 0) return <div className="empty">Nothing was in scope when this campaign started.</div>;
+  return <ReviewItemsTable items={items} variant="admin" onChanged={() => { reloadItems(); onChanged?.(); }}/>;
+}
+function AccessReviewDetailPage() {
+  const { id } = useParams();
+  const timezone = useAppTimezone();
+  const { data: campaign, reload: reloadCampaign } = useApiResource<ApiAccessReviewCampaign>(`/api/v1/access-reviews/${id}`);
+  return <Page eyebrow="ACCESS REVIEW" title={campaign?.name || 'Campaign'} subtitle={campaign?.description || undefined} action={<Link to="/admin/access-reviews" className="btn">Back to list</Link>}>
+    {campaign && <section className="panel" style={{marginBottom:18}}><div className="detail-section"><div className="key-grid">
+      <div className="key"><span>Status</span><strong><StatusBadge status={campaign.status}/></strong></div>
+      <div className="key"><span>Reviewer</span><strong>{campaign.reviewer_display_name || campaign.reviewer_id}</strong></div>
+      <div className="key"><span>Due</span><strong>{formatDateTime(campaign.due_at, timezone)}</strong></div>
+      <div className="key"><span>Frequency</span><strong>{campaignFrequencyLabel(campaign)}</strong></div>
+      <div className="key"><span>Progress</span><strong>{campaign.decided_count} / {campaign.item_count} decided</strong></div>
+    </div></div></section>}
+    <section className="panel">{id && <CampaignItemsPanel campaignId={id} onChanged={reloadCampaign}/>}</section>
+  </Page>;
+}
+function MyAccessReviewsPage() {
+  const { data: items, loading, error, reload } = useApiResource<ApiAccessReviewItem[]>('/api/v1/access-reviews/items/mine');
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  // Grouped by campaign, collapsed by default — same shape as the admin Access Reviews list. No second fetch:
+  // /items/mine already returns every pending item's full shape (a non-admin reviewer can't call the
+  // admin-gated per-campaign items endpoint anyway).
+  const campaigns = useMemo(() => {
+    const map = new Map<string, { campaign_id: string; campaign_name: string; items: ApiAccessReviewItem[] }>();
+    for (const item of items || []) {
+      if (!map.has(item.campaign_id)) map.set(item.campaign_id, { campaign_id: item.campaign_id, campaign_name: item.campaign_name || 'Campaign', items: [] });
+      map.get(item.campaign_id)!.items.push(item);
+    }
+    return Array.from(map.values());
+  }, [items]);
+  useEffect(() => {
+    const timer = setInterval(() => reload(), 20000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return <Page eyebrow="SELF-SERVICE" title="My Access Reviews" subtitle="Items you've been asked to certify — confirm the access is still needed, or revoke it. Package-granted access is grouped: decide the whole package or expand it for individual items." action={<button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button>}>
+    <TablePanel toolbar={undefined}>
+      {loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : campaigns.length === 0 ? <div className="empty">Nothing pending your review right now.</div> : <table><thead><tr><th>Campaign</th><th>Pending items</th></tr></thead><tbody>
+        {campaigns.map(c => <Fragment key={c.campaign_id}>
+        <tr>
+          <td className="user-name"><button type="button" className="btn" style={{border:'none',background:'none',padding:0,display:'inline-flex',alignItems:'center',gap:6,fontWeight:600,color:'inherit'}} onClick={() => setExpandedId(expandedId === c.campaign_id ? null : c.campaign_id)}><ChevronRight size={14} style={{transform: expandedId === c.campaign_id ? 'rotate(90deg)' : 'none', transition:'transform 0.1s'}}/> {c.campaign_name}</button></td>
+          <td>{c.items.length}</td>
+        </tr>
+        {expandedId === c.campaign_id && <tr><td colSpan={2} style={{padding:0,background:'#fafbfb'}}><ReviewItemsTable items={c.items} variant="mine" onChanged={reload}/></td></tr>}
+        </Fragment>)}
+      </tbody></table>}
+    </TablePanel>
+  </Page>;
+}
+// Package owners' narrow portal: rename a package they own, or remove an item from it. Nothing else — adding
+// items, eligibility, approvers, assignment and deletion all stay Admin-only.
+function MyPackagesPage() {
+  const auth = useAuth();
+  const { data: packages, loading, error, reload } = useApiResource<ApiPackage[]>('/api/v1/packages/owned');
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [newName, setNewName] = useState('');
+  const [message, setMessage] = useState('');
+  const call = async (path: string, init: RequestInit, failure: string): Promise<boolean> => {
+    setMessage('');
+    try {
+      const response = await auth.apiRequest(path, init);
+      if (response.ok) { reload(); return true; }
+      setMessage((await response.json().catch(() => null))?.error?.message || failure);
+    } catch { setMessage(failure); }
+    return false;
+  };
+  const rename = async (pkg: ApiPackage) => {
+    if (!newName.trim()) { setMessage('Enter a package name.'); return; }
+    if (await call(`/api/v1/packages/${pkg.id}/owner-rename`, { method: 'PATCH', body: JSON.stringify({ name: newName.trim() }) }, 'Unable to rename this package.')) setRenamingId(null);
+  };
+  const removeItem = async (pkg: ApiPackage, item: ApiPackageItem) => {
+    if (!window.confirm(`Remove "${item.resource_display_name || item.resource_id}" from "${pkg.name}"? Access already granted from this package is not affected — only future assignments.`)) return;
+    await call(`/api/v1/packages/${pkg.id}/items/${item.id}`, { method: 'DELETE' }, 'Unable to remove this item.');
+  };
+  return <Page eyebrow="SELF-SERVICE" title="My Packages" subtitle="Packages you own. You can rename them or remove items — nothing else; ask an administrator for anything more." action={<button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button>}>
+    {message && <div className="notice" style={{marginBottom:14}}>{message}</div>}
+    {loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : !packages || packages.length === 0 ? <div className="panel"><div className="empty">You don't own any access packages.</div></div> : packages.map(pkg => <section key={pkg.id} className="panel" style={{marginBottom:18}}>
+      <div className="panel-head">
+        {renamingId === pkg.id
+          ? <div style={{display:'flex',gap:8,alignItems:'center'}}><input className="select" value={newName} onChange={event => setNewName(event.target.value)} aria-label="New package name"/><button className="btn btn-primary" onClick={() => void rename(pkg)}>Save</button><button className="btn" onClick={() => setRenamingId(null)}>Cancel</button></div>
+          : <><h2>📦 {pkg.name}</h2><button className="btn" onClick={() => { setRenamingId(pkg.id); setNewName(pkg.name); setMessage(''); }}>Rename</button></>}
+      </div>
+      <div className="detail-section">
+        {pkg.items.map(item => <div key={item.id} className="activity-row" style={{gridTemplateColumns:'1fr auto'}}><div className="activity-copy"><strong>{item.resource_display_name || item.resource_id}</strong><small>{item.resource_type}</small></div><button className="btn" disabled={pkg.items.length <= 1} title={pkg.items.length <= 1 ? 'A package must keep at least one item' : undefined} onClick={() => void removeItem(pkg, item)}>Remove</button></div>)}
+      </div>
+    </section>)}
+  </Page>;
 }
 function ProvidersPage() { return <ProviderConfiguration />; }
 interface ApiProvider { id: string; name: string; provider_type: string; status: string; sync_interval_minutes: number | null; last_sync_at: string | null; max_self_activation_hours: number; }
@@ -2823,6 +3735,41 @@ function Profile() {
         </div>
       </aside>
     </div>
+    {signedIn && <PrivilegedAccountRequestPanel/>}
   </Page>;
+}
+function PrivilegedAccountRequestPanel() {
+  const auth = useAuth();
+  const timezone = useAppTimezone();
+  const { data: myRequests, loading, error, reload } = useApiResource<ApiPrivilegedAccountRequest[]>('/api/v1/privileged-accounts/requests/mine');
+  const [accountType, setAccountType] = useState<'PU' | 'TU'>('PU');
+  const [justification, setJustification] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+
+  const submit = async () => {
+    if (justification.trim().length < 3) { setMessage('A justification (at least 3 characters) is required.'); return; }
+    setSaving(true); setMessage('');
+    try {
+      const response = await auth.apiRequest('/api/v1/privileged-accounts/requests', { method: 'POST', body: JSON.stringify({ account_type: accountType, justification: justification.trim() }) });
+      const body = await response.json().catch(() => null);
+      if (response.ok) { setJustification(''); setMessage(body.status === 'PROVISIONED' ? `Your ${accountType} account was created immediately.` : 'Submitted — awaiting approval.'); reload(); }
+      else setMessage(body?.error?.message || 'Unable to submit this request.');
+    } catch { setMessage('Unable to submit this request.'); } finally { setSaving(false); }
+  };
+
+  return <section className="panel" style={{marginTop:18}}>
+    <div className="panel-head"><h2>Privileged / Test accounts</h2></div>
+    <div className="detail-section">
+      <p className="subtitle" style={{marginBottom:14}}>Request a separate, mailbox-free account for elevated admin work (Privileged) or QA/UAT (Test) — kept apart from your day-to-day identity for security. Access to anything is always granted to it manually by an Admin, one grant at a time.</p>
+      <div style={{display:'flex',gap:10,alignItems:'flex-end',flexWrap:'wrap',marginBottom:10}}>
+        <label className="key"><span>Account type</span><select className="select" value={accountType} onChange={event => setAccountType(event.target.value as 'PU' | 'TU')}><option value="PU">Privileged (PU)</option><option value="TU">Test (TU)</option></select></label>
+        <label className="key" style={{flex:1,minWidth:220}}><span>Justification</span><input className="select" style={{width:'100%'}} value={justification} onChange={event => setJustification(event.target.value)} placeholder="Why do you need this account?"/></label>
+        <button className="btn btn-primary" disabled={saving} onClick={() => void submit()}>{saving ? 'Submitting...' : 'Request'}</button>
+      </div>
+      {message && <div className="notice" style={{marginBottom:14}}>{message}</div>}
+      <div className="table-wrap">{loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : !myRequests || myRequests.length === 0 ? <div className="empty">You haven't requested any privileged/test accounts yet.</div> : <table><thead><tr><th>Type</th><th>Status</th><th>Requested</th><th>Note</th></tr></thead><tbody>{myRequests.map(r => <tr key={r.id}><td className="user-name">{r.account_type}</td><td><StatusBadge status={r.status}/></td><td>{formatDateTime(r.created_at, timezone)}</td><td>{r.failure_reason || '—'}</td></tr>)}</tbody></table>}</div>
+    </div>
+  </section>;
 }
 export default App;

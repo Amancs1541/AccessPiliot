@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AccessPilotError
-from app.models import AccessAssignment, Application, Group, IdentityProvider, Role, SyncError, SyncRun, User, UserGroup
+from app.models import AccessAssignment, Application, Group, GroupRoleMapping, IdentityProvider, Role, SyncError, SyncRun, User, UserGroup
 from app.providers.base import NormalizedApplication, NormalizedGroup, NormalizedRole, NormalizedUser
 from app.providers.graph_client import GraphError
 from app.services.audit import record_audit
@@ -82,17 +82,25 @@ async def upsert_application(session: AsyncSession, provider_id: UUID, normalize
     return row
 
 
-async def _upsert_membership(session: AsyncSession, user_id: UUID, group_id: UUID) -> None:
+async def _upsert_membership(session: AsyncSession, user_id: UUID, group_id: UUID) -> bool:
+    """Returns True when this call newly recorded the membership (a real join, not something already known) —
+    used to decide whether this user needs group-role-mapping reconciliation (see run_sync below)."""
     row = (await session.execute(select(UserGroup).where(UserGroup.user_id == user_id, UserGroup.group_id == group_id))).scalar_one_or_none()
     if row is None:
         session.add(UserGroup(user_id=user_id, group_id=group_id, source="SYNC"))
         await session.flush()
+        return True
+    return False
 
 
-async def _remove_stale_memberships(session: AsyncSession, group_id: UUID, current_user_ids: set[UUID], request_id: str) -> None:
+async def _remove_stale_memberships(session: AsyncSession, group_id: UUID, current_user_ids: set[UUID], request_id: str) -> set[UUID]:
+    """Returns the set of user ids whose membership in this group was just removed — same reconciliation-trigger
+    purpose as _upsert_membership's return value, for the leaver side."""
+    removed_user_ids: set[UUID] = set()
     rows = (await session.execute(select(UserGroup).where(UserGroup.group_id == group_id))).scalars().all()
     for row in rows:
         if row.user_id not in current_user_ids:
+            removed_user_ids.add(row.user_id)
             await session.delete(row)
             # Reconcile: if AccessPilot still thinks this user has ACTIVE access to this group, that's now stale —
             # the real membership is gone (removed directly in Entra, or any other way that bypassed AccessPilot).
@@ -106,6 +114,7 @@ async def _remove_stale_memberships(session: AsyncSession, group_id: UUID, curre
                 stale_assignment.revoked_at = datetime.now(timezone.utc)
                 await record_audit(session, action="ASSIGNMENT_REVOKED", target_type="ASSIGNMENT", target_id=stale_assignment.id, provider_id=stale_assignment.provider_id, request_id=request_id, metadata={"reason": "MEMBERSHIP_REMOVED_OUTSIDE_ACCESSPILOT"})
     await session.flush()
+    return removed_user_ids
 
 
 async def run_sync(session: AsyncSession, provider: IdentityProvider, request_id: str) -> SyncRun:
@@ -118,6 +127,7 @@ async def run_sync(session: AsyncSession, provider: IdentityProvider, request_id
 
     errors_count = 0
     users_needing_birthright_reconciliation: list[UUID] = []
+    users_needing_group_mapping_reconciliation: set[UUID] = set()
     try:
         users = await connector.get_users()
         user_by_external_id: dict[str, User] = {}
@@ -130,6 +140,9 @@ async def run_sync(session: AsyncSession, provider: IdentityProvider, request_id
         groups = await connector.get_groups()
         for normalized_group in groups:
             group_row = await upsert_group(session, provider.id, normalized_group)
+            # Cheap and dormant until an admin actually configures one: only groups with an active mapping are
+            # worth tracking join/leave for — everything else skips the extra bookkeeping entirely.
+            group_has_mapping = (await session.execute(select(GroupRoleMapping.id).where(GroupRoleMapping.source_group_id == group_row.id, GroupRoleMapping.status == "ACTIVE"))).scalars().first() is not None
             try:
                 members = await connector.get_group_members(normalized_group.external_id)
             except GraphError as exc:
@@ -145,8 +158,12 @@ async def run_sync(session: AsyncSession, provider: IdentityProvider, request_id
                     if birthright_relevant_change:
                         users_needing_birthright_reconciliation.append(user_row.id)
                 member_ids.add(user_row.id)
-                await _upsert_membership(session, user_row.id, group_row.id)
-            await _remove_stale_memberships(session, group_row.id, member_ids, request_id)
+                newly_joined = await _upsert_membership(session, user_row.id, group_row.id)
+                if newly_joined and group_has_mapping:
+                    users_needing_group_mapping_reconciliation.add(user_row.id)
+            removed_user_ids = await _remove_stale_memberships(session, group_row.id, member_ids, request_id)
+            if group_has_mapping:
+                users_needing_group_mapping_reconciliation.update(removed_user_ids)
 
         roles = await connector.get_roles()
         for normalized_role in roles:
@@ -169,6 +186,16 @@ async def run_sync(session: AsyncSession, provider: IdentityProvider, request_id
             except AccessPilotError:
                 errors_count += 1
                 session.add(SyncError(sync_run_id=sync_run.id, resource_type="BIRTHRIGHT_RECONCILIATION", external_id=str(user_id), error_code="BIRTHRIGHT_RECONCILIATION_FAILED", error_message="Could not reconcile birthright policies for this user after their attributes changed."))
+
+        # Same idea, for group-triggered mappings (see app.services.group_role_mapping): someone who just
+        # joined or left a group that has an active mapping needs their granted-by-mapping access re-evaluated.
+        from app.services.group_role_mapping import reconcile_group_role_mappings_for_user
+        for user_id in users_needing_group_mapping_reconciliation:
+            try:
+                await reconcile_group_role_mappings_for_user(session, user_id, SYSTEM_ACTOR_SUBJECT, request_id)
+            except AccessPilotError:
+                errors_count += 1
+                session.add(SyncError(sync_run_id=sync_run.id, resource_type="GROUP_ROLE_MAPPING_RECONCILIATION", external_id=str(user_id), error_code="GROUP_ROLE_MAPPING_RECONCILIATION_FAILED", error_message="Could not reconcile group role mappings for this user after their group membership changed."))
 
         sync_run.status = "COMPLETED"
         sync_run.completed_at = datetime.now(timezone.utc)

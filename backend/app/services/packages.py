@@ -6,9 +6,9 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AccessPilotError
-from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, AccessPackageEligibility, AccessPackageItem, Application, Group, User, UserGroup
+from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, AccessPackageEligibility, AccessPackageItem, AccessPackageOwner, Application, Group, User, UserGroup
 from app.schemas.assignments import AssignmentCreate
-from app.schemas.packages import PackageAssignCreate, PackageAssignItemResult, PackageAssignMemberResult, PackageAssignResponse, PackageAssignmentBatch, PackageCreate, PackageEligibilityPrincipal, PackageEligibilityUpdate, PackageItemCreate, PackageItemResponse, PackageRequestCreate, PackageResponse, PackageUpdate
+from app.schemas.packages import PackageAssignCreate, PackageAssignItemResult, PackageAssignMemberResult, PackageAssignResponse, PackageAssignmentBatch, PackageCreate, PackageEligibilityPrincipal, PackageEligibilityUpdate, PackageItemCreate, PackageItemResponse, PackageOwnerInfo, PackageRequestCreate, PackageResponse, PackageUpdate
 from app.services.assignments import _app_role_name, _resolve_internal_user_id, _resolve_target, create_assignment, to_response
 from app.services.audit import record_audit
 from app.services.directory_read import list_group_members
@@ -39,10 +39,85 @@ async def _hydrate_eligibility(session: AsyncSession, package_id: UUID) -> list[
     return principals
 
 
+async def _hydrate_owners(session: AsyncSession, package_id: UUID) -> list[PackageOwnerInfo]:
+    rows = list((await session.scalars(select(AccessPackageOwner).where(AccessPackageOwner.package_id == package_id).order_by(AccessPackageOwner.created_at))).all())
+    owners: list[PackageOwnerInfo] = []
+    for row in rows:
+        user = await session.get(User, row.user_id)
+        owners.append(PackageOwnerInfo(user_id=row.user_id, display_name=user.display_name if user else None, email=user.email if user else None))
+    return owners
+
+
+async def _apply_owners(session: AsyncSession, package: AccessPackage, owner_ids: list[UUID], actor_id: UUID | None) -> None:
+    """Replaces the package's full owner set (Admin-only path: create/edit). Owners get a deliberately narrow
+    portal: rename + remove items, nothing else (see owner_rename_package / owner_remove_item)."""
+    unique_ids = list(dict.fromkeys(owner_ids))
+    for user_id in unique_ids:
+        if not await session.get(User, user_id):
+            raise AccessPilotError("USER_NOT_FOUND", "One of the selected owners was not found.", 404)
+    for existing in list((await session.scalars(select(AccessPackageOwner).where(AccessPackageOwner.package_id == package.id))).all()):
+        await session.delete(existing)
+    await session.flush()
+    for user_id in unique_ids:
+        session.add(AccessPackageOwner(package_id=package.id, user_id=user_id, assigned_by=actor_id))
+    await session.flush()
+
+
+async def _require_owner(session: AsyncSession, package_id: UUID, actor_subject: str) -> tuple[AccessPackage, UUID]:
+    package = await get_package(session, package_id)
+    actor_id = await _resolve_internal_user_id(session, actor_subject)
+    is_owner = actor_id is not None and (await session.scalars(select(AccessPackageOwner.id).where(AccessPackageOwner.package_id == package_id, AccessPackageOwner.user_id == actor_id))).first() is not None
+    if not is_owner:
+        raise AccessPilotError("ACCESS_DENIED", "Only an owner of this package can manage it here.", 403)
+    return package, actor_id
+
+
+async def list_owned_packages(session: AsyncSession, actor_subject: str) -> list[PackageResponse]:
+    actor_id = await _resolve_internal_user_id(session, actor_subject)
+    if actor_id is None:
+        return []
+    packages = list((await session.scalars(select(AccessPackage).join(AccessPackageOwner, AccessPackageOwner.package_id == AccessPackage.id).where(AccessPackageOwner.user_id == actor_id).order_by(AccessPackage.name))).all())
+    return [await _to_package_response(session, package) for package in packages]
+
+
+async def owner_rename_package(session: AsyncSession, package_id: UUID, new_name: str, actor_subject: str, request_id: str) -> PackageResponse:
+    """The package owner's first of two powers. Renaming only; nothing else about the package changes."""
+    package, actor_id = await _require_owner(session, package_id, actor_subject)
+    if new_name != package.name:
+        clash = (await session.execute(select(AccessPackage).where(AccessPackage.name == new_name, AccessPackage.id != package_id))).scalars().first()
+        if clash:
+            raise AccessPilotError("PACKAGE_ALREADY_EXISTS", "A package with this name already exists.", 409)
+        old_name = package.name
+        package.name = new_name
+        await record_audit(session, action="PACKAGE_RENAMED_BY_OWNER", target_type="PACKAGE", target_id=package_id, actor_user_id=actor_id, request_id=request_id, metadata={"old_name": old_name, "new_name": new_name})
+    await session.commit()
+    await session.refresh(package)
+    return await _to_package_response(session, package)
+
+
+async def owner_remove_item(session: AsyncSession, package_id: UUID, item_id: UUID, actor_subject: str, request_id: str) -> PackageResponse:
+    """The package owner's second power: remove ONE item. Like any package edit it only affects FUTURE
+    assignments; access already granted from the package is untouched. A package can never be emptied this way
+    (an item-less package is invalid everywhere else too)."""
+    package, actor_id = await _require_owner(session, package_id, actor_subject)
+    items = list((await session.scalars(select(AccessPackageItem).where(AccessPackageItem.package_id == package_id))).all())
+    target = next((item for item in items if item.id == item_id), None)
+    if target is None:
+        raise AccessPilotError("PACKAGE_ITEM_NOT_FOUND", "That item is not in this package.", 404)
+    if len(items) <= 1:
+        raise AccessPilotError("PACKAGE_MUST_HAVE_ITEM", "A package must keep at least one item. Ask an administrator to delete the package instead.", 409)
+    await session.delete(target)
+    await record_audit(session, action="PACKAGE_ITEM_REMOVED_BY_OWNER", target_type="PACKAGE", target_id=package_id, actor_user_id=actor_id, request_id=request_id, metadata={"resource_type": target.resource_type, "resource_id": str(target.resource_id), "app_role_external_id": target.app_role_external_id})
+    await session.commit()
+    await session.refresh(package)
+    return await _to_package_response(session, package)
+
+
 async def _to_package_response(session: AsyncSession, package: AccessPackage) -> PackageResponse:
     items = list((await session.scalars(select(AccessPackageItem).where(AccessPackageItem.package_id == package.id))).all())
     eligible_principals = await _hydrate_eligibility(session, package.id)
-    return PackageResponse(id=package.id, name=package.name, description=package.description, status=package.status, items=[await _hydrate_item(session, item) for item in items], default_approver_id=package.default_approver_id, default_fallback_approver_id=package.default_fallback_approver_id, fallback_unlock_hours=package.fallback_unlock_hours, eligible_principals=eligible_principals, created_at=package.created_at)
+    owners = await _hydrate_owners(session, package.id)
+    return PackageResponse(id=package.id, name=package.name, description=package.description, status=package.status, items=[await _hydrate_item(session, item) for item in items], default_approver_id=package.default_approver_id, default_fallback_approver_id=package.default_fallback_approver_id, fallback_unlock_hours=package.fallback_unlock_hours, eligible_principals=eligible_principals, owners=owners, created_at=package.created_at)
 
 
 async def _validate_items(session: AsyncSession, items: list[PackageItemCreate]) -> None:
@@ -116,6 +191,7 @@ async def create_package(session: AsyncSession, data: PackageCreate, actor_subje
     await session.flush()
 
     actor_id = await _resolve_internal_user_id(session, actor_subject)
+    await _apply_owners(session, package, data.owner_ids, actor_id)
     await record_audit(session, action="PACKAGE_CREATED", target_type="PACKAGE", target_id=package.id, actor_user_id=actor_id, request_id=request_id, metadata={"item_count": len(data.items), "principal_count": len(data.principals)})
     await session.commit()
     await session.refresh(package)
@@ -148,6 +224,8 @@ async def update_package(session: AsyncSession, package_id: UUID, data: PackageU
         await session.flush()
 
     actor_id = await _resolve_internal_user_id(session, actor_subject)
+    if data.owner_ids is not None:
+        await _apply_owners(session, package, data.owner_ids, actor_id)
     await record_audit(session, action="PACKAGE_UPDATED", target_type="PACKAGE", target_id=package_id, actor_user_id=actor_id, request_id=request_id, metadata={"item_count": len(data.items) if data.items is not None else None})
     await session.commit()
     await session.refresh(package)

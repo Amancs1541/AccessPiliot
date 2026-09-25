@@ -37,8 +37,19 @@ class PackageEligibilityPrincipalInput(BaseModel):
     principal_id: UUID
 
 
+class PackageOwnerInfo(BaseModel):
+    user_id: UUID
+    display_name: Optional[str] = None
+    email: Optional[str] = None
+
+
+class PackageOwnerRename(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+
+
 class PackageCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
+    owner_ids: list[UUID] = []
     description: Optional[str] = Field(default=None, max_length=2000)
     items: list[PackageItemCreate] = Field(min_length=1)
     principals: list[PackageEligibilityPrincipalInput] = []
@@ -69,11 +80,13 @@ class PackageResponse(BaseModel):
     default_fallback_approver_id: Optional[UUID] = None
     fallback_unlock_hours: Optional[int] = None
     eligible_principals: list[PackageEligibilityPrincipal] = []
+    owners: list[PackageOwnerInfo] = []
     created_at: datetime
 
 
 class PackageUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    owner_ids: Optional[list[UUID]] = None
     description: Optional[str] = Field(default=None, max_length=2000)
     items: Optional[list[PackageItemCreate]] = Field(default=None, min_length=1)
 

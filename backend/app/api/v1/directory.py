@@ -11,13 +11,20 @@ from app.models import IdentityProvider
 from app.providers.base import NewGroupRequest, NewUserRequest, ProviderConflictError
 from app.providers.graph_client import GraphError
 from app.schemas.directory import ApplicationResponse, GroupAccessSummary, GroupCreate, GroupResponse, RoleResponse, UserAccessSummary, UserAttributeUpdate, UserCreate, UserCreateResponse, UserResponse
+from app.schemas.privileged_accounts import LinkedAccountResponse, SetEnabledRequest
+from app.schemas.user_hierarchy import UserHierarchyNode, UserHierarchyUpdate
 from app.security.auth import AuthenticatedUser, require_permission
 from app.services import directory_read
+from app.services import privileged_accounts as privileged_accounts_service
+from app.services import user_hierarchy as user_hierarchy_service
 from app.services.audit import record_audit
 from app.services.birthright import reconcile_birthright_policies_for_user
 from app.services.dashboard import admin_dashboard, get_privileged_role_activation_timeline, get_user_access_segment_members, get_user_access_segments
 from app.services.directory_sync import upsert_group, upsert_user
 from app.services.provider_configuration import _connector, list_providers
+
+from app.schemas.group_owners import GroupOwnerInfo, GroupOwnersUpdate
+from app.services import group_owners as group_owner_service
 
 router = APIRouter(tags=["directory"])
 user_read = require_permission("USER_READ")
@@ -39,6 +46,13 @@ async def users(q: str | None = Query(default=None), _: AuthenticatedUser = Depe
     return await directory_read.list_users(db, q)
 
 
+@router.get("/users/hierarchy-tree", response_model=list[UserHierarchyNode])
+async def users_hierarchy_tree(_: AuthenticatedUser = Depends(user_read), db: AsyncSession = Depends(get_db)):
+    """Every user, flat — the Org Chart page assembles the actual tree client-side from manager_id. Registered
+    before /users/{user_id} so this literal path is never swallowed by that route's own id lookup."""
+    return await user_hierarchy_service.get_hierarchy_tree(db)
+
+
 @router.get("/users/{user_id}", response_model=UserResponse)
 async def user_detail(user_id: UUID, _: AuthenticatedUser = Depends(user_read), db: AsyncSession = Depends(get_db)):
     return await directory_read.get_user(db, user_id)
@@ -47,6 +61,19 @@ async def user_detail(user_id: UUID, _: AuthenticatedUser = Depends(user_read), 
 @router.get("/users/{user_id}/access-summary", response_model=UserAccessSummary)
 async def user_access_summary(user_id: UUID, _: AuthenticatedUser = Depends(user_read), db: AsyncSession = Depends(get_db)):
     return await directory_read.get_user_access_summary(db, user_id)
+
+
+@router.get("/users/{user_id}/linked-accounts", response_model=list[LinkedAccountResponse])
+async def user_linked_accounts(user_id: UUID, _: AuthenticatedUser = Depends(user_read), db: AsyncSession = Depends(get_db)):
+    """PU/TU shadow accounts (User.linked_user_id) belonging to this real user — see app.services.privileged_accounts."""
+    accounts = await privileged_accounts_service.list_linked_accounts(db, user_id)
+    return [LinkedAccountResponse(id=a.id, display_name=a.display_name, email=a.email, account_type=a.account_type, status=a.status) for a in accounts]
+
+
+@router.post("/users/{user_id}/enabled", response_model=UserResponse)
+async def set_user_account_enabled(user_id: UUID, data: SetEnabledRequest, request: Request, actor: AuthenticatedUser = Depends(group_manage), db: AsyncSession = Depends(get_db)):
+    """Enable/disable a PU/TU account's real Entra/Okta accountEnabled flag — used from the linked real user's detail page."""
+    return await privileged_accounts_service.set_account_enabled(db, user_id, data.enabled, actor.directory_object_id, request.state.request_id)
 
 
 @router.patch("/users/{user_id}/attributes", response_model=UserResponse)
@@ -76,6 +103,15 @@ async def update_user_attributes(user_id: UUID, data: UserAttributeUpdate, reque
     return user
 
 
+@router.patch("/users/{user_id}/hierarchy", response_model=UserResponse)
+async def update_user_hierarchy(user_id: UUID, data: UserHierarchyUpdate, request: Request, actor: AuthenticatedUser = Depends(group_manage), db: AsyncSession = Depends(get_db)):
+    """AccessPilot-internal org tagging (Employee/Manager + who they report to) — purely a local write, never
+    pushed to Entra/Okta (see app.services.user_hierarchy)."""
+    from app.services.assignments import _resolve_internal_user_id
+    actor_id = await _resolve_internal_user_id(db, actor.directory_object_id)
+    return await user_hierarchy_service.update_user_hierarchy(db, user_id, data, actor_id, request.state.request_id)
+
+
 @router.post("/users", response_model=UserCreateResponse, status_code=201)
 async def create_user(data: UserCreate, request: Request, _: AuthenticatedUser = Depends(group_manage), db: AsyncSession = Depends(get_db)):
     provider = await _primary_provider(db)
@@ -103,6 +139,17 @@ async def groups(q: str | None = Query(default=None), _: AuthenticatedUser = Dep
 @router.get("/groups/{group_id}", response_model=GroupResponse)
 async def group_detail(group_id: UUID, _: AuthenticatedUser = Depends(group_read), db: AsyncSession = Depends(get_db)):
     return await directory_read.get_group(db, group_id)
+
+
+@router.get("/groups/{group_id}/owners", response_model=list[GroupOwnerInfo])
+async def group_owners(group_id: UUID, _: AuthenticatedUser = Depends(group_read), db: AsyncSession = Depends(get_db)):
+    return await group_owner_service.list_group_owners(db, group_id)
+
+
+@router.put("/groups/{group_id}/owners", response_model=list[GroupOwnerInfo])
+async def set_group_owners(group_id: UUID, data: GroupOwnersUpdate, request: Request, actor: AuthenticatedUser = Depends(group_manage), db: AsyncSession = Depends(get_db)):
+    """AccessPilot-side owners only — nothing is written to Entra."""
+    return await group_owner_service.set_group_owners(db, group_id, data.user_ids, actor.directory_object_id, request.state.request_id)
 
 
 @router.get("/groups/{group_id}/members", response_model=list[UserResponse])

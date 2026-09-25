@@ -16,6 +16,7 @@ from app.core.logging import configure_logging
 from app.db.session import AsyncSessionLocal
 from app.services import server_health_state
 from app.services.bootstrap import ensure_bootstrap_credential
+from app.workers.access_review import access_review_worker_loop
 from app.workers.activation import activation_worker_loop
 from app.workers.expiration import expiration_worker_loop
 from app.workers.scheduler import sync_scheduler_loop
@@ -112,6 +113,7 @@ async def lifespan(_: FastAPI):
             "Access expiry sweep": expiration_worker_loop(AsyncSessionLocal),
             "Scheduled activation worker": activation_worker_loop(AsyncSessionLocal),
             "SoD exception expiry worker": sod_exception_expiry_worker_loop(AsyncSessionLocal),
+            "Access review worker": access_review_worker_loop(AsyncSessionLocal),
         }
         for name, coroutine in workers.items():
             task = asyncio.create_task(coroutine)

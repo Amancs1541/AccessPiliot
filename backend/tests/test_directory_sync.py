@@ -21,6 +21,7 @@ class FakeConnector(IdentityProviderProtocol):
     async def get_users(self, query=None): return self._users
     async def get_user(self, external_id): return next((u for u in self._users if u.external_id == external_id), None)
     async def update_user(self, external_id, *, department, job_title): raise NotImplementedError
+    async def set_user_enabled(self, external_id, enabled): return True
     async def get_groups(self, query=None): return self._groups
     async def get_group(self, external_id): return next((g for g in self._groups if g.external_id == external_id), None)
     async def get_group_members(self, external_id):
@@ -131,6 +132,42 @@ async def test_a_department_change_picked_up_by_sync_triggers_birthright_reconci
     assert assignments[0].resource_id == group_row.id
     assert assignments[0].status == "ELIGIBLE"
     assert assignments[0].birthright_policy_id is not None
+
+
+@pytest.mark.asyncio
+async def test_joining_and_leaving_a_mapped_group_via_sync_triggers_group_role_mapping_reconciliation(session, monkeypatch):
+    """The Entra/Okta -> AccessPilot direction for group-triggered mappings (see
+    app.services.group_role_mapping): nobody called any mapping endpoint — a plain directory sync noticing u2
+    joined (then later left) a mapped group is what's supposed to trigger the grant/revoke on its own."""
+    from app.models import GroupRoleMapping, Role
+
+    db, provider = session
+    users, groups, members, roles = connector_fixture()
+    monkeypatch.setattr("app.services.directory_sync._connector", lambda p: FakeConnector(users, groups, members, roles))
+    await run_sync(db, provider, "req-1")  # establishes g1 with only u1 as a member
+
+    group_row = (await db.execute(select(Group).where(Group.external_id == "g1"))).scalar_one()
+    role_row = (await db.execute(select(Role).where(Role.external_id == "r1"))).scalar_one()
+    db.add(GroupRoleMapping(source_group_id=group_row.id, resource_type="ROLE", resource_id=role_row.id))
+    await db.commit()
+
+    members_with_u2_joined = {"g1": [users[0], users[1]]}
+    monkeypatch.setattr("app.services.directory_sync._connector", lambda p: FakeConnector(users, groups, members_with_u2_joined, roles))
+    await run_sync(db, provider, "req-2")
+
+    u2_row = (await db.execute(select(User).where(User.external_id == "u2"))).scalar_one()
+    assignments = (await db.execute(select(AccessAssignment).where(AccessAssignment.user_id == u2_row.id))).scalars().all()
+    assert len(assignments) == 1
+    assert assignments[0].resource_id == role_row.id
+    assert assignments[0].status == "ELIGIBLE"
+    assert assignments[0].group_role_mapping_id is not None
+
+    monkeypatch.setattr("app.services.directory_sync._connector", lambda p: FakeConnector(users, groups, members, roles))  # u2 leaves g1 again
+    await run_sync(db, provider, "req-3")
+
+    assignments_after_leaving = (await db.execute(select(AccessAssignment).where(AccessAssignment.user_id == u2_row.id))).scalars().all()
+    assert len(assignments_after_leaving) == 1
+    assert assignments_after_leaving[0].status == "REVOKED"
 
 
 @pytest.mark.asyncio

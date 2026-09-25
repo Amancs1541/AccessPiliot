@@ -47,6 +47,20 @@ class User(Base):
     display_name: Mapped[str] = mapped_column(String(255), nullable=False); given_name: Mapped[Optional[str]] = mapped_column(String(120)); surname: Mapped[Optional[str]] = mapped_column(String(120))
     department: Mapped[Optional[str]] = mapped_column(String(200)); job_title: Mapped[Optional[str]] = mapped_column(String(200)); status: Mapped[str] = mapped_column(String(50), nullable=False)
     employee_id: Mapped[Optional[str]] = mapped_column(String(100)); source: Mapped[Optional[str]] = mapped_column(String(50))
+    # Privileged (PU) / Test (TU) shadow accounts — see app.services.privileged_accounts. NORMAL (the default)
+    # for every real, human-owned identity. linked_user_id is who a PU/TU account really belongs to — NULL for
+    # a NORMAL account, and deliberately NULL-able for a PU/TU account too (an Admin-created one starts
+    # unassociated on purpose; see the association gate in assignments.create_assignment).
+    account_type: Mapped[str] = mapped_column(String(20), nullable=False, default="NORMAL", server_default="NORMAL")
+    linked_user_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
+    # Org-hierarchy tagging (see app.services.user_hierarchy) — purely AccessPilot-internal, never synced to/from
+    # Entra's own native `manager` relationship. NULL (unclassified) for every existing user until an Admin tags
+    # it — no forced backfill, same convention as account_type defaulting NORMAL for pre-existing rows.
+    # manager_id is deliberately NOT restricted to EMPLOYEE-tagged rows: a MANAGER can have their own manager_id
+    # too, which is what makes the Org Chart a real multi-level tree instead of a flat two-tier list. A separate
+    # column from linked_user_id on purpose — different relationship, different lifecycle.
+    employee_category: Mapped[Optional[str]] = mapped_column(String(20))
+    manager_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at(); last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     __table_args__ = (UniqueConstraint("provider_id", "external_id", name="uq_users_provider_external"), Index("ix_users_provider_external", "provider_id", "external_id"), UniqueConstraint("employee_id", name="uq_users_employee_id"))
 
@@ -130,6 +144,9 @@ class AccessAssignment(Base):
     # reconcile_birthright_policies_for_user() know it's safe to auto-revoke this specific grant if the policy
     # stops matching the user later, while NEVER touching anything a human granted directly.
     birthright_policy_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("birthright_policies.id"))
+    # Same idea as birthright_policy_id, for a grant made by a GroupRoleMapping instead — set only when
+    # create_assignment() was called by group-role-mapping evaluation, never a manual grant.
+    group_role_mapping_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("group_role_mappings.id"))
     activated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at(); __table_args__ = (Index("ix_access_assignments_user", "user_id"), Index("ix_access_assignments_status", "status"), Index("ix_access_assignments_expiration", "expiration_time"))
 
 
@@ -176,6 +193,27 @@ class ProviderResource(Base):
 class AccessPackage(Base):
     __tablename__ = "access_packages"
     id: Mapped[UUID] = uuid_pk(); name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True); description: Mapped[Optional[str]] = mapped_column(Text); status: Mapped[str] = mapped_column(String(50), nullable=False); default_approver_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); default_fallback_approver_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); fallback_unlock_hours: Mapped[Optional[int]] = mapped_column(Integer); created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at()
+
+
+class GroupOwner(Base):
+    """An AccessPilot-side owner of a directory group — purely an internal accountability record (nothing is
+    written to Entra), used e.g. to suggest the reviewer of an Access Review scoped to that group. Mirrors
+    ApplicationOwner."""
+    __tablename__ = "group_owners"
+    id: Mapped[UUID] = uuid_pk(); group_id: Mapped[UUID] = mapped_column(ForeignKey("groups.id"), nullable=False); user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    assigned_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); created_at: Mapped[datetime] = created_at()
+    __table_args__ = (UniqueConstraint("group_id", "user_id", name="uq_group_owners_group_user"),)
+
+
+class AccessPackageOwner(Base):
+    """A user accountable for one access package who may manage it from their own portal — but only rename it or
+    remove items from it (never add items, change eligibility/approvers, assign, or delete it; see
+    app.services.packages.owner_rename_package / owner_remove_item). Set by an Admin when creating/editing the
+    package. Also the source of the reviewer suggestion when an Access Review is scoped to that package."""
+    __tablename__ = "access_package_owners"
+    id: Mapped[UUID] = uuid_pk(); package_id: Mapped[UUID] = mapped_column(ForeignKey("access_packages.id"), nullable=False); user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    assigned_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); created_at: Mapped[datetime] = created_at()
+    __table_args__ = (UniqueConstraint("package_id", "user_id", name="uq_access_package_owners_pkg_user"), Index("ix_access_package_owners_user", "user_id"))
 
 
 class AccessPackageEligibility(Base):
@@ -343,11 +381,105 @@ class OnboardingImport(Base):
 
 
 class BirthrightPolicy(Base):
+    """Two modes, distinguished purely by whether conditions_json is set (never both at once — see
+    app.services.birthright's JSON create/update, which always clears the legacy match_field/resource_type
+    columns the moment a policy is saved via JSON):
+    - Legacy/simple (match_field/match_value/resource_type/resource_id/app_role_external_id): the original
+      single-condition, single-grant shape, unchanged since this table's first migration.
+    - JSON/advanced (conditions_json/conditions_operator/actions_json): an AND/OR list of conditions and a list
+      of grant actions, authored either via the JSON create/edit endpoints or by editing a legacy policy as JSON
+      (which converts it to this mode on save). Every existing/legacy row keeps working exactly as before —
+      evaluate_birthright_policies/reconcile_birthright_policies_for_user both branch on conditions_json's
+      presence, never on any migration/backfill of old rows."""
     __tablename__ = "birthright_policies"
-    id: Mapped[UUID] = uuid_pk(); name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True); match_field: Mapped[str] = mapped_column(String(50), nullable=False); match_value: Mapped[str] = mapped_column(String(255), nullable=False)
+    id: Mapped[UUID] = uuid_pk(); name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True); match_field: Mapped[Optional[str]] = mapped_column(String(50)); match_value: Mapped[Optional[str]] = mapped_column(String(255))
+    resource_type: Mapped[Optional[str]] = mapped_column(String(50)); resource_id: Mapped[Optional[UUID]] = mapped_column(Uuid); app_role_external_id: Mapped[Optional[str]] = mapped_column(String(100)); assignment_type: Mapped[str] = mapped_column(String(50), nullable=False, default="PERMANENT")
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="ACTIVE"); created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at()
+    # A human-readable business id (the JSON shape's "policyId", e.g. "BR-001") — purely cosmetic, never used to
+    # look anything up internally (the real UUID `id` above is what every FK/API path uses); unique only when set.
+    external_policy_id: Mapped[Optional[str]] = mapped_column(String(100), unique=True)
+    # Stored but not yet enforced beyond the existing, unconditional "PU/TU accounts never match any birthright
+    # policy" rule (see evaluate_birthright_policies) — kept for JSON round-trip fidelity with the requested
+    # schema, deliberately not reopening that already-settled exclusion based on this field's value.
+    scope_identity_type: Mapped[Optional[str]] = mapped_column(String(50))
+    conditions_json: Mapped[Optional[list]] = mapped_column("conditions_json", JSON)
+    conditions_operator: Mapped[str] = mapped_column(String(10), nullable=False, default="AND", server_default="AND")
+    actions_json: Mapped[Optional[list]] = mapped_column("actions_json", JSON)
+    # True (the default, matching every pre-existing policy's actual behavior) means reconcile_birthright_policies_
+    # for_user auto-revokes this policy's grants the moment its condition stops matching (or the policy is
+    # disabled) — exactly what's always happened. False makes a grant "sticky": once given, reconciliation never
+    # takes it back on its own, only a manual Admin revoke can. Maps to the requested JSON shape's
+    # reconciliation.enabled/removeWhenConditionFails, which this app treats as one and the same knob.
+    reconciliation_enabled: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
+    __table_args__ = (Index("ix_birthright_policies_match", "match_field", "match_value"),)
+
+    # Plain Python properties (not mapped columns) so BirthrightPolicyResponse's from_attributes lookup can read
+    # them directly off the ORM row — lets the list/detail API surface "is this a JSON/advanced-mode policy, and
+    # how many conditions/actions does it have" without every caller re-deriving it from the raw JSON columns.
+    @property
+    def is_advanced(self) -> bool:
+        return bool(self.conditions_json)
+
+    @property
+    def conditions_count(self) -> int:
+        return len(self.conditions_json) if self.conditions_json else (1 if self.match_field else 0)
+
+    @property
+    def actions_count(self) -> int:
+        return len(self.actions_json) if self.actions_json else (1 if self.resource_type else 0)
+
+
+class Department(Base):
+    """A small, Admin-managed lookup list of real department names (see app.services.departments) — populates
+    the dropdown on the User Detail page's Department field, so an Admin picks from a known, consistent set
+    instead of free-typing a value that might not match what a birthright policy's own department condition
+    expects. Purely a picker convenience: User.department itself stays a plain string column, unconstrained by
+    this table, so an existing user's department value is never hidden or blocked even if it isn't in this list
+    (e.g. one set before this list existed, or synced from Entra)."""
+    __tablename__ = "departments"
+    id: Mapped[UUID] = uuid_pk(); name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    created_at: Mapped[datetime] = created_at()
+
+
+class GroupRoleMapping(Base):
+    """The group-membership analog of BirthrightPolicy: instead of triggering off a user attribute
+    (department/job_title), this triggers off CURRENT membership in `source_group_id` — everyone in that group
+    is entitled to `resource_type`/`resource_id` (a directory Role, or an Application/app role). Same
+    reconciliation shape as birthright (see app.services.group_role_mapping): live-computed eligibility, ELIGIBLE-
+    only grants, and safe auto-revocation via the same AccessAssignment.group_role_mapping_id tagging pattern
+    birthright_policy_id already established — never touches a manually-granted assignment."""
+    __tablename__ = "group_role_mappings"
+    id: Mapped[UUID] = uuid_pk(); source_group_id: Mapped[UUID] = mapped_column(ForeignKey("groups.id"), nullable=False)
     resource_type: Mapped[str] = mapped_column(String(50), nullable=False); resource_id: Mapped[UUID] = mapped_column(Uuid, nullable=False); app_role_external_id: Mapped[Optional[str]] = mapped_column(String(100)); assignment_type: Mapped[str] = mapped_column(String(50), nullable=False, default="PERMANENT")
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="ACTIVE"); created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at()
-    __table_args__ = (Index("ix_birthright_policies_match", "match_field", "match_value"),)
+    __table_args__ = (Index("ix_group_role_mappings_source_group", "source_group_id"),)
+
+
+class PrivilegedAccountPolicy(Base):
+    """One row per account_type (PU, PU/TU — get-or-create-on-first-read, same singleton-per-key convention
+    SecuritySettings uses for its one row). default_approver_id is None means 'auto-provision immediately, no
+    approval needed' (the diagram's "ASAP"); set it and a request for that account_type sits PENDING_APPROVAL
+    until that approver decides — the exact same optional-approver shape AccessPackage already uses, not a new
+    approval engine."""
+    __tablename__ = "privileged_account_policies"
+    id: Mapped[UUID] = uuid_pk(); account_type: Mapped[str] = mapped_column(String(20), nullable=False, unique=True)
+    default_approver_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at()
+
+
+class PrivilegedAccountRequest(Base):
+    """'Please create me an identity', not 'please grant me a resource' — structurally distinct from
+    AccessAssignment on purpose (see app.services.privileged_accounts). status ELIGIBLE-style lifecycle doesn't
+    apply here: PENDING_APPROVAL -> APPROVED/REJECTED, and APPROVED transitions straight to PROVISIONED (or
+    FAILED, if the real Entra/Okta create call itself fails) in the same action as the approval decision."""
+    __tablename__ = "privileged_account_requests"
+    id: Mapped[UUID] = uuid_pk(); requester_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False); account_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDING_APPROVAL"); approver_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
+    justification: Mapped[Optional[str]] = mapped_column(Text)
+    provisioned_user_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
+    failure_reason: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = created_at(); decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (Index("ix_privileged_account_requests_requester", "requester_id"),)
 
 
 class OnboardingImportRecord(Base):
@@ -467,3 +599,66 @@ class SocDashboardLayout(Base):
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False, unique=True)
     widgets: Mapped[list] = mapped_column("widgets", JSON, nullable=False)
     updated_at: Mapped[datetime] = updated_at()
+
+
+class AccessReviewCampaign(Base):
+    """A periodic access-recertification run — snapshots whatever AccessAssignment rows match its scope into
+    AccessReviewItem rows at creation time (see app.services.access_reviews), then closes when every item has a
+    decision, either by hand or via the 60s access-review worker's auto-revoke-on-due-date sweep. Deliberately a
+    ONE-TIME SNAPSHOT of a fixed roster, not live-recomputed like SoD/birthright — a review certifies who had
+    access as of the moment it started, not a moving target. reviewer_id/fallback_reviewer_id/fallback_unlock_hours
+    is the exact same two-tier approver shape AccessPackage/AccessAssignment/SodExceptionRequest already use."""
+    __tablename__ = "access_review_campaigns"
+    id: Mapped[UUID] = uuid_pk(); name: Mapped[str] = mapped_column(String(255), nullable=False); description: Mapped[Optional[str]] = mapped_column(Text)
+    scope_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    scope_resource_type: Mapped[Optional[str]] = mapped_column(String(50)); scope_resource_id: Mapped[Optional[UUID]] = mapped_column(Uuid)
+    # Only set when scope_type is MULTIPLE_RESOURCES — a list of {"resource_type", "resource_id"} dicts, mixing
+    # resource types freely (e.g. a Group and a Package reviewed together in one campaign). scope_resource_type/
+    # scope_resource_id above stay NULL in that case; they're mutually exclusive with this column, never both set.
+    scope_targets: Mapped[Optional[list]] = mapped_column("scope_targets", JSON)
+    # scope_inactive_days is only set when scope_type is INACTIVE_USERS — the "no sign-in in N days" threshold
+    # (see app.services.access_reviews._resolve_inactive_user_ids); every other scope type leaves it NULL.
+    scope_inactive_days: Mapped[Optional[int]] = mapped_column(Integer)
+    scope_user_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); scope_account_type: Mapped[Optional[str]] = mapped_column(String(20))
+    reviewer_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    fallback_reviewer_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); fallback_unlock_hours: Mapped[Optional[int]] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVE", server_default="ACTIVE")
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # frequency_days: NULL means one-time. Set means "recurring" — when this campaign completes (manually, via
+    # every-item-decided, or via the overdue-sweep worker), a fresh campaign with the same scope/reviewer is
+    # automatically spawned, due frequency_days from then, linked back via parent_campaign_id (see
+    # app.services.access_reviews._maybe_spawn_recurrence). Deliberately NOT retroactive to already-created items.
+    frequency_days: Mapped[Optional[int]] = mapped_column(Integer)
+    # Fixed-calendar recurrence (alternative to frequency_days, never both): a NEW campaign STARTS on
+    # schedule_day_of_month (1-31, clamped to short months) at schedule_time ("HH:MM", in the app's configured
+    # timezone) every schedule_every_months months, staying open for schedule_due_days. next_run_at (UTC) is
+    # held by the newest campaign in the chain only; see app.services.access_reviews.sweep_scheduled_campaigns.
+    schedule_day_of_month: Mapped[Optional[int]] = mapped_column(Integer)
+    schedule_time: Mapped[Optional[str]] = mapped_column(String(5))
+    schedule_every_months: Mapped[Optional[int]] = mapped_column(Integer)
+    schedule_due_days: Mapped[Optional[int]] = mapped_column(Integer)
+    next_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    parent_campaign_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("access_review_campaigns.id"))
+    created_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = created_at(); completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (Index("ix_access_review_campaigns_status", "status"),)
+
+
+class AccessReviewItem(Base):
+    """One row per AccessAssignment swept into a campaign at snapshot time. resource_type/resource_id/
+    app_role_external_id are denormalized copies (not a live join) so the line item still displays correctly
+    even if the underlying assignment is later revoked, or the resource itself renamed/deleted, after the
+    snapshot. decision APPROVED never touches the underlying AccessAssignment at all (certifying existing access
+    isn't the same as (re)granting it); decision REVOKED/AUTO_REVOKED calls the same, unmodified
+    app.services.assignments.revoke_assignment() every other admin revoke path already uses."""
+    __tablename__ = "access_review_items"
+    id: Mapped[UUID] = uuid_pk(); campaign_id: Mapped[UUID] = mapped_column(ForeignKey("access_review_campaigns.id"), nullable=False)
+    assignment_id: Mapped[UUID] = mapped_column(ForeignKey("access_assignments.id"), nullable=False)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(50), nullable=False); resource_id: Mapped[UUID] = mapped_column(Uuid, nullable=False); app_role_external_id: Mapped[Optional[str]] = mapped_column(String(100))
+    assignment_status_at_snapshot: Mapped[str] = mapped_column(String(50), nullable=False)
+    decision: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING", server_default="PENDING")
+    decided_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    justification: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = created_at()
+    __table_args__ = (Index("ix_access_review_items_campaign", "campaign_id"), Index("ix_access_review_items_decision", "decision"))

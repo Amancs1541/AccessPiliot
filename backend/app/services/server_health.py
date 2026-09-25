@@ -17,8 +17,8 @@ from app.services.audit_read import list_system_generated_audit_logs
 # "session count" (this is a stateless JWT/MSAL app with no server-side session store — "users with active
 # access" is used instead, a real, differently-named metric).
 
-_WORKER_NAMES = ["Entra sync worker", "Access expiry sweep", "Scheduled activation worker", "SoD exception expiry worker"]
-_WORKER_POLL_SECONDS = 60  # true for all four registered workers today — see workers/*.py's own POLL_INTERVAL_SECONDS
+_WORKER_NAMES = ["Entra sync worker", "Access expiry sweep", "Scheduled activation worker", "SoD exception expiry worker", "Access review worker"]
+_WORKER_POLL_SECONDS = 60  # true for all five registered workers today — see workers/*.py's own POLL_INTERVAL_SECONDS
 
 
 def _format_ago(seconds: float) -> str:
@@ -158,6 +158,7 @@ _WORKFLOW_DESCRIPTIONS = {
     "Access expiry sweep": "Ends real access whose time-bound expiration has passed, and expires ELIGIBLE rows never activated by their deadline.",
     "Scheduled activation worker": "Grants real access for future-dated bypass assignments once their start time arrives.",
     "SoD exception expiry worker": "Ends the specific access an SoD exception was covering once that exception's own expiry passes.",
+    "Access review worker": "Closes any access review campaign whose due date has passed, auto-revoking every still-undecided item's real access.",
 }
 
 
@@ -181,6 +182,7 @@ async def _background_workflows(now: datetime, session: AsyncSession) -> list[Wo
         "Access expiry sweep": "ASSIGNMENT_EXPIRED",
         "Scheduled activation worker": "ASSIGNMENT_ACTIVATED",
         "SoD exception expiry worker": "ASSIGNMENT_REVOKED",
+        "Access review worker": "ACCESS_REVIEW_CAMPAIGN_COMPLETED",
     }
     workflows = []
     for name in _WORKER_NAMES:

@@ -140,6 +140,14 @@ class OktaProvider(IdentityProvider):
             response = await client.request("POST", f"/users/{external_id}", json={"profile": {"department": department, "title": job_title}})
         return self._user_from_okta(response.json())
 
+    async def set_user_enabled(self, external_id: str, enabled: bool) -> bool:
+        """Okta's real lifecycle endpoints for a user, same shape as the app-lifecycle activate/deactivate this
+        provider already uses for service apps — UNVERIFIED against a live org, same caveat as this whole file's
+        class docstring already carries."""
+        async with self._client() as client:
+            await client.request("POST", f"/users/{external_id}/lifecycle/{'activate' if enabled else 'deactivate'}", params={"sendEmail": "false"} if enabled else None)
+        return True
+
     async def get_groups(self, query: str | None = None) -> list[NormalizedGroup]:
         params: dict[str, Any] = {"limit": 200}
         if query:

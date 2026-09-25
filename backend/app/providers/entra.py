@@ -180,6 +180,12 @@ class EntraProvider(IdentityProvider):
             raise GraphError("PROVIDER_RESOURCE_NOT_FOUND", "The user could not be found after updating it.", 502)
         return self._user_from_graph(item)
 
+    async def set_user_enabled(self, external_id: str, enabled: bool) -> bool:
+        """Same User.ReadWrite.All scope update_user already needs — no new consent required."""
+        async with self._client() as client:
+            await client.request("PATCH", f"/users/{external_id}", json={"accountEnabled": enabled})
+        return True
+
     async def get_user_licenses(self, external_id: str) -> list[dict[str, str]]:
         """Best-effort live read of a user's assigned Microsoft 365/Entra licenses — not synced/stored, fetched
         on demand. Resolving human-readable SKU names needs Organization.Read.All; if that's not granted, the
@@ -196,6 +202,19 @@ class EntraProvider(IdentityProvider):
             except GraphError:
                 pass
         return [{"sku_id": sku_id, "name": names[sku_id]} for sku_id in sku_ids]
+
+    async def get_user_sign_in_activity(self, external_id: str) -> dict[str, str | None] | None:
+        """Best-effort live read of a user's last-sign-in timestamps — needs AuditLog.Read.All in ADDITION to the
+        already-granted User.Read.All (NOT confirmed granted on this tenant as of 2026-09-23); a missing-scope
+        403 surfaces as the normal GraphError('PROVIDER_PERMISSION_DENIED', ...), same as every other
+        under-permissioned call in this app — callers must catch it, same as get_user_licenses. Used only for
+        Privileged (PU)/Test (TU) account monitoring (see app.services.privileged_accounts); not synced/stored."""
+        async with self._client() as client:
+            item = await client.get_one(f"/users/{external_id}?$select=signInActivity")
+        if item is None:
+            return None
+        activity = item.get("signInActivity") or {}
+        return {"last_sign_in_at": activity.get("lastSignInDateTime"), "last_non_interactive_sign_in_at": activity.get("lastNonInteractiveSignInDateTime")}
 
     async def get_user_app_role_assignments(self, external_id: str) -> list[dict[str, str]]:
         """Live read of ALL of a user's application role assignments — including ones granted directly in Entra
@@ -237,6 +256,13 @@ class EntraProvider(IdentityProvider):
         async with self._client() as client:
             items = await client.get_all(f"/groups/{external_id}/members", params=params)
         return [self._user_from_graph(item) for item in items if item.get("@odata.type", "#microsoft.graph.user") == "#microsoft.graph.user"]
+
+    async def get_group_owner_ids(self, external_id: str) -> list[str]:
+        """Live read of a group's owners (Entra object ids of user owners). Not synced/stored; used only to
+        suggest an Access Review reviewer. Readable with the same Group.Read.All the group sync already uses."""
+        async with self._client() as client:
+            items = await client.get_all(f"/groups/{external_id}/owners", params={"$select": "id"})
+        return [item["id"] for item in items if item.get("id") and item.get("@odata.type", "#microsoft.graph.user") == "#microsoft.graph.user"]
 
     async def add_group_member(self, group_external_id: str, user_external_id: str) -> bool:
         async with self._client() as client:

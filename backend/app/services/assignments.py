@@ -191,10 +191,15 @@ async def _supersede_existing_assignment(session: AsyncSession, *, user_id: UUID
     await session.commit()
 
 
-async def create_assignment(session: AsyncSession, data, actor_subject: str, request_id: str, check_sod_at_creation: bool = False, birthright_policy_id: Optional[UUID] = None) -> tuple[AccessAssignment, dict]:
+async def create_assignment(session: AsyncSession, data, actor_subject: str, request_id: str, check_sod_at_creation: bool = False, birthright_policy_id: Optional[UUID] = None, group_role_mapping_id: Optional[UUID] = None) -> tuple[AccessAssignment, dict]:
     target_user = await session.get(User, data.user_id)
     if not target_user:
         raise AccessPilotError("USER_NOT_FOUND", "The user was not found.", 404)
+    # The association gate: a Privileged (PU) / Test (TU) shadow account must be linked to a real owner before
+    # it can be granted anything at all — otherwise an orphaned privileged identity nobody's accountable for
+    # could quietly accumulate access. See app.services.privileged_accounts.
+    if target_user.account_type != "NORMAL" and target_user.linked_user_id is None:
+        raise AccessPilotError("ACCOUNT_NOT_ASSOCIATED", "This account must be linked to a real user before it can be granted access.", 409)
     provider_id, resource_name, _ = await _resolve_target(session, data.resource_type, data.resource_id)
 
     if data.resource_type == "APPLICATION":
@@ -270,6 +275,7 @@ async def create_assignment(session: AsyncSession, data, actor_subject: str, req
         fallback_unlock_at=fallback_unlock_at,
         bypass_activation=bypass_activation,
         birthright_policy_id=birthright_policy_id,
+        group_role_mapping_id=group_role_mapping_id,
         activated_at=now if status == "ACTIVE" else None,
     )
     session.add(assignment)
@@ -429,6 +435,24 @@ async def activate_assignment(session: AsyncSession, assignment_id: UUID, actor_
         await create_notification(session, assignment.user_id, "ASSIGNMENT_ACTIVATED", f"An administrator activated your access to {resource_name} — active for {duration_hours} hour{'s' if duration_hours != 1 else ''}.", link="/my-access")
     await session.commit()
     await session.refresh(assignment)
+
+    # Cascading activation: a GROUP that has one or more active GroupRoleMapping rules attached to it delivers
+    # those linked Role/Application grants for real, in this same action — not left sitting ELIGIBLE waiting for
+    # a second, separate activation. GroupRoleMapping.resource_type can never itself be GROUP (enforced at the
+    # schema level), so this can't recurse into another cascade. Each cascaded activation is its own real SoD
+    # check and its own real Entra/Graph call via the exact same activate_assignment path — a conflict or a
+    # provider failure on the cascaded role never undoes the group's own activation, which already succeeded and
+    # committed above; it's reported and skipped instead.
+    if assignment.resource_type == "GROUP":
+        from app.services.group_role_mapping import get_or_create_eligible_assignments_for_group
+        linked_eligible = await get_or_create_eligible_assignments_for_group(session, assignment.user_id, assignment.resource_id, actor_subject, request_id)
+        for linked in linked_eligible:
+            try:
+                await activate_assignment(session, linked.id, actor_subject, actor_roles, duration_hours, f"Cascaded from group activation — {justification}", request_id, override_sod=override_sod)
+            except AccessPilotError as exc:
+                await record_audit(session, action="GROUP_ROLE_MAPPING_CASCADE_ACTIVATION_FAILED", target_type="ASSIGNMENT", target_id=linked.id, provider_id=linked.provider_id, actor_user_id=actor_id, request_id=request_id, result="FAILURE", metadata={"error_code": getattr(exc, "code", "UNKNOWN"), "group_assignment_id": str(assignment.id)})
+                continue
+
     return assignment, await hydrate_display_fields(session, assignment)
 
 
@@ -460,6 +484,20 @@ async def deactivate_assignment(session: AsyncSession, assignment_id: UUID, acto
         await create_notification(session, assignment.user_id, "ASSIGNMENT_DEACTIVATED", f"An administrator deactivated your access to {resource_name}.", link="/my-access")
     await session.commit()
     await session.refresh(assignment)
+
+    # Symmetric half of cascading activation above: a role/app this group's own activation delivered for real
+    # loses that real access the moment the group's own real access ends too — otherwise it would sit ACTIVE in
+    # Entra with no group membership left to justify it, an orphaned over-privilege rather than a convenience gap.
+    if assignment.resource_type == "GROUP":
+        from app.services.group_role_mapping import get_linked_assignments_for_group
+        linked_active = await get_linked_assignments_for_group(session, assignment.user_id, assignment.resource_id, statuses=("ACTIVE",))
+        for linked in linked_active:
+            try:
+                await deactivate_assignment(session, linked.id, actor_subject, actor_roles, request_id)
+            except AccessPilotError as exc:
+                await record_audit(session, action="GROUP_ROLE_MAPPING_CASCADE_DEACTIVATION_FAILED", target_type="ASSIGNMENT", target_id=linked.id, provider_id=linked.provider_id, actor_user_id=actor_id, request_id=request_id, result="FAILURE", metadata={"error_code": getattr(exc, "code", "UNKNOWN"), "group_assignment_id": str(assignment.id)})
+                continue
+
     return assignment, await hydrate_display_fields(session, assignment)
 
 
@@ -490,6 +528,21 @@ async def revoke_assignment(session: AsyncSession, assignment_id: UUID, actor_su
         await create_notification(session, assignment.user_id, "ASSIGNMENT_REVOKED", f"Your access to {resource_name} was revoked by an administrator.", link="/my-access")
     await session.commit()
     await session.refresh(assignment)
+
+    # Revoking a GROUP is permanent and final — anything a mapping linked to it (ELIGIBLE or ACTIVE alike) is
+    # revoked along with it, the same symmetric-lifecycle reasoning as deactivate_assignment above, just covering
+    # every non-final status since revoke itself works on any status, not just ACTIVE.
+    if assignment.resource_type == "GROUP":
+        from app.services.group_role_mapping import get_linked_assignments_for_group
+        linked_all = await get_linked_assignments_for_group(session, assignment.user_id, assignment.resource_id)
+        linked_live = [linked for linked in linked_all if linked.status not in ("REJECTED", "REVOKED", "EXPIRED")]
+        for linked in linked_live:
+            try:
+                await revoke_assignment(session, linked.id, actor_subject, f"Cascaded from group revocation — {justification}", request_id, reason="GROUP_ROLE_MAPPING_CASCADE_REVOKED")
+            except AccessPilotError as exc:
+                await record_audit(session, action="GROUP_ROLE_MAPPING_CASCADE_REVOCATION_FAILED", target_type="ASSIGNMENT", target_id=linked.id, provider_id=linked.provider_id, actor_user_id=actor_id, request_id=request_id, result="FAILURE", metadata={"error_code": getattr(exc, "code", "UNKNOWN"), "group_assignment_id": str(assignment.id)})
+                continue
+
     return assignment, await hydrate_display_fields(session, assignment)
 
 

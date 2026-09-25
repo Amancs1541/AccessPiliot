@@ -102,7 +102,7 @@ async def get_user_access_summary(session: AsyncSession, user_id: UUID) -> UserA
     user = await get_user(session, user_id)
 
     assignments = list((await session.scalars(
-        select(AccessAssignment).where(AccessAssignment.user_id == user_id, AccessAssignment.status.in_(("ACTIVE", "SCHEDULED", "PENDING_APPROVAL"))).order_by(AccessAssignment.created_at.desc())
+        select(AccessAssignment).where(AccessAssignment.user_id == user_id, AccessAssignment.status.in_(("ACTIVE", "ELIGIBLE", "SCHEDULED", "PENDING_APPROVAL"))).order_by(AccessAssignment.created_at.desc())
     )).all())
     items: list[UserAccessItem] = []
     tracked_group_ids: set[UUID] = set()

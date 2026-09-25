@@ -249,6 +249,10 @@ async def commit_import(session: AsyncSession, import_id: UUID, actor_subject: s
             revoked, failed = await _revoke_all_access_for_leaver(session, existing.id, actor_subject, record.employee_id, onboarding_import, request_id)
             access_revoked += revoked
             access_revoke_failed += failed
+            # A leaver's Privileged (PU) / Test (TU) shadow accounts must never survive their departure
+            # unnoticed — same principle as revoking their own access above, extended to anything linked to them.
+            from app.services.privileged_accounts import disable_linked_accounts_for_leaver
+            await disable_linked_accounts_for_leaver(session, existing.id, actor_subject, request_id)
             continue
 
         # CREATE / UPDATE / NO_CHANGE all resolve to the same one identity row, and are all worth re-evaluating —

@@ -28,6 +28,13 @@ class MockProvider(IdentityProvider):
                 self.users[index] = updated
                 return updated
         raise GraphError("PROVIDER_RESOURCE_NOT_FOUND", "No such mock user.", 502)
+
+    async def set_user_enabled(self, external_id: str, enabled: bool) -> bool:
+        for index, user in enumerate(self.users):
+            if user.external_id == external_id:
+                self.users[index] = NormalizedUser(external_id=user.external_id, email=user.email, display_name=user.display_name, given_name=user.given_name, surname=user.surname, department=user.department, job_title=user.job_title, status="ACTIVE" if enabled else "DISABLED")
+                return True
+        raise GraphError("PROVIDER_RESOURCE_NOT_FOUND", "No such mock user.", 502)
     async def get_groups(self, query: str | None = None) -> list[NormalizedGroup]: return self._filter(self.groups, query, lambda item: f"{item.name} {item.description or ''}")
     async def get_group(self, external_id: str) -> NormalizedGroup | None: return next((item for item in self.groups if item.external_id == external_id), None)
     async def get_group_members(self, external_id: str) -> list[NormalizedUser]: return [user for user in self.users if user.external_id in self.memberships.get(external_id, set())]

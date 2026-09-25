@@ -1,0 +1,92 @@
+# AccessPilot — one-command environment. Usage: docker compose up -d --build
+# Nothing to configure: secrets are generated on first start and kept in the `appdata` volume.
+# The code is cloned from GitHub at build time (see the two *.Dockerfile files).
+
+name: accesspilot
+
+x-source-args: &source-args
+  GITHUB_REPO: ${GITHUB_REPO:-Amancs1541/AccessPiliot}
+  GIT_REF: ${GIT_REF:-main}
+
+services:
+  # One-shot: creates the random Postgres password once and hands /data to the backend's non-root user.
+  init:
+    image: alpine:3.20
+    volumes:
+      - appdata:/data
+    command:
+      - sh
+      - -c
+      - |
+        if [ ! -s /data/pg_password ]; then
+          head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > /data/pg_password
+        fi
+        chmod 644 /data/pg_password
+        chown 10001:10001 /data
+        touch /data/.env
+        chown 10001:10001 /data/.env
+        chmod 600 /data/.env
+    restart: "no"
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_USER: accesspilot
+      POSTGRES_DB: accesspilot
+      POSTGRES_PASSWORD_FILE: /data/pg_password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - appdata:/data:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U accesspilot -d accesspilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend.Dockerfile
+      args: *source-args
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      PROVIDER_MODE: mock
+      # Must equal the address you open the dashboard at (browser CORS).
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
+    volumes:
+      - appdata:/data
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    # In-process background workers: keep exactly ONE replica of this service.
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend.Dockerfile
+      args:
+        <<: *source-args
+        # Baked into the JS bundle. Default matches the app's built-in fallback (http://localhost:8000).
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+
+volumes:
+  pgdata:
+  appdata:

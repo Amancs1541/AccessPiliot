@@ -35,7 +35,7 @@ def _get_jwks_client(jwks_url: str) -> PyJWKClient:
         _jwks_client_url = jwks_url
     return _jwks_client
 
-VALID_ROLES = {"AccessPilot.User", "AccessPilot.Admin", "AccessPilot.BreakGlassAdmin", "AccessPilot.SoDAdmin", "AccessPilot.SoCAdmin", "AccessPilot.ServerAdmin", "AccessPilot.NHIAdmin"}
+VALID_ROLES = {"AccessPilot.User", "AccessPilot.Admin", "AccessPilot.BreakGlassAdmin", "AccessPilot.SoDAdmin", "AccessPilot.SoCAdmin", "AccessPilot.ServerAdmin", "AccessPilot.NHIAdmin", "AccessPilot.AccessReviewAdmin"}
 PERMISSIONS = {
     "AccessPilot.User": {"ME_READ", "DASHBOARD_USER_READ", "ACCESS_REQUEST_CREATE", "ACCESS_REQUEST_READ_SELF", "ACCESS_REQUEST_CANCEL_SELF", "ASSIGNMENT_READ_SELF", "ASSIGNMENT_ACTIVATE_SELF", "ASSIGNMENT_REVOKE_SELF"},
     # Deliberately NOT SOD_READ or SOC_READ — a plain Admin has no visibility into Separation of Duties at all
@@ -43,7 +43,9 @@ PERMISSIONS = {
     # SOC already has. An Admin also cannot grant or revoke AccessPilot.SoDAdmin/SoCAdmin themselves in any way —
     # both roles are sourced exclusively from a real Entra App Role assignment, the same as every other role here;
     # there is deliberately no in-app path to either at all.
-    "AccessPilot.Admin": {"ME_READ", "DASHBOARD_ADMIN_READ", "USER_READ", "GROUP_READ", "GROUP_MANAGE", "ROLE_READ", "ROLE_MANAGE", "PROVIDER_READ", "PROVIDER_MANAGE", "PROVIDER_SYNC", "ACCESS_REQUEST_READ", "ACCESS_REQUEST_APPROVE", "ACCESS_REQUEST_REJECT", "ACCESS_REQUEST_CANCEL", "ASSIGNMENT_READ", "ASSIGNMENT_CREATE", "ASSIGNMENT_REVOKE", "ASSIGNMENT_EXTEND", "POLICY_READ", "POLICY_CREATE", "POLICY_UPDATE", "POLICY_DELETE", "AUDIT_READ", "SYNC_READ", "PACKAGE_READ", "PACKAGE_MANAGE", "ONBOARDING_READ", "ONBOARDING_MANAGE", "SECURITY_SETTINGS_MANAGE", "BRANDING_MANAGE"},
+    # ACCESS_REVIEW_READ/MANAGE are a deliberate exception to that isolation pattern — per explicit request, a
+    # plain Admin keeps full Access Review capability rather than being excluded the way it's excluded from SoD.
+    "AccessPilot.Admin": {"ME_READ", "DASHBOARD_ADMIN_READ", "USER_READ", "GROUP_READ", "GROUP_MANAGE", "ROLE_READ", "ROLE_MANAGE", "PROVIDER_READ", "PROVIDER_MANAGE", "PROVIDER_SYNC", "ACCESS_REQUEST_READ", "ACCESS_REQUEST_APPROVE", "ACCESS_REQUEST_REJECT", "ACCESS_REQUEST_CANCEL", "ASSIGNMENT_READ", "ASSIGNMENT_CREATE", "ASSIGNMENT_REVOKE", "ASSIGNMENT_EXTEND", "POLICY_READ", "POLICY_CREATE", "POLICY_UPDATE", "POLICY_DELETE", "AUDIT_READ", "SYNC_READ", "PACKAGE_READ", "PACKAGE_MANAGE", "ONBOARDING_READ", "ONBOARDING_MANAGE", "SECURITY_SETTINGS_MANAGE", "BRANDING_MANAGE", "ACCESS_REVIEW_READ", "ACCESS_REVIEW_MANAGE"},
     # Deliberately narrow: the default landing role for the hidden /emergency-access/:token flow. Can see NOTHING
     # else in the app — no users/groups/roles/assignments/etc. — until the holder explicitly elevates to full
     # AccessPilot.Admin via POST /auth/breakglass-elevate (see _authenticate_via_portal_config_or_breakglass below).
@@ -83,6 +85,11 @@ PERMISSIONS = {
     # governance action this role exists to perform, not a separate escalation.
     "AccessPilot.NHIAdmin": {"ME_READ", "DASHBOARD_USER_READ", "NHI_READ", "NHI_MANAGE", "USER_READ"},
 }
+# Deliberately different from every other specialized role above: this one is NOT excluded from Admin — it IS a
+# full Admin, plus Access Review, by explicit request. Computed as a reference to AccessPilot.Admin's own set
+# (never a copy-pasted duplicate) so it can never silently drift out of sync if Admin's permissions change later.
+# A real, intentional second path to full Admin privilege via Entra — worth remembering when assigning this role.
+PERMISSIONS["AccessPilot.AccessReviewAdmin"] = PERMISSIONS["AccessPilot.Admin"] | {"ACCESS_REVIEW_READ", "ACCESS_REVIEW_MANAGE"}
 
 @dataclass(frozen=True)
 class AuthenticatedUser:
