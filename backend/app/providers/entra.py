@@ -186,6 +186,17 @@ class EntraProvider(IdentityProvider):
             await client.request("PATCH", f"/users/{external_id}", json={"accountEnabled": enabled})
         return True
 
+    async def set_user_manager(self, external_id: str, manager_external_id: str) -> bool:
+        """PUT /users/{id}/manager/$ref — covered by User.ReadWrite.All (already granted)."""
+        async with self._client() as client:
+            await client.request("PUT", f"/users/{external_id}/manager/$ref", json={"@odata.id": f"https://graph.microsoft.com/v1.0/users/{manager_external_id}"})
+        return True
+
+    async def delete_user(self, external_id: str) -> bool:
+        async with self._client() as client:
+            await client.request("DELETE", f"/users/{external_id}")
+        return True
+
     async def get_user_licenses(self, external_id: str) -> list[dict[str, str]]:
         """Best-effort live read of a user's assigned Microsoft 365/Entra licenses — not synced/stored, fetched
         on demand. Resolving human-readable SKU names needs Organization.Read.All; if that's not granted, the
@@ -421,7 +432,7 @@ class EntraProvider(IdentityProvider):
                 raise ProviderConflictError("A user with this email already exists in Microsoft Entra.")
             password = secrets.token_urlsafe(18)
             body: dict[str, Any] = {
-                "accountEnabled": True,
+                "accountEnabled": request.enabled,
                 "displayName": request.display_name,
                 "mailNickname": request.mail_nickname,
                 "userPrincipalName": request.user_principal_name,
@@ -431,6 +442,12 @@ class EntraProvider(IdentityProvider):
                 body["department"] = request.department
             if request.job_title:
                 body["jobTitle"] = request.job_title
+            if request.given_name:
+                body["givenName"] = request.given_name
+            if request.surname:
+                body["surname"] = request.surname
+            if request.employee_id:
+                body["employeeId"] = request.employee_id
             response = await client.request("POST", "/users", json=body)
         # Graph's POST /users response does NOT include `department`/`jobTitle` unless explicitly $select'd — they
         # ARE saved on the real object (we just set them above), just not echoed back. Trust what we sent rather

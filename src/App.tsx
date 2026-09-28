@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Bot, Box, Check, ChevronLeft, ChevronRight, Clock3, Cloud, Copy, Database, ExternalLink, FileCheck2, FolderKanban, Gauge, GitBranch, Image, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Lock, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldAlert, ShieldCheck, SlidersHorizontal, UploadCloud, UserRound, Users, X } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Bot, Box, Check, ChevronLeft, ChevronRight, Clock3, Cloud, Copy, Database, ExternalLink, FileCheck2, FolderKanban, Gauge, GitBranch, Image, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Lock, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldAlert, ShieldCheck, SlidersHorizontal, UploadCloud, UserRound, Users, UserX, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { currentUser, policies, type RequestStatus, type Role } from './mock';
 import { mockService, useMockState } from './mockService';
@@ -10,7 +10,7 @@ import { BreakGlassDashboard } from './BreakGlassDashboard';
 import { IdleGuard, useRefreshSecuritySettings, useAppTimezone } from './IdleGuard';
 import logo from './assets/logo.png';
 
-interface ApiUser { id: string; provider_id: string; external_id: string; email: string; display_name: string; given_name: string | null; surname: string | null; department: string | null; job_title: string | null; status: string; employee_id: string | null; source: string | null; account_type: string; linked_user_id: string | null; employee_category: string | null; manager_id: string | null; last_synced_at: string | null; }
+interface ApiUser { id: string; provider_id: string; external_id: string; email: string; display_name: string; given_name: string | null; surname: string | null; department: string | null; job_title: string | null; status: string; employee_id: string | null; source: string | null; account_type: string; linked_user_id: string | null; employee_category: string | null; manager_id: string | null; start_date: string | null; leaver_date: string | null; employment_type: string | null; last_synced_at: string | null; }
 interface ApiHierarchyNode { id: string; display_name: string; email: string; status: string; employee_category: string | null; manager_id: string | null; }
 interface ApiLinkedAccount { id: string; display_name: string; email: string; account_type: string; status: string; }
 interface ApiPrivilegedAccountPolicy { account_type: string; default_approver_id: string | null; default_approver_display_name: string | null; approval_required: boolean; }
@@ -30,7 +30,7 @@ interface DashboardAdmin { users: number; groups: number; roles: number; privile
 interface ApiActivationTimeline { days: number; series: { date: string; count: number }[]; }
 interface ApiUserAccessSegments { permanentActive: number; eligible: number; }
 interface ApiSegmentMember { id: string; display_name: string; email: string; }
-interface ApiOnboardingImport { id: string; filename: string; status: string; total_records: number; created_count: number; updated_count: number; disabled_count: number; no_change_count: number; failed_count: number; access_revoked_count: number; access_revoke_failed_count: number; real_accounts_provisioned_count: number; birthright_assignments_created_count: number; error_summary: Record<string, unknown> | null; created_at: string; completed_at: string | null; }
+interface ApiOnboardingImport { id: string; filename: string; status: string; total_records: number; created_count: number; updated_count: number; disabled_count: number; no_change_count: number; failed_count: number; access_revoked_count: number; access_revoke_failed_count: number; real_accounts_provisioned_count: number; birthright_assignments_created_count: number; birthright_assignments_revoked_count: number; moves_scheduled_count: number; error_summary: Record<string, unknown> | null; created_at: string; completed_at: string | null; }
 interface ApiOnboardingImportRecord { row_number: number; employee_id: string; action: string; error_message: string | null; raw_data: Record<string, string> | null; }
 interface ApiSecuritySettings { blur_enabled: boolean; blur_after_minutes: number; lock_enabled: boolean; lock_after_minutes: number; logout_enabled: boolean; logout_after_minutes: number; timezone: string; support_contact_email: string | null; }
 // A short, curated list rather than every IANA zone (~400) — covers the timezones this deployment's users are
@@ -136,6 +136,9 @@ const nav = [
   // permission set is a full Admin superset by design (see app/security/auth.py), so a holder's `role` itself
   // already becomes 'admin' (see auth.tsx) and this plain `roles: ['admin']` entry already covers them too.
   { label: 'Access Reviews', icon: FileCheck2, to: '/admin/access-reviews', roles: ['admin'], section: 'ACCESS REVIEW' },
+  { label: 'Joiners', icon: UserRound, to: '/admin/joiners', roles: ['admin'] },
+  { label: 'Movers', icon: Activity, to: '/admin/movers', roles: ['admin'] },
+  { label: 'Leavers', icon: UserX, to: '/admin/leavers', roles: ['admin'] },
   // Its own sidebar section, not folded into GOVERNANCE — exclusive to a real AccessPilot.SoDAdmin (see Shell's
   // nav filter, which checks auth.isSodAdmin for items marked extra: 'sod'). roles: [] is deliberate: a plain
   // Admin no longer sees this section at all, the same exclusive-to-its-own-role treatment SOC already has.
@@ -165,7 +168,7 @@ function App() {
   if (auth.breakglassActive && !auth.breakglassElevated) return <BreakGlassDashboard />;
   const role = auth.authConfigured ? auth.role : mockRole;
   const changeRole = (nextRole: Role) => { localStorage.setItem('accesspilot.mockRole', nextRole); setMockRole(nextRole); };
-  return <IdleGuard><Shell role={role} setRole={changeRole}><Routes><Route path="/" element={<Navigate to="/dashboard" replace />} /><Route path="/dashboard" element={<Dashboard role={role} />} /><Route path="/my-access" element={<MyAccess />} /><Route path="/request-access" element={<RequestAccess />} /><Route path="/request-packages" element={<RequestPackagesPage />} /><Route path="/my-requests" element={<Requests mine />} /><Route path="/approvals" element={<MyApprovalsPage />} /><Route path="/profile" element={<Profile />} /><Route path="/admin/users" element={<AdminOnly role={role}><UsersPage /></AdminOnly>} /><Route path="/admin/users/:id" element={<AdminOnly role={role}><UserDetail /></AdminOnly>} /><Route path="/admin/org-chart" element={<AdminOnly role={role}><OrgChartPage /></AdminOnly>} /><Route path="/admin/groups" element={<AdminOnly role={role}><GroupsPage /></AdminOnly>} /><Route path="/admin/groups/:id" element={<AdminOnly role={role}><GroupDetail /></AdminOnly>} /><Route path="/admin/roles" element={<AdminOnly role={role}><RolesPage /></AdminOnly>} /><Route path="/admin/access-requests" element={<AdminOnly role={role}><Requests /></AdminOnly>} /><Route path="/admin/access-requests/:id" element={<AdminOnly role={role}><RequestDetailInteractive /></AdminOnly>} /><Route path="/admin/assignments" element={<AdminOnly role={role}><AssignmentsInteractive /></AdminOnly>} /><Route path="/admin/access-packages" element={<AdminOnly role={role}><AccessPackagesInteractive /></AdminOnly>} /><Route path="/admin/policies" element={<AdminOnly role={role}><PoliciesPage /></AdminOnly>} /><Route path="/admin/privileged-accounts" element={<AdminOnly role={role}><PrivilegedAccountActivityPage /></AdminOnly>} /><Route path="/admin/access-reviews" element={<AdminOnly role={role}><AccessReviewsPage /></AdminOnly>} /><Route path="/admin/access-reviews/:id" element={<AdminOnly role={role}><AccessReviewDetailPage /></AdminOnly>} /><Route path="/my-packages" element={<MyPackagesPage />} /><Route path="/my-access-reviews" element={<MyAccessReviewsPage />} /><Route path="/admin/audit" element={<AdminOnly role={role}><AuditPage /></AdminOnly>} /><Route path="/admin/providers" element={<AdminOnly role={role}><ProvidersPage /></AdminOnly>} /><Route path="/admin/sync" element={<AdminOnly role={role}><SyncPage /></AdminOnly>} /><Route path="/admin/onboarding" element={<AdminOnly role={role}><OnboardingPage /></AdminOnly>} /><Route path="/admin/security" element={<AdminOnly role={role}><SecurityPage /></AdminOnly>} /><Route path="/admin/branding" element={<AdminOnly role={role}><BrandingPage /></AdminOnly>} /><Route path="/admin/sod" element={auth.isSodAdmin ? <SodPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/sod/configuration" element={auth.isSodAdmin ? <SodConfigurationPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/soc" element={auth.isSocAdmin ? <SocDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health" element={auth.isServerAdmin ? <ServerHealthDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health/troubleshooting" element={auth.isServerAdmin ? <TroubleshootingDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi" element={auth.isNhiAdmin ? <NhiPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi/:id" element={auth.isNhiAdmin ? <NhiDetailPage /> : <Navigate to="/dashboard" replace />} /><Route path="*" element={<Navigate to="/dashboard" replace />} /></Routes></Shell></IdleGuard>;
+  return <IdleGuard><Shell role={role} setRole={changeRole}><Routes><Route path="/" element={<Navigate to="/dashboard" replace />} /><Route path="/dashboard" element={<Dashboard role={role} />} /><Route path="/my-access" element={<MyAccess />} /><Route path="/request-access" element={<RequestAccess />} /><Route path="/request-packages" element={<RequestPackagesPage />} /><Route path="/my-requests" element={<Requests mine />} /><Route path="/approvals" element={<MyApprovalsPage />} /><Route path="/profile" element={<Profile />} /><Route path="/admin/users" element={<AdminOnly role={role}><UsersPage /></AdminOnly>} /><Route path="/admin/users/:id" element={<AdminOnly role={role}><UserDetail /></AdminOnly>} /><Route path="/admin/org-chart" element={<AdminOnly role={role}><OrgChartPage /></AdminOnly>} /><Route path="/admin/groups" element={<AdminOnly role={role}><GroupsPage /></AdminOnly>} /><Route path="/admin/groups/:id" element={<AdminOnly role={role}><GroupDetail /></AdminOnly>} /><Route path="/admin/roles" element={<AdminOnly role={role}><RolesPage /></AdminOnly>} /><Route path="/admin/access-requests" element={<AdminOnly role={role}><Requests /></AdminOnly>} /><Route path="/admin/access-requests/:id" element={<AdminOnly role={role}><RequestDetailInteractive /></AdminOnly>} /><Route path="/admin/assignments" element={<AdminOnly role={role}><AssignmentsInteractive /></AdminOnly>} /><Route path="/admin/access-packages" element={<AdminOnly role={role}><AccessPackagesInteractive /></AdminOnly>} /><Route path="/admin/policies" element={<AdminOnly role={role}><PoliciesPage /></AdminOnly>} /><Route path="/admin/privileged-accounts" element={<AdminOnly role={role}><PrivilegedAccountActivityPage /></AdminOnly>} /><Route path="/admin/joiners" element={<AdminOnly role={role}><JoinersPage /></AdminOnly>} /><Route path="/admin/movers" element={<AdminOnly role={role}><MoversPage /></AdminOnly>} /><Route path="/admin/leavers" element={<AdminOnly role={role}><LeaversPage /></AdminOnly>} /><Route path="/admin/access-reviews" element={<AdminOnly role={role}><AccessReviewsPage /></AdminOnly>} /><Route path="/admin/access-reviews/:id" element={<AdminOnly role={role}><AccessReviewDetailPage /></AdminOnly>} /><Route path="/my-packages" element={<MyPackagesPage />} /><Route path="/my-access-reviews" element={<MyAccessReviewsPage />} /><Route path="/admin/audit" element={<AdminOnly role={role}><AuditPage /></AdminOnly>} /><Route path="/admin/providers" element={<AdminOnly role={role}><ProvidersPage /></AdminOnly>} /><Route path="/admin/sync" element={<AdminOnly role={role}><SyncPage /></AdminOnly>} /><Route path="/admin/onboarding" element={<AdminOnly role={role}><OnboardingPage /></AdminOnly>} /><Route path="/admin/security" element={<AdminOnly role={role}><SecurityPage /></AdminOnly>} /><Route path="/admin/branding" element={<AdminOnly role={role}><BrandingPage /></AdminOnly>} /><Route path="/admin/sod" element={auth.isSodAdmin ? <SodPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/sod/configuration" element={auth.isSodAdmin ? <SodConfigurationPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/soc" element={auth.isSocAdmin ? <SocDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health" element={auth.isServerAdmin ? <ServerHealthDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health/troubleshooting" element={auth.isServerAdmin ? <TroubleshootingDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi" element={auth.isNhiAdmin ? <NhiPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi/:id" element={auth.isNhiAdmin ? <NhiDetailPage /> : <Navigate to="/dashboard" replace />} /><Route path="*" element={<Navigate to="/dashboard" replace />} /></Routes></Shell></IdleGuard>;
 }
 function SignInScreen() {
   const auth = useAuth();
@@ -1610,6 +1613,223 @@ function OrgChartPage() {
     </section>
   </Page>;
 }
+const EMPLOYMENT_TYPES = [{ value: 'EMPLOYEE', label: 'Employee' }, { value: 'CONTRACTOR', label: 'Contractor' }, { value: 'INTERN', label: 'Intern' }, { value: 'OTHER', label: 'Other' }];
+// Leaver date + employment type for one person (the type can scope a leaver policy), and the manual
+// "Start leaver process now" button. The leaver date is stored in AccessPilot only; on that date (at the policy's
+// time) the leaver policy runs automatically: access revoked, accounts disabled in every IdP, and so on.
+interface ApiLeaverOverview { status: string; leaver_processed_at: string | null; leaver_date: string | null; policy_name: string | null; pending_leaver_request: ApiLeaverRequest | null; pending_reenable_request: ApiReenableRequest | null; recent_events: ApiLifecycleEvent[]; }
+// A dedicated Leaver component for the User Detail page: the date/policy fields, the current state of any pending
+// manual-start or re-enable request (decidable right here, so it is never invisible), and a short recent-activity
+// log — so a second click on "Start leaver process" never again looks like a silent no-op.
+function UserLeaverPanel({ user, onChanged }: { user: ApiUser; onChanged: () => void }) {
+  const auth = useAuth();
+  const timezone = useAppTimezone();
+  const { data: overview, reload: reloadOverview } = useApiResource<ApiLeaverOverview>(`/api/v1/lifecycle/people/${user.id}/leaver-overview`);
+  const [leaverDate, setLeaverDate] = useState(user.leaver_date || '');
+  const [employmentType, setEmploymentType] = useState(user.employment_type || '');
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  useEffect(() => { setLeaverDate(user.leaver_date || ''); setEmploymentType(user.employment_type || ''); }, [user.leaver_date, user.employment_type]);
+  if (user.account_type !== 'NORMAL') return null;
+  const refresh = () => { reloadOverview(); onChanged(); };
+  const save = async () => {
+    setBusy(true); setMessage('');
+    try {
+      const payload: Record<string, unknown> = {};
+      if (leaverDate) payload.leaver_date = leaverDate; else payload.clear_leaver_date = true;
+      if (employmentType) payload.employment_type = employmentType; else payload.clear_employment_type = true;
+      const response = await auth.apiRequest(`/api/v1/lifecycle/people/${user.id}`, { method: 'PATCH', body: JSON.stringify(payload) });
+      const body = await response.json().catch(() => null);
+      setMessage(response.ok ? 'Saved.' : (body?.error?.message || 'Unable to save this.'));
+      if (response.ok) refresh();
+    } catch { setMessage('Unable to reach the backend.'); } finally { setBusy(false); }
+  };
+  // A proper inline form, not a browser prompt() dialog — window.prompt/confirm silently return null with no
+  // dialog at all in some embedded/webview browser contexts, which made this button appear to do nothing.
+  const [confirmingLeave, setConfirmingLeave] = useState(false);
+  const [justification, setJustification] = useState('');
+  const leaveNow = async () => {
+    if (justification.trim().length < 10) { setMessage('Enter a justification of at least 10 characters.'); return; }
+    setBusy(true); setMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/lifecycle/people/${user.id}/leave-now`, { method: 'POST', body: JSON.stringify({ justification: justification.trim() }) });
+      const body = await response.json().catch(() => null);
+      setMessage(response.ok ? `Accounts disabled (${body.accounts_note}). Waiting for approval from ${(body.approvers || []).join(', ') || 'an admin'}. The leaver process starts once it is approved.` : (body?.error?.message || 'Unable to start the leaver process.'));
+      if (response.ok) { setConfirmingLeave(false); setJustification(''); }
+      refresh();
+    } catch { setMessage('Unable to reach the backend.'); } finally { setBusy(false); }
+  };
+  const [decideNote, setDecideNote] = useState('');
+  const [decideBusy, setDecideBusy] = useState(false);
+  const decideLeaverRequest = async (approve: boolean) => {
+    if (!overview?.pending_leaver_request) return;
+    setDecideBusy(true); setMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/lifecycle/leaver-requests/${overview.pending_leaver_request.id}/decision`, { method: 'POST', body: JSON.stringify({ approve, note: decideNote.trim() || undefined }) });
+      const body = await response.json().catch(() => null);
+      setMessage(response.ok ? (body?.outcome || 'Done.') : (body?.error?.message || 'Unable to record the decision.'));
+      if (response.ok) setDecideNote('');
+      refresh();
+    } catch { setMessage('Unable to reach the backend.'); } finally { setDecideBusy(false); }
+  };
+  const decideReenableRequest = async (approve: boolean) => {
+    if (!overview?.pending_reenable_request) return;
+    setDecideBusy(true); setMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/lifecycle/reenable-requests/${overview.pending_reenable_request.id}/decision`, { method: 'POST', body: JSON.stringify({ approve, note: decideNote.trim() || undefined }) });
+      const body = await response.json().catch(() => null);
+      setMessage(response.ok ? (approve ? `Approved. ${body?.accounts_note || ''}` : 'Rejected.') : (body?.error?.message || 'Unable to record the decision.'));
+      if (response.ok) setDecideNote('');
+      refresh();
+    } catch { setMessage('Unable to reach the backend.'); } finally { setDecideBusy(false); }
+  };
+  const pendingLeaver = overview?.pending_leaver_request;
+  const pendingReenable = overview?.pending_reenable_request;
+  // The leaver process already ran and finished (no pending request either way) — "Start leaver process now" has
+  // nothing left to start until the account is brought back, so it stays hidden instead of clickable-but-doomed.
+  const alreadyProcessed = !!(overview?.leaver_processed_at && overview?.status === 'DISABLED');
+  return <>
+    <div className="panel-head"><h2>Leaver</h2></div>
+    <div className="detail-section">
+      <label className="key" style={{display:'block',marginBottom:10}}><span>Leaver date (last day)</span><input className="select" style={{width:'100%'}} type="date" value={leaverDate} onChange={event => setLeaverDate(event.target.value)}/></label>
+      <label className="key" style={{display:'block',marginBottom:10}}><span>Employment type</span><select className="select" style={{width:'100%'}} value={employmentType} onChange={event => setEmploymentType(event.target.value)}><option value="">Not set</option>{EMPLOYMENT_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></label>
+      {leaverDate && !pendingLeaver && <p className="subtitle" style={{marginTop:0,marginBottom:10}}>{overview?.policy_name ? `On this date the leaver process runs automatically, per the "${overview.policy_name}" policy (Movers page).` : 'On this date the leaver process runs automatically, per the matching leaver policy (Movers page).'}</p>}
+      {message && <div className="notice" style={{marginBottom:10}}>{message}</div>}
+
+      {pendingLeaver ? <div style={{marginBottom:12,padding:12,border:'1px solid #e0a3a3',borderRadius:8,background:'#fff8f7'}}>
+        <p style={{margin:'0 0 6px',fontWeight:600}}>A leaver request is waiting for approval</p>
+        <p className="subtitle" style={{margin:'0 0 6px'}}>{pendingLeaver.justification}</p>
+        <p className="subtitle" style={{margin:'0 0 10px'}}>Requested by {pendingLeaver.requested_by_name || 'an admin'} on {formatDateTime(pendingLeaver.created_at, timezone)} &middot; approver: {pendingLeaver.approvers.join(', ') || 'admins'}</p>
+        {pendingLeaver.can_decide ? <>
+          <input className="select" style={{width:'100%',marginBottom:8}} placeholder="Optional note" value={decideNote} onChange={event => setDecideNote(event.target.value)}/>
+          <div style={{display:'flex',gap:8}}>
+            <button className="btn btn-primary" disabled={decideBusy} onClick={() => void decideLeaverRequest(true)}>Approve (run leaver process)</button>
+            <button className="btn" disabled={decideBusy} onClick={() => void decideLeaverRequest(false)}>Deny (enable accounts again)</button>
+          </div>
+        </> : <p className="subtitle" style={{margin:0}}>Only {pendingLeaver.approvers.join(', ') || 'an admin'} can decide this.</p>}
+      </div> : pendingReenable ? <div style={{marginBottom:12,padding:12,border:'1px solid #e0a3a3',borderRadius:8,background:'#fff8f7'}}>
+        <p style={{margin:'0 0 6px',fontWeight:600}}>A request to enable {pendingReenable.scope_label === 'All accounts' ? 'this account' : pendingReenable.scope_label} again is waiting for approval</p>
+        <p className="subtitle" style={{margin:'0 0 6px'}}>{pendingReenable.reason}</p>
+        <p className="subtitle" style={{margin:'0 0 10px'}}>Requested by {pendingReenable.requested_by_name || 'an admin'} on {formatDateTime(pendingReenable.created_at, timezone)} &middot; approver: {pendingReenable.approvers.join(', ') || 'admins'}</p>
+        {pendingReenable.can_decide ? <>
+          <input className="select" style={{width:'100%',marginBottom:8}} placeholder="Optional note" value={decideNote} onChange={event => setDecideNote(event.target.value)}/>
+          <div style={{display:'flex',gap:8}}>
+            <button className="btn btn-primary" disabled={decideBusy} onClick={() => void decideReenableRequest(true)}>Approve</button>
+            <button className="btn" disabled={decideBusy} onClick={() => void decideReenableRequest(false)}>Reject</button>
+          </div>
+        </> : <p className="subtitle" style={{margin:0}}>Only {pendingReenable.approvers.join(', ') || 'an admin'} can decide this.</p>}
+      </div> : alreadyProcessed ? <div style={{marginBottom:12,padding:12,border:'1px solid #e1e8ea',borderRadius:8,background:'#fafbfb'}}>
+        <p style={{margin:'0 0 4px',fontWeight:600}}>This person already left</p>
+        <p className="subtitle" style={{margin:0}}>The leaver process ran on {formatDateTime(overview!.leaver_processed_at!, timezone)}. To bring them back, enable their account below (Accounts panel) — that needs their manager's approval.</p>
+      </div> : null}
+
+      <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+        <button className="btn btn-primary" disabled={busy} onClick={() => void save()}>{busy ? 'Working...' : 'Save'}</button>
+        {!confirmingLeave && !pendingLeaver && !pendingReenable && !alreadyProcessed && <button className="btn" style={{borderColor:'#e0a3a3',color:'#ae4949'}} disabled={busy} title={user.status === 'DISABLED' ? 'This person is already disabled; running the process also revokes any remaining access and disables their accounts in every IdP.' : undefined} onClick={() => { setConfirmingLeave(true); setJustification(''); setMessage(''); }}>Start leaver process now</button>}
+      </div>
+      {confirmingLeave && <div style={{marginTop:12,padding:12,border:'1px solid #e0a3a3',borderRadius:8,background:'#fff8f7'}}>
+        <p className="subtitle" style={{marginTop:0}}>Starting the leaver process for <strong>{user.display_name}</strong> disables their accounts in every connected IdP straight away, then asks their manager (or a lifecycle owner) to approve. Approved: the leaver process runs and access is revoked. Denied: the accounts are enabled again and you are notified.</p>
+        <label className="key" style={{display:'block',marginBottom:10}}><span>Justification (at least 10 characters)</span><textarea className="select" style={{width:'100%',minHeight:70,resize:'vertical'}} value={justification} onChange={event => setJustification(event.target.value)} placeholder="Why is this person leaving?"/></label>
+        <div style={{display:'flex',gap:8}}>
+          <button className="btn btn-primary" style={{background:'#ae4949',borderColor:'#ae4949'}} disabled={busy || justification.trim().length < 10} onClick={() => void leaveNow()}>{busy ? 'Working...' : 'Disable accounts and request approval'}</button>
+          <button className="btn" disabled={busy} onClick={() => { setConfirmingLeave(false); setJustification(''); }}>Cancel</button>
+        </div>
+      </div>}
+
+      {!!overview?.recent_events.length && <div style={{marginTop:16}}>
+        <p className="subtitle" style={{margin:'0 0 6px',fontWeight:600,color:'inherit'}}>Recent leaver activity</p>
+        {overview.recent_events.map(event => <div key={event.id} className="subtitle" style={{margin:'0 0 4px'}}>{formatDateTime(event.created_at, timezone)} &middot; {SOURCE_LABELS[event.source] || event.source} &middot; {event.revoked_count} access removed{event.notified.length ? ` · notified: ${event.notified.join(', ')}` : ''}</div>)}
+      </div>}
+    </div>
+  </>;
+}
+interface ApiIdentityAccount { id: string; provider_id: string; provider_name: string; provider_type: string; external_id: string; username: string | null; status: string; provisioned_by: string; is_primary: boolean; created_at: string; }
+interface ApiAccountsAction { user_status: string; results: { account_id: string; provider_name: string; ok: boolean; already: boolean; error: string | null }[]; accounts: ApiIdentityAccount[]; }
+// One row per connected IdP the person holds an account in, with a real "disable / enable in ALL IdPs" control
+// (each directory is attempted independently and reported separately). Accounts only — access is not revoked here.
+function UserAccountsPanel({ userId, onChanged }: { userId: string; onChanged: () => void }) {
+  const auth = useAuth();
+  const { data: accounts, error, reload } = useApiResource<ApiIdentityAccount[]>(`/api/v1/users/${userId}/accounts`);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [message, setMessage] = useState('');
+  const activeCount = (accounts || []).filter(a => a.status !== 'DISABLED').length;
+  const disabledCount = (accounts || []).filter(a => a.status === 'DISABLED').length;
+  const summarize = (body: ApiAccountsAction) => {
+    const failed = body.results.filter(r => !r.ok);
+    const done = body.results.filter(r => r.ok && !r.already).map(r => r.provider_name);
+    return [done.length ? `Changed: ${done.join(', ')}.` : 'Nothing needed changing.', ...failed.map(r => `${r.provider_name} failed: ${r.error}`)].join(' ');
+  };
+  // After the leaver process the accounts can only come back through an approved request (reason + manager
+  // approval) — a proper inline form, not window.prompt(), which silently returns null with no dialog at all in
+  // some embedded/webview browser contexts, making this look like it does nothing.
+  // `null` scope = every disabled account ("Enable in all IdPs"); a one-item list = just that one account (a
+  // single account's own "Enable" click) — approval then enables exactly that scope, nothing more.
+  const [needsReenable, setNeedsReenable] = useState(false);
+  const [reenableScope, setReenableScope] = useState<{ accountIds: string[] | null; label: string } | null>(null);
+  const [reenableReason, setReenableReason] = useState('');
+  const [reenableBusy, setReenableBusy] = useState(false);
+  const submitReenable = async () => {
+    if (reenableReason.trim().length < 10) { setMessage('Enter a reason of at least 10 characters.'); return; }
+    setReenableBusy(true); setMessage('');
+    try {
+      const payload: Record<string, unknown> = { reason: reenableReason.trim() };
+      if (reenableScope?.accountIds) payload.account_ids = reenableScope.accountIds;
+      const response = await auth.apiRequest(`/api/v1/lifecycle/people/${userId}/reenable-request`, { method: 'POST', body: JSON.stringify(payload) });
+      const body = await response.json().catch(() => null);
+      setMessage(response.ok ? `Request sent to ${(body?.approvers || []).join(', ') || 'the admins'} for approval. ${reenableScope?.label || 'The account'} is enabled once it is approved.` : (body?.error?.message || 'Unable to send the request.'));
+      if (response.ok) { setNeedsReenable(false); setReenableReason(''); setReenableScope(null); }
+    } catch { setMessage('Unable to reach the backend.'); } finally { setReenableBusy(false); }
+  };
+  const runAll = async (enable: boolean) => {
+    const names = (accounts || []).map(a => a.provider_name).join(', ');
+    if (!window.confirm(enable ? `Enable this person's account in every connected IdP (${names})?` : `Disable this person's account in EVERY connected IdP (${names})? They will be unable to sign in there. Their AccessPilot access is not revoked by this — use the leaver process for that.`)) return;
+    setBusy('all'); setMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/users/${userId}/accounts/${enable ? 'enable-all' : 'disable-all'}`, { method: 'POST' });
+      const body = await response.json().catch(() => null);
+      if (!response.ok && body?.error?.code === 'LEAVER_REENABLE_APPROVAL_REQUIRED') { setNeedsReenable(true); setReenableScope({ accountIds: null, label: 'The account in every IdP' }); setMessage(body?.error?.message || 'This person has left; enabling their account again needs a reason and approval.'); }
+      else setMessage(response.ok ? summarize(body as ApiAccountsAction) : (body?.error?.message || 'Unable to change these accounts.'));
+      reload(); onChanged();
+    } catch { setMessage('Unable to reach the backend.'); } finally { setBusy(null); }
+  };
+  const toggleOne = async (account: ApiIdentityAccount) => {
+    const enable = account.status === 'DISABLED';
+    if (!window.confirm(`${enable ? 'Enable' : 'Disable'} the ${account.provider_name} account (${account.username || account.external_id})?`)) return;
+    setBusy(account.id); setMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/users/${userId}/accounts/${account.id}/enabled`, { method: 'POST', body: JSON.stringify({ enabled: enable }) });
+      if (!response.ok) {
+        const failure = await response.json().catch(() => null);
+        if (failure?.error?.code === 'LEAVER_REENABLE_APPROVAL_REQUIRED') { setNeedsReenable(true); setReenableScope({ accountIds: [account.id], label: `Only the ${account.provider_name} account` }); setMessage(failure?.error?.message || 'This person has left; enabling their account again needs a reason and approval.'); } else setMessage(failure?.error?.message || 'Unable to change this account.');
+      }
+      reload(); onChanged();
+    } catch { setMessage('Unable to reach the backend.'); } finally { setBusy(null); }
+  };
+  return <>
+    <div className="panel-head"><h2>Accounts in connected IdPs</h2></div>
+    <div className="detail-section">
+      {error ? <div className="notice">{error}</div> : !accounts ? <div className="empty">Loading accounts...</div> : accounts.length === 0 ? <div className="notice">This identity has no real directory account (CSV bookkeeping only).</div> : <>
+        {accounts.map(account => <div key={account.id} style={{display:'flex',alignItems:'center',gap:10,justifyContent:'space-between',padding:'8px 0',borderBottom:'1px solid #edf1f2'}}>
+          <div style={{minWidth:0}}><strong style={{fontSize:13}}>{account.provider_name}</strong>{account.is_primary && <span className="badge neutral" style={{marginLeft:6}}>Primary</span>}<div className="user-email" style={{wordBreak:'break-all'}}>{account.username || account.external_id}</div></div>
+          <div style={{display:'flex',alignItems:'center',gap:8,flex:'none'}}><StatusBadge status={account.status === 'DISABLED' ? 'Disabled' : 'Active'}/><button className="btn" disabled={busy !== null} onClick={() => void toggleOne(account)}>{account.status === 'DISABLED' ? 'Enable' : 'Disable'}</button></div>
+        </div>)}
+        <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:12}}>
+          <button className="btn" style={{borderColor:'#e0a3a3',color:'#ae4949'}} disabled={busy !== null || activeCount === 0} onClick={() => void runAll(false)}>{busy === 'all' ? 'Working...' : 'Disable in all IdPs'}</button>
+          <button className="btn" disabled={busy !== null || disabledCount === 0} onClick={() => void runAll(true)}>Enable in all IdPs</button>
+        </div>
+        {message && <div className="notice" style={{marginTop:10}}>{message}</div>}
+        {needsReenable && <div style={{marginTop:12,padding:12,border:'1px solid #e0a3a3',borderRadius:8,background:'#fff8f7'}}>
+          <p className="subtitle" style={{marginTop:0,marginBottom:8}}>{reenableScope?.label || 'The account'} will be enabled once your manager (or a lifecycle owner) approves this — nothing else changes.</p>
+          <label className="key" style={{display:'block',marginBottom:10}}><span>Reason to enable this again (at least 10 characters)</span><textarea className="select" style={{width:'100%',minHeight:60,resize:'vertical'}} value={reenableReason} onChange={event => setReenableReason(event.target.value)} placeholder="Why should this be enabled again?"/></label>
+          <div style={{display:'flex',gap:8}}>
+            <button className="btn btn-primary" disabled={reenableBusy || reenableReason.trim().length < 10} onClick={() => void submitReenable()}>{reenableBusy ? 'Sending...' : 'Send for approval'}</button>
+            <button className="btn" disabled={reenableBusy} onClick={() => { setNeedsReenable(false); setReenableReason(''); setReenableScope(null); }}>Cancel</button>
+          </div>
+        </div>}
+      </>}
+    </div>
+  </>;
+}
 function UserDetail() {
   const auth = useAuth();
   const timezone = useAppTimezone();
@@ -1675,8 +1895,12 @@ function UserDetail() {
     if (!user) return;
     try { await navigator.clipboard.writeText(user.email); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* clipboard unavailable */ }
   };
-  if (loading) return <Page eyebrow="USER DIRECTORY" title="Loading..." subtitle=""><div className="empty">Loading user...</div></Page>;
-  if (error || !user) return <Page eyebrow="USER DIRECTORY" title="User" subtitle=""><div className="empty">{error || 'User not found.'}</div></Page>;
+  // Only the FIRST load (no user data yet) shows the loading placeholder. `onChanged` (passed to every panel below)
+  // calls this same resource's reload after an action completes — that briefly sets `loading` true again too, and
+  // returning the placeholder for THAT would unmount this whole subtree and wipe every child panel's own state
+  // (e.g. an inline approval-request form that was just opened) before the person ever sees it.
+  if (loading && !user) return <Page eyebrow="USER DIRECTORY" title="Loading..." subtitle=""><div className="empty">Loading user...</div></Page>;
+  if (!user) return <Page eyebrow="USER DIRECTORY" title="User" subtitle=""><div className="empty">{error || 'User not found.'}</div></Page>;
   const provider = providers?.find(p => p.id === user.provider_id);
   const connectorName = provider ? (provider.provider_type === 'ENTRA' ? 'Microsoft Entra ID' : provider.provider_type === 'OKTA' ? 'Okta' : provider.name) : 'Unknown connector';
   const isCsvOnly = provider?.provider_type === 'CSV';
@@ -1686,6 +1910,8 @@ function UserDetail() {
     <div className="key"><span>Connector</span><strong>{connectorName}</strong></div>
     <div className="key"><span>Connector external ID</span><strong>{user.external_id}</strong></div>
   </div>{isCsvOnly && <p className="subtitle" style={{marginTop:12}}>This identity has no real {providers?.some(p => p.provider_type === 'ENTRA') ? 'Entra' : providers?.some(p => p.provider_type === 'OKTA') ? 'Okta' : 'connector'} account yet — group/role membership shown below is AccessPilot-local (eligible) only. Re-uploading its CSV row after a real connector is available will provision one automatically.</p>}</div>{user.account_type !== 'NORMAL' && <div className="detail-section"><div className="detail-title"><h2>{user.account_type === 'PU' ? 'Privileged' : 'Test'} account</h2><span className="badge neutral">{user.account_type}</span></div><p className="subtitle" style={{marginTop:0}}>This is a {user.account_type === 'PU' ? 'Privileged (PU)' : 'Test (TU)'} account — deliberately excluded from Birthright and Group Role Mapping automation. Access to it is always granted manually.</p><div className="key-grid"><div className="key"><span>Linked to</span><strong>{linkedOwner ? <Link to={`/admin/users/${linkedOwner.id}`} className="user-name">{linkedOwner.display_name}</Link> : 'Not linked to a real user'}</strong></div></div></div>}{(linkedAccounts && linkedAccounts.length > 0) && <div className="detail-section"><div className="detail-title"><h2>Privileged / Test accounts</h2></div><p className="subtitle" style={{marginTop:0,marginBottom:12}}>Shadow accounts linked to this person for elevated admin work or QA/UAT — no mailbox, access granted manually only.</p><div className="table-wrap"><table><thead><tr><th>Account</th><th>Type</th><th>Status</th><th></th></tr></thead><tbody>{linkedAccounts.map(account => <tr key={account.id}><td className="user-name"><Link to={`/admin/users/${account.id}`} className="user-name">{account.display_name}</Link></td><td>{account.account_type}</td><td><StatusBadge status={account.status}/></td><td><button className="btn" disabled={enabledBusyId === account.id} onClick={() => void toggleAccountEnabled(account.id, account.status !== 'ACTIVE')}>{enabledBusyId === account.id ? 'Working...' : account.status === 'ACTIVE' ? 'Disable' : 'Enable'}</button></td></tr>)}</tbody></table></div></div>}<div className="detail-section"><div className="detail-title"><h2>Department &amp; job title</h2></div><p className="subtitle" style={{marginTop:0,marginBottom:14}}>Editing either pushes a real write to {connectorName} (not just a local edit) and re-evaluates birthright policies — a mover loses any group a policy no longer grants and gains any newly-matching one, ELIGIBLE only, same as a new joiner.</p><div className="key-grid"><label className="key" style={{display:'block'}}><span>Department</span><select className="select" style={{width:'100%'}} value={attributesForm.department} onChange={event => setAttributesForm({...attributesForm, department: event.target.value})}><option value="">No department</option>{attributesForm.department && !(departments || []).some(d => d.name === attributesForm.department) && <option value={attributesForm.department}>{attributesForm.department} (not in the managed list)</option>}{(departments || []).map(d => <option key={d.id} value={d.name}>{d.name}</option>)}</select></label><label className="key" style={{display:'block'}}><span>Job title</span><input className="select" style={{width:'100%'}} value={attributesForm.job_title} onChange={event => setAttributesForm({...attributesForm, job_title: event.target.value})}/></label></div><div style={{display:'flex',alignItems:'center',gap:10,marginTop:14}}><button className="btn btn-primary" disabled={savingAttributes} onClick={saveAttributes}>{savingAttributes ? 'Saving...' : 'Save'}</button>{attributesMessage && <span className="footer-note" style={{margin:0}}>{attributesMessage}</span>}</div></div><div className="detail-section"><div className="detail-title"><h2>Role &amp; manager</h2></div><p className="subtitle" style={{marginTop:0,marginBottom:14}}>AccessPilot-internal only — never pushed to Entra/Okta. Tag this person as an Employee or a Manager, and (for an Employee, or a Manager reporting further up) who they report to. Powers the Org Chart tab.</p><div className="key-grid"><label className="key" style={{display:'block'}}><span>Tag</span><select className="select" style={{width:'100%'}} value={hierarchyForm.employee_category} onChange={event => setHierarchyForm({...hierarchyForm, employee_category: event.target.value})}><option value="">Unclassified</option><option value="EMPLOYEE">Employee</option><option value="MANAGER">Manager</option></select></label><label className="key" style={{display:'block'}}><span>Reports to</span><select className="select" style={{width:'100%'}} value={hierarchyForm.manager_id} onChange={event => setHierarchyForm({...hierarchyForm, manager_id: event.target.value})}><option value="">No manager assigned</option>{managerOptions.map(m => <option key={m.id} value={m.id}>{m.display_name}</option>)}</select></label></div><div style={{display:'flex',alignItems:'center',gap:10,marginTop:14}}><button className="btn btn-primary" disabled={savingHierarchy} onClick={() => void saveHierarchy()}>{savingHierarchy ? 'Saving...' : 'Save'}</button>{hierarchyMessage && <span className="footer-note" style={{margin:0}}>{hierarchyMessage}</span>}</div></div></section><aside className="panel">
+    <UserAccountsPanel userId={user.id} onChanged={reloadUser}/>
+    <UserLeaverPanel user={user} onChanged={reloadUser}/>
     <div className="panel-head"><h2>Groups</h2></div>
     <div className="detail-section">{accessLoading ? <div className="empty">Loading groups...</div> : accessError ? <div className="notice">{accessError}</div> : groupItems.length === 0 ? <div className="notice">Not a member of any group.</div> : <div className="timeline" style={{padding:0}}>{groupItems.map(renderAccessItem)}</div>}</div>
     <div className="panel-head"><h2>Applications</h2></div>
@@ -2723,6 +2949,10 @@ function BirthrightPoliciesPanel() {
   const [message, setMessage] = useState('');
   const emptyForm = { name: '', match_field: 'department', match_value: '', resource_type: 'GROUP', resource_id: '', assignment_type: 'PERMANENT' };
   const [form, setForm] = useState(emptyForm);
+  const { data: departmentList } = useApiResource<{ id: string; name: string }[]>('/api/v1/policies/departments');
+  const [editingPolicyId, setEditingPolicyId] = useState<string | null>(null);
+  const recheckText = (r: { users_checked: number; granted: number; revoked: number } | null | undefined) => r ? `Saved. Re-checked ${r.users_checked} ${r.users_checked === 1 ? 'person' : 'people'}: ${r.granted} newly eligible, ${r.revoked} access removed.` : 'Saved.';
+  const openPolicyEdit = (policy: ApiBirthrightPolicy) => { setEditingPolicyId(policy.id); setForm({ ...emptyForm, name: policy.name, match_field: policy.match_field || 'department', match_value: policy.match_value || '' }); setOpen(true); setMessage(''); };
   const targets: Array<ApiGroup | ApiRole | ApiApplication | ApiPackage> = form.resource_type === 'GROUP' ? (groups || []) : form.resource_type === 'ROLE' ? (roles || []) : form.resource_type === 'APPLICATION' ? (applications || []) : (packages || []);
   const resourceLabel = (p: ApiBirthrightPolicy) => (p.resource_type === 'GROUP' ? groups : p.resource_type === 'ROLE' ? roles : p.resource_type === 'APPLICATION' ? applications : packages)?.find(t => t.id === p.resource_id)?.name || p.resource_id;
 
@@ -2769,23 +2999,27 @@ function BirthrightPoliciesPanel() {
       const isNew = jsonPolicyId === 'new';
       const response = await auth.apiRequest(isNew ? '/api/v1/policies/birthright/json' : `/api/v1/policies/birthright/${jsonPolicyId}/json`, { method: isNew ? 'POST' : 'PUT', body: JSON.stringify(parsed) });
       const body = await response.json().catch(() => null);
-      if (response.ok) { setJsonPolicyId(null); reloadBirthright(); }
+      if (response.ok) { setJsonPolicyId(null); reloadBirthright(); setMessage('Saved. Everyone this policy matches (or used to match) was re-checked.'); }
       else setJsonMessage(body?.error?.message || 'Unable to save this policy.');
     } catch { setJsonMessage('Unable to reach the backend.'); } finally { setJsonSaving(false); }
   };
 
   const create = async () => {
-    if (!form.name.trim() || !form.match_value.trim() || !form.resource_id) { setMessage('Complete every field.'); return; }
+    if (!form.name.trim() || !form.match_value.trim() || (!editingPolicyId && !form.resource_id)) { setMessage('Complete every field.'); return; }
     setSaving(true); setMessage('');
     try {
-      const response = await auth.apiRequest('/api/v1/policies/birthright', { method: 'POST', body: JSON.stringify(form) });
+      const response = editingPolicyId
+        ? await auth.apiRequest(`/api/v1/policies/birthright/${editingPolicyId}`, { method: 'PATCH', body: JSON.stringify({ name: form.name.trim(), match_value: form.match_value.trim() }) })
+        : await auth.apiRequest('/api/v1/policies/birthright', { method: 'POST', body: JSON.stringify(form) });
       const body = await response.json().catch(() => null);
-      if (response.ok) { setOpen(false); setForm(emptyForm); reloadBirthright(); }
-      else setMessage(body?.error?.message || 'Unable to create this policy.');
-    } catch { setMessage('Unable to create this policy.'); } finally { setSaving(false); }
+      if (response.ok) { setOpen(false); setEditingPolicyId(null); setForm(emptyForm); reloadBirthright(); setMessage(recheckText(body?.recheck) + (body?.warnings?.length ? ` Warning: ${body.warnings.join(' ')}` : '')); }
+      else setMessage(body?.error?.message || 'Unable to save this policy.');
+    } catch { setMessage('Unable to save this policy.'); } finally { setSaving(false); }
   };
   const toggleStatus = async (policy: ApiBirthrightPolicy) => {
-    await auth.apiRequest(`/api/v1/policies/birthright/${policy.id}`, { method: 'PATCH', body: JSON.stringify({ status: policy.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE' }) });
+    const response = await auth.apiRequest(`/api/v1/policies/birthright/${policy.id}`, { method: 'PATCH', body: JSON.stringify({ status: policy.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE' }) });
+    const body = await response.json().catch(() => null);
+    setMessage(response.ok ? recheckText(body?.recheck) : (body?.error?.message || 'Unable to change this policy.'));
     reloadBirthright();
   };
   const remove = async (policy: ApiBirthrightPolicy) => {
@@ -2795,7 +3029,7 @@ function BirthrightPoliciesPanel() {
   };
 
   return <section className="panel" style={{marginBottom:18}}>
-    <div className="panel-head"><h2>Birthright policies</h2><div style={{display:'flex',gap:8}}><button className="btn" onClick={openJsonCreate}><Plus size={14}/> New via JSON</button><button className="btn btn-primary" onClick={() => { setOpen(true); setMessage(''); }}><Plus size={14}/> Add rule</button></div></div>
+    <div className="panel-head"><h2>Birthright policies</h2><div style={{display:'flex',gap:8}}><button className="btn" onClick={openJsonCreate}><Plus size={14}/> New via JSON</button><button className="btn btn-primary" onClick={() => { setEditingPolicyId(null); setForm(emptyForm); setOpen(true); setMessage(''); }}><Plus size={14}/> Add rule</button></div></div>
     <div className="detail-section">
       <p className="subtitle" style={{marginBottom:14}}>Attribute-driven auto-assignment: when a joiner or mover's <code>department</code> or <code>job title</code> matches a rule, they're automatically made <strong>eligible</strong> for that Group, Role, Application, or every item in an Access Package — same as any other assignment, still activated by hand. A Package rule grants each of its items individually (not as one grouped package request), so mover reconciliation can revoke exactly the items whose rule no longer applies. For a rule with several AND/OR conditions or several grants at once, use <strong>New via JSON</strong> — any existing policy can also be opened as JSON via its <strong>View/Edit JSON</strong> action. Evaluated automatically whenever an Onboarding CSV import is committed.</p>
       {jsonPolicyId && <form role="dialog" aria-modal="true" className="notice" style={{marginBottom:14}} onSubmit={event => { event.preventDefault(); void saveJson(); }}>
@@ -2817,13 +3051,17 @@ function BirthrightPoliciesPanel() {
       {open && <div className="notice" style={{marginBottom:14}}>
         <div className="key-grid" style={{marginBottom:10}}>
           <label className="key"><span>Rule name</span><input className="select" value={form.name} onChange={event => setForm({...form, name: event.target.value})} placeholder="e.g. Finance department access"/></label>
-          <label className="key"><span>Match on</span><select className="select" value={form.match_field} onChange={event => setForm({...form, match_field: event.target.value})}><option value="department">Department</option><option value="job_title">Job title</option></select></label>
-          <label className="key"><span>Equals</span><input className="select" value={form.match_value} onChange={event => setForm({...form, match_value: event.target.value})} placeholder="e.g. Finance"/></label>
+          <label className="key"><span>Match on</span><select className="select" disabled={Boolean(editingPolicyId)} value={form.match_field} onChange={event => setForm({...form, match_field: event.target.value, match_value: ''})}><option value="department">Department</option><option value="job_title">Job title</option></select></label>
+          <label className="key"><span>Equals</span>{form.match_field === 'department'
+            ? <select className="select" value={form.match_value} onChange={event => setForm({...form, match_value: event.target.value})}><option value="">Select a department</option>{form.match_value && !(departmentList || []).some(d => d.name === form.match_value) && <option value={form.match_value}>{form.match_value} (not in the department list)</option>}{(departmentList || []).map(d => <option key={d.id} value={d.name}>{d.name}</option>)}</select>
+            : <input className="select" value={form.match_value} onChange={event => setForm({...form, match_value: event.target.value})} placeholder="e.g. Senior Analyst"/>}</label>
+          {!editingPolicyId && <>
           <label className="key"><span>Grant</span><select className="select" value={form.resource_type} onChange={event => setForm({...form, resource_type: event.target.value, resource_id: ''})}><option value="GROUP">Group</option><option value="ROLE">Role</option><option value="APPLICATION">Application</option><option value="PACKAGE">Access Package</option></select></label>
           <label className="key"><span>Target</span><select className="select" value={form.resource_id} onChange={event => setForm({...form, resource_id: event.target.value})}><option value="">Select a target</option>{targets.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
           <label className="key"><span>Assignment type</span><select className="select" value={form.assignment_type} onChange={event => setForm({...form, assignment_type: event.target.value})}><option value="PERMANENT">Permanent</option><option value="TEMPORARY">Temporary</option></select></label>
+          </>}
         </div>
-        <div style={{display:'flex',gap:8}}><button className="btn btn-primary" disabled={saving} onClick={() => void create()}>{saving ? 'Saving...' : 'Create rule'}</button><button className="btn" onClick={() => { setOpen(false); setForm(emptyForm); }}>Cancel</button></div>
+        <div style={{display:'flex',gap:8}}><button className="btn btn-primary" disabled={saving} onClick={() => void create()}>{saving ? 'Saving...' : editingPolicyId ? 'Save changes' : 'Create rule'}</button><button className="btn" onClick={() => { setOpen(false); setEditingPolicyId(null); setForm(emptyForm); }}>Cancel</button></div>
       </div>}
       {message && <div className="notice" style={{marginBottom:14}}>{message}</div>}
       <div className="table-wrap">{birthrightLoading ? <div className="empty">Loading...</div> : birthrightError ? <div className="empty">{birthrightError}</div> : !birthrightPolicies || birthrightPolicies.length === 0 ? <div className="empty">No birthright policies yet.</div> : <table><thead><tr><th>Rule</th><th>Condition</th><th>Grants</th><th>Type</th><th>Status</th><th></th></tr></thead><tbody>{birthrightPolicies.map(p => <tr key={p.id}>
@@ -2832,7 +3070,7 @@ function BirthrightPoliciesPanel() {
         <td>{p.is_advanced ? `${p.actions_count} grant${p.actions_count === 1 ? '' : 's'}` : `${(p.resource_type || '').toLowerCase()}: ${resourceLabel(p)}`}</td>
         <td>{p.is_advanced ? '—' : p.assignment_type}{!p.reconciliation_enabled && <span className="badge neutral" style={{marginLeft:6}} title="This policy's grants are never auto-revoked, even once the condition stops matching.">Sticky</span>}</td>
         <td><StatusBadge status={p.status}/></td>
-        <td style={{display:'flex',gap:6}}><button className="btn" onClick={() => void openJsonView(p)}>View/Edit JSON</button><button className="btn" onClick={() => void toggleStatus(p)}>{p.status === 'ACTIVE' ? 'Disable' : 'Enable'}</button><button className="btn" onClick={() => void remove(p)}>Delete</button></td>
+        <td style={{display:'flex',gap:6}}>{!p.is_advanced && <button className="btn" onClick={() => openPolicyEdit(p)}>Edit</button>}<button className="btn" onClick={() => void openJsonView(p)}>View/Edit JSON</button><button className="btn" onClick={() => void toggleStatus(p)}>{p.status === 'ACTIVE' ? 'Disable' : 'Enable'}</button><button className="btn" onClick={() => void remove(p)}>Delete</button></td>
       </tr>)}</tbody></table>}</div>
     </div>
   </section>;
@@ -2998,11 +3236,11 @@ function PrivilegedAccountActivityPage() {
   </Page>;
 }
 interface ApiScopeTargetResolved { resource_type: string; resource_id: string; resource_display_name: string | null; }
-interface ApiAccessReviewCampaign { id: string; name: string; description: string | null; scope_type: string; scope_resource_type: string | null; scope_resource_id: string | null; scope_targets: ApiScopeTargetResolved[] | null; scope_user_id: string | null; scope_account_type: string | null; scope_inactive_days: number | null; reviewer_id: string; reviewer_display_name: string | null; fallback_reviewer_id: string | null; fallback_reviewer_display_name: string | null; fallback_unlock_hours: number | null; status: string; due_at: string; frequency_days: number | null; schedule_day_of_month: number | null; schedule_time: string | null; schedule_every_months: number | null; schedule_due_days: number | null; next_run_at: string | null; parent_campaign_id: string | null; created_by: string | null; created_at: string; completed_at: string | null; item_count: number; decided_count: number; approved_count: number; revoked_count: number; auto_revoked_count: number; }
+interface ApiAccessReviewCampaign { id: string; name: string; description: string | null; scope_type: string; scope_resource_type: string | null; scope_resource_id: string | null; scope_targets: ApiScopeTargetResolved[] | null; scope_user_id: string | null; scope_account_type: string | null; scope_inactive_days: number | null; reviewer_id: string; reviewer_display_name: string | null; fallback_reviewer_id: string | null; fallback_reviewer_display_name: string | null; fallback_unlock_hours: number | null; status: string; due_at: string; on_no_response?: string; frequency_days: number | null; schedule_day_of_month: number | null; schedule_time: string | null; schedule_every_months: number | null; schedule_due_days: number | null; next_run_at: string | null; parent_campaign_id: string | null; created_by: string | null; created_at: string; completed_at: string | null; item_count: number; decided_count: number; approved_count: number; revoked_count: number; auto_revoked_count: number; }
 interface ApiAccessReviewItem { id: string; campaign_id: string; campaign_name: string | null; assignment_id: string; user_id: string; user_display_name: string | null; user_email: string | null; granted_via: string | null; package_id: string | null; package_name: string | null; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; assignment_status_at_snapshot: string; decision: string; decided_by: string | null; decided_by_display_name: string | null; decided_at: string | null; justification: string | null; created_at: string; }
 interface ApiResourceTally { name: string; count: number; }
 interface ApiAccessReviewDashboard { total_campaigns: number; active_campaigns: number; completed_campaigns: number; recurring_campaigns: number; total_items: number; pending_items: number; approved_items: number; revoked_items: number; auto_revoked_items: number; top_groups: ApiResourceTally[]; top_applications: ApiResourceTally[]; }
-const emptyCampaignForm = { name: '', description: '', scope_type: 'ALL', scope_resource_type: 'GROUP', scope_resource_id: '', scope_targets: [] as { resource_type: string; resource_id: string; name: string }[], scope_user_id: '', scope_account_type: 'PU', scope_inactive_days: '90', reviewer_id: '', fallback_reviewer_id: '', fallback_unlock_hours: '', due_days: '30', frequency_days: '30', recurrence: 'none', schedule_day: '15', schedule_time: '09:00', schedule_every_months: '1' };
+const emptyCampaignForm = { name: '', description: '', scope_type: 'ALL', scope_resource_type: 'GROUP', scope_resource_id: '', scope_targets: [] as { resource_type: string; resource_id: string; name: string }[], scope_user_id: '', scope_account_type: 'PU', scope_inactive_days: '90', reviewer_id: '', fallback_reviewer_id: '', fallback_unlock_hours: '', due_days: '30', on_no_response: 'REVOKE', frequency_days: '30', recurrence: 'none', schedule_day: '15', schedule_time: '09:00', schedule_every_months: '1' };
 const emptyEditForm = { name: '', description: '', reviewer_id: '', fallback_reviewer_id: '', fallback_unlock_hours: '', due_at: '', frequency_days: '30', recurrence: 'none', schedule_day: '15', schedule_time: '09:00', schedule_every_months: '1' };
 // Same local-time construction as the SoD exception form's datetime-local default (see defaultExpiry above) —
 // slicing an ISO string's UTC representation would silently shift a due date by the browser's UTC offset.
@@ -3038,6 +3276,7 @@ function scopeSummary(c: ApiAccessReviewCampaign, groups?: ApiGroup[] | null, ro
   if (c.scope_type === 'ALL') return 'Every current grant';
   if (c.scope_type === 'ACCOUNT_TYPE') return `${c.scope_account_type} accounts`;
   if (c.scope_type === 'INACTIVE_USERS') return `No sign-in in ${c.scope_inactive_days}+ days`;
+  if (c.scope_type === 'MOVER') return `Mover review: ${users?.find(u => u.id === c.scope_user_id)?.display_name || 'one user'} — access no policy granted`;
   if (c.scope_type === 'USER') return users?.find(u => u.id === c.scope_user_id)?.display_name || 'One user';
   if (c.scope_type === 'MULTIPLE_RESOURCES') return (c.scope_targets || []).map(t => t.resource_display_name || t.resource_id).join(', ') || '—';
   const list = c.scope_resource_type === 'GROUP' ? groups : c.scope_resource_type === 'ROLE' ? roles : c.scope_resource_type === 'APPLICATION' ? applications : packages;
@@ -3223,7 +3462,7 @@ function AccessReviewsPage() {
         name: form.name.trim(), description: form.description.trim() || undefined, scope_type: form.scope_type,
         reviewer_id: form.reviewer_id, fallback_reviewer_id: form.fallback_reviewer_id || undefined,
         fallback_unlock_hours: form.fallback_unlock_hours ? Number(form.fallback_unlock_hours) : undefined,
-        due_at: new Date(Date.now() + Number(form.due_days) * 86400000).toISOString(),
+        due_at: new Date(Date.now() + Number(form.due_days) * 86400000).toISOString(), on_no_response: form.on_no_response,
         frequency_days: form.recurrence === 'after' ? Number(form.frequency_days) : undefined,
         ...(form.recurrence === 'fixed' ? { schedule_day_of_month: Number(form.schedule_day), schedule_time: form.schedule_time, schedule_every_months: Number(form.schedule_every_months), schedule_due_days: Number(form.due_days) } : {}),
       };
@@ -3297,6 +3536,7 @@ function AccessReviewsPage() {
         <label className="key"><span>Fallback reviewer (optional)</span><select className="select" value={form.fallback_reviewer_id} onChange={event => setForm({...form, fallback_reviewer_id: event.target.value})}><option value="">None</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
         {form.fallback_reviewer_id && <label className="key"><span>Fallback unlocks after (hours)</span><input className="select" type="number" min={1} value={form.fallback_unlock_hours} onChange={event => setForm({...form, fallback_unlock_hours: event.target.value})}/></label>}
         <label className="key"><span>Due in (days)</span><input className="select" type="number" min={1} value={form.due_days} onChange={event => setForm({...form, due_days: event.target.value})}/></label>
+        <label className="key"><span>If nobody decides by the due date</span><select className="select" value={form.on_no_response} onChange={event => setForm({...form, on_no_response: event.target.value})}><option value="REVOKE">Revoke the access (default)</option><option value="KEEP">Keep the access (auto-approve)</option></select></label>
       </div>
       <RecurrenceFields value={form} onChange={patch => setForm(prev => ({...prev, ...patch}))} timezone={timezone}/>
       {form.scope_type === 'INACTIVE_USERS' && <p className="subtitle" style={{marginTop:-4,marginBottom:14}}>Needs Microsoft Graph AuditLog.Read.All to read last-sign-in data — if that permission isn't granted on this tenant, creating this campaign will fail with a clear error rather than silently reviewing nobody.</p>}
@@ -3474,6 +3714,8 @@ function MyAccessReviewsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   return <Page eyebrow="SELF-SERVICE" title="My Access Reviews" subtitle="Items you've been asked to certify — confirm the access is still needed, or revoke it. Package-granted access is grouped: decide the whole package or expand it for individual items." action={<button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button>}>
+    <LeaverRequestsPanel scope="mine"/>
+    <ReenableRequestsPanel scope="mine"/>
     <TablePanel toolbar={undefined}>
       {loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : campaigns.length === 0 ? <div className="empty">Nothing pending your review right now.</div> : <table><thead><tr><th>Campaign</th><th>Pending items</th></tr></thead><tbody>
         {campaigns.map(c => <Fragment key={c.campaign_id}>
@@ -3524,6 +3766,554 @@ function MyPackagesPage() {
         {pkg.items.map(item => <div key={item.id} className="activity-row" style={{gridTemplateColumns:'1fr auto'}}><div className="activity-copy"><strong>{item.resource_display_name || item.resource_id}</strong><small>{item.resource_type}</small></div><button className="btn" disabled={pkg.items.length <= 1} title={pkg.items.length <= 1 ? 'A package must keep at least one item' : undefined} onClick={() => void removeItem(pkg, item)}>Remove</button></div>)}
       </div>
     </section>)}
+  </Page>;
+}
+interface ApiLeaverPolicy { id: string; name: string; priority: number; delete_after_days: number | null; scope_type: string; scope_value: string | null; effective_time: string; notify_days_before: number[]; revoke_access: boolean; disable_accounts: boolean; disable_privileged_accounts: boolean; remove_group_memberships: boolean; status: string; is_default: boolean; }
+interface ApiScheduledLeaver { user_id: string; user_display_name: string | null; user_email: string | null; department: string | null; employment_type: string | null; leaver_date: string; policy_name: string; due_at: string; status: string; }
+// People with a leaver date that has not run yet. "Run now" starts the leaver process immediately; "Cancel" clears the date.
+function ScheduledLeaversPanel() {
+  const auth = useAuth();
+  const timezone = useAppTimezone();
+  const { data: leavers, reload } = useApiResource<ApiScheduledLeaver[]>('/api/v1/lifecycle/leavers/scheduled');
+  const [message, setMessage] = useState('');
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  const [justification, setJustification] = useState('');
+  const [runBusy, setRunBusy] = useState(false);
+  useEffect(() => { const timer = setInterval(() => reload(), 30000); return () => clearInterval(timer); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const runNow = async (leaver: ApiScheduledLeaver) => {
+    if (justification.trim().length < 10) { setMessage('Enter a justification of at least 10 characters.'); return; }
+    setRunBusy(true); setMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/lifecycle/people/${leaver.user_id}/leave-now`, { method: 'POST', body: JSON.stringify({ justification: justification.trim() }) });
+      const body = await response.json().catch(() => null);
+      setMessage(response.ok ? `Accounts of ${leaver.user_display_name} disabled. Waiting for approval from ${(body?.approvers || []).join(', ') || 'an admin'}.` : (body?.error?.message || 'Unable to start the leaver process.'));
+      if (response.ok) { setConfirmingId(null); setJustification(''); }
+      reload();
+    } catch { setMessage('Unable to reach the backend.'); } finally { setRunBusy(false); }
+  };
+  const cancel = async (leaver: ApiScheduledLeaver) => {
+    if (!window.confirm(`Remove the leaver date for ${leaver.user_display_name}? Nothing will happen to them.`)) return;
+    await auth.apiRequest(`/api/v1/lifecycle/people/${leaver.user_id}`, { method: 'PATCH', body: JSON.stringify({ clear_leaver_date: true }) });
+    reload();
+  };
+  return <section className="panel" style={{marginBottom:18}}>
+    <div className="panel-head"><h2>Scheduled leavers</h2></div>
+    <div className="detail-section">
+      <p className="subtitle" style={{marginTop:0,marginBottom:12}}>Set a leaver date on a person's page (or with a <strong>leaverDate</strong> column in a CSV import). On that date, at the matching policy's time, their access is revoked and their accounts are disabled in every connected IdP.</p>
+      {message && <div className="notice" style={{marginBottom:12}}>{message}</div>}
+      {!leavers || leavers.length === 0 ? <p className="subtitle" style={{margin:0}}>No leavers are scheduled.</p> : <div className="table-wrap"><table><thead><tr><th>Person</th><th>Leaver date</th><th>Policy</th><th>Runs at</th><th>Status</th><th></th></tr></thead><tbody>
+        {leavers.map(leaver => <Fragment key={leaver.user_id}>
+        <tr>
+          <td><Link to={`/admin/users/${leaver.user_id}`} className="user-cell"><span className="avatar">{initialsFor(leaver.user_display_name || '?')}</span><span><span className="user-name">{leaver.user_display_name || leaver.user_id}</span>{leaver.user_email && <span className="user-email">{leaver.user_email}</span>}</span></Link></td>
+          <td>{leaver.leaver_date}</td><td>{leaver.policy_name}</td><td>{formatDateTime(leaver.due_at, timezone)}</td>
+          <td><StatusBadge status={leaver.status === 'DUE' ? 'PENDING' : 'SCHEDULED'}/></td>
+          <td><span style={{display:'flex',gap:6}}><button className="btn" onClick={() => { setConfirmingId(leaver.user_id); setJustification(''); setMessage(''); }}>Run now</button><button className="btn" onClick={() => void cancel(leaver)}>Cancel</button></span></td>
+        </tr>
+        {confirmingId === leaver.user_id && <tr><td colSpan={6} style={{padding:0,background:'#fafbfb'}}>
+          <div style={{padding:12,margin:8,border:'1px solid #e0a3a3',borderRadius:8,background:'#fff8f7'}}>
+            <p className="subtitle" style={{marginTop:0}}>Start the leaver process for <strong>{leaver.user_display_name}</strong> now instead of {leaver.leaver_date}? Their accounts are disabled now; the manager must approve before the process runs.</p>
+            <label className="key" style={{display:'block',marginBottom:10}}><span>Justification (at least 10 characters)</span><textarea className="select" style={{width:'100%',minHeight:60,resize:'vertical'}} value={justification} onChange={event => setJustification(event.target.value)} placeholder="Why start this now?"/></label>
+            <div style={{display:'flex',gap:8}}>
+              <button className="btn btn-primary" style={{background:'#ae4949',borderColor:'#ae4949'}} disabled={runBusy || justification.trim().length < 10} onClick={() => void runNow(leaver)}>{runBusy ? 'Working...' : 'Disable accounts and request approval'}</button>
+              <button className="btn" disabled={runBusy} onClick={() => { setConfirmingId(null); setJustification(''); }}>Cancel</button>
+            </div>
+          </div>
+        </td></tr>}
+        </Fragment>)}
+      </tbody></table></div>}
+    </div>
+  </section>;
+}
+const emptyPolicyForm = { name: '', priority: '100', scope_type: 'ALL', scope_value: '', effective_time: '23:59', notify_days_before: '7, 1', revoke_access: true, disable_accounts: true, disable_privileged_accounts: true, remove_group_memberships: false, delete_after_days: '', status: 'ACTIVE' };
+// Admin-defined leaver policies: who they apply to, when they run, which actions they take. First matching policy by
+// priority wins; the Default covers everyone else.
+function LeaverPoliciesPanel() {
+  const auth = useAuth();
+  const { data: policies, reload } = useApiResource<ApiLeaverPolicy[]>('/api/v1/lifecycle/leaver-policies');
+  const { data: departments } = useApiResource<{ id: string; name: string }[]>('/api/v1/policies/departments');
+  const [open, setOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState(emptyPolicyForm);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  const editing = (policies || []).find(p => p.id === editingId);
+  const openNew = () => { setEditingId(null); setForm(emptyPolicyForm); setMessage(''); setOpen(true); };
+  const openEdit = (policy: ApiLeaverPolicy) => { setEditingId(policy.id); setForm({ name: policy.name, priority: String(policy.priority), scope_type: policy.scope_type, scope_value: policy.scope_value || '', effective_time: policy.effective_time, notify_days_before: policy.notify_days_before.join(', '), revoke_access: policy.revoke_access, disable_accounts: policy.disable_accounts, disable_privileged_accounts: policy.disable_privileged_accounts, remove_group_memberships: policy.remove_group_memberships, delete_after_days: policy.delete_after_days ? String(policy.delete_after_days) : '', status: policy.status }); setMessage(''); setOpen(true); };
+  const save = async () => {
+    if (!form.name.trim()) { setMessage('Enter a policy name.'); return; }
+    if (form.scope_type !== 'ALL' && !form.scope_value) { setMessage('Choose who this policy applies to.'); return; }
+    const days = form.notify_days_before.split(',').map(x => x.trim()).filter(Boolean).map(Number);
+    if (days.some(d => !Number.isInteger(d) || d < 0 || d > 90)) { setMessage('Reminders must be whole numbers of days between 0 and 90, e.g. 7, 1.'); return; }
+    setSaving(true); setMessage('');
+    try {
+      const payload = { name: form.name.trim(), priority: Number(form.priority) || 100, scope_type: form.scope_type, scope_value: form.scope_type === 'ALL' ? null : form.scope_value, effective_time: form.effective_time, notify_days_before: days, revoke_access: form.revoke_access, disable_accounts: form.disable_accounts, disable_privileged_accounts: form.disable_privileged_accounts, remove_group_memberships: form.remove_group_memberships, ...(form.delete_after_days.trim() ? { delete_after_days: Number(form.delete_after_days) } : { clear_delete_after_days: true }), status: form.status };
+      const response = editingId ? await auth.apiRequest(`/api/v1/lifecycle/leaver-policies/${editingId}`, { method: 'PATCH', body: JSON.stringify(payload) }) : await auth.apiRequest('/api/v1/lifecycle/leaver-policies', { method: 'POST', body: JSON.stringify(payload) });
+      if (response.ok) { setOpen(false); setEditingId(null); reload(); }
+      else setMessage((await response.json().catch(() => null))?.error?.message || 'Unable to save this policy.');
+    } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
+  };
+  const remove = async (policy: ApiLeaverPolicy) => {
+    if (!window.confirm(`Delete the leaver policy "${policy.name}"? People it covered fall back to the next matching policy or the default.`)) return;
+    await auth.apiRequest(`/api/v1/lifecycle/leaver-policies/${policy.id}`, { method: 'DELETE' });
+    reload();
+  };
+  const actionSummary = (p: ApiLeaverPolicy) => [p.revoke_access && 'revoke access', p.disable_accounts && 'disable accounts in all IdPs', p.disable_privileged_accounts && 'disable PU/TU', p.remove_group_memberships && 'remove from all groups'].filter(Boolean).join(' · ') || 'nothing (record only)';
+  const check = (label: string, key: 'revoke_access' | 'disable_accounts' | 'disable_privileged_accounts' | 'remove_group_memberships') => <label style={{display:'flex',alignItems:'center',gap:8,fontSize:13}}><input type="checkbox" checked={form[key]} onChange={event => setForm({...form, [key]: event.target.checked})}/> {label}</label>;
+  return <section className="panel" style={{marginBottom:18}}>
+    <div className="panel-head"><h2>Leaver policies</h2><button className="btn" onClick={openNew}><Plus size={14}/> Add policy</button></div>
+    <div className="detail-section">
+      <p className="subtitle" style={{marginTop:0,marginBottom:12}}>What happens when someone leaves — whether triggered by their leaver date, a CSV termination, the directory showing them disabled, or the manual button. The first active policy (lowest priority number) whose scope matches the person is used; the <strong>Default</strong> covers everyone else.</p>
+      {open && <div style={{border:'1px solid #e1e8ea',borderRadius:8,padding:14,marginBottom:14}}>
+        <div className="key-grid" style={{marginBottom:10}}>
+          <label className="key"><span>Name</span><input className="select" value={form.name} onChange={event => setForm({...form, name: event.target.value})}/></label>
+          {!editing?.is_default && <label className="key"><span>Priority (lower runs first)</span><input className="select" type="number" min={0} max={999} value={form.priority} onChange={event => setForm({...form, priority: event.target.value})}/></label>}
+          {!editing?.is_default && <label className="key"><span>Applies to</span><select className="select" value={form.scope_type} onChange={event => setForm({...form, scope_type: event.target.value, scope_value: ''})}><option value="ALL">Everyone</option><option value="DEPARTMENT">A department</option><option value="EMPLOYMENT_TYPE">An employment type</option></select></label>}
+          {!editing?.is_default && form.scope_type === 'DEPARTMENT' && <label className="key"><span>Department</span><select className="select" value={form.scope_value} onChange={event => setForm({...form, scope_value: event.target.value})}><option value="">Select a department</option>{(departments || []).map(d => <option key={d.id} value={d.name}>{d.name}</option>)}</select></label>}
+          {!editing?.is_default && form.scope_type === 'EMPLOYMENT_TYPE' && <label className="key"><span>Employment type</span><select className="select" value={form.scope_value} onChange={event => setForm({...form, scope_value: event.target.value})}><option value="">Select a type</option>{EMPLOYMENT_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></label>}
+          <label className="key"><span>Runs at (on the leaver date, app timezone)</span><input className="select" type="time" value={form.effective_time} onChange={event => setForm({...form, effective_time: event.target.value})}/></label>
+          <label className="key"><span>Remind manager/owners (days before)</span><input className="select" value={form.notify_days_before} onChange={event => setForm({...form, notify_days_before: event.target.value})} placeholder="7, 1"/></label>
+        </div>
+        <div style={{display:'grid',gap:6,marginBottom:12}}>
+          {check('Revoke all AccessPilot access (including in Entra)', 'revoke_access')}
+          {check('Disable the account in every connected IdP', 'disable_accounts')}
+          {check('Disable linked privileged (PU) / test (TU) accounts', 'disable_privileged_accounts')}
+          {check('Remove from ALL groups (including ones AccessPilot did not grant)', 'remove_group_memberships')}
+          <label className="key"><span>Delete accounts from all IdPs after (days, blank = never)</span><input className="select" type="number" min={1} max={3650} value={form.delete_after_days} onChange={event => setForm({...form, delete_after_days: event.target.value})} placeholder="e.g. 90"/></label>
+          {form.delete_after_days.trim() && <div className="notice">Irreversible: this many days after the leaver process runs, the person's accounts are deleted in every connected IdP (Entra keeps a deleted user recoverable for 30 days). AccessPilot keeps the record, labelled Deleted, for audit.</div>}
+          {!editing?.is_default && <label style={{display:'flex',alignItems:'center',gap:8,fontSize:13}}><input type="checkbox" checked={form.status === 'ACTIVE'} onChange={event => setForm({...form, status: event.target.checked ? 'ACTIVE' : 'DISABLED'})}/> Policy is active</label>}
+        </div>
+        {message && <div className="notice" style={{marginBottom:10}}>{message}</div>}
+        <div style={{display:'flex',gap:8}}><button className="btn btn-primary" disabled={saving} onClick={() => void save()}>{saving ? 'Saving...' : editingId ? 'Save changes' : 'Create policy'}</button><button className="btn" onClick={() => { setOpen(false); setEditingId(null); }}>Cancel</button></div>
+      </div>}
+      <div className="table-wrap"><table><thead><tr><th>Policy</th><th>Applies to</th><th>Runs at</th><th>Reminders</th><th>Actions</th><th>Deletes accounts</th><th>Status</th><th></th></tr></thead><tbody>
+        {(policies || []).map(policy => <tr key={policy.id}>
+          <td className="user-name">{policy.name}{policy.is_default && <span className="badge neutral" style={{marginLeft:6}}>Default</span>}<div className="user-email">priority {policy.priority}</div></td>
+          <td>{policy.scope_type === 'ALL' ? 'Everyone else' : `${policy.scope_type === 'DEPARTMENT' ? 'Department' : 'Type'}: ${policy.scope_value}`}</td>
+          <td>{policy.effective_time}</td>
+          <td>{policy.notify_days_before.length ? policy.notify_days_before.map(d => `${d}d`).join(', ') : '—'}</td>
+          <td style={{whiteSpace:'normal',maxWidth:320}}>{actionSummary(policy)}</td>
+          <td>{policy.delete_after_days ? `after ${policy.delete_after_days} days` : 'never'}</td>
+          <td><StatusBadge status={policy.status === 'ACTIVE' ? 'Active' : 'Disabled'}/></td>
+          <td><span style={{display:'flex',gap:6}}><button className="btn" onClick={() => openEdit(policy)}>Edit</button>{!policy.is_default && <button className="btn" onClick={() => void remove(policy)}>Delete</button>}</span></td>
+        </tr>)}
+      </tbody></table></div>
+    </div>
+  </section>;
+}
+interface ApiLifecycleEvent { id: string; event_type: string; source: string; created_at: string; user_id: string; user_display_name: string | null; user_email: string | null; changes: Record<string, { from: string | null; to: string | null }>; revoked_count: number; granted_count: number; privileged_flagged_count: number; review_campaign_id: string | null; review_campaign_name: string | null; review_status: string | null; review_reviewer_name: string | null; review_item_count: number; review_decided_count: number; review_note: string | null; notified: string[]; }
+interface ApiPendingMove { id: string; user_id: string; user_display_name: string | null; user_email: string | null; current_department: string | null; current_job_title: string | null; new_department: string | null; new_job_title: string | null; effective_at: string; source: string; status: string; failure_reason: string | null; created_at: string; applied_at: string | null; }
+interface ApiLifecycleSettings { mover_review_enabled: boolean; revoke_on_directory_disable: boolean; review_due_days: number; lifecycle_owners: { user_id: string; display_name: string | null; email: string | null }[]; }
+const MOVER_NOTES: Record<string, string> = {
+  NO_LEFTOVER_ACCESS: 'Nothing else to review',
+  AUTO_REVOKE_OFF: 'Automatic revocation is switched off — access was kept',
+  ACCOUNT_DISABLE_FAILED: 'Some accounts could not be disabled — see the audit log and retry from the person\'s page',
+  NO_REVIEWER: 'No reviewer available — set a manager for this person or add a lifecycle owner above',
+  REVIEW_ALREADY_OPEN: 'A review was already open',
+  REVIEW_DISABLED: 'Automatic review is switched off',
+};
+const SOURCE_LABELS: Record<string, string> = { SYNC: 'Directory sync', ADMIN_EDIT: 'Edited in AccessPilot', CSV: 'CSV import' };
+// Set up how movers are handled, and see every detected move: who moved, what changed, what access was taken away
+// or newly made eligible, the review of whatever access no policy granted, and who was told.
+// Downloads the full Joiner / Mover / Leaver PDF report.
+function JmlReportButton() {
+  const auth = useAuth();
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  const download = async () => {
+    setBusy(true); setMessage('');
+    try {
+      const response = await auth.apiRequest('/api/v1/lifecycle/report.pdf');
+      if (!response.ok) { setMessage((await response.json().catch(() => null))?.error?.message || 'Unable to generate the report.'); return; }
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement('a');
+      link.href = url; link.download = `jml-report-${new Date().toISOString().slice(0, 10)}.pdf`;
+      document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+    } catch { setMessage('Unable to reach the backend.'); } finally { setBusy(false); }
+  };
+  return <div style={{display:'flex',alignItems:'center',gap:10,margin:'0 0 12px',flexWrap:'wrap'}}>
+    <button className="btn btn-primary" disabled={busy} onClick={() => void download()}>{busy ? 'Generating PDF...' : 'Download JML report (PDF)'}</button>
+    <span className="subtitle" style={{margin:0}}>Every joiner, mover and leaver process with the items each touched, policies, re-enable requests and account deletions.</span>
+    {message && <span className="notice">{message}</span>}
+  </div>;
+}
+interface ApiLeaverRequest { id: string; user_id: string; user_display_name: string | null; user_email: string | null; requested_by_name: string | null; justification: string; status: string; approvers: string[]; decided_by_name: string | null; decision_note: string | null; decided_at: string | null; created_at: string; can_decide: boolean; outcome: string | null; }
+// Manual leaver requests: accounts are already disabled; the manager (lifecycle owners when none) approves -> leaver process, or denies -> accounts enabled again.
+function LeaverRequestsPanel({ scope }: { scope: 'admin' | 'mine' }) {
+  const auth = useAuth();
+  const timezone = useAppTimezone();
+  const { data: rows, error, reload } = useApiResource<ApiLeaverRequest[]>(scope === 'admin' ? '/api/v1/lifecycle/leaver-requests' : '/api/v1/lifecycle/leaver-requests/mine');
+  const [message, setMessage] = useState('');
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [noteById, setNoteById] = useState<Record<string, string>>({});
+  const decide = async (row: ApiLeaverRequest, approve: boolean) => {
+    setBusyId(row.id); setMessage('');
+    try {
+      const note = (noteById[row.id] || '').trim();
+      const response = await auth.apiRequest(`/api/v1/lifecycle/leaver-requests/${row.id}/decision`, { method: 'POST', body: JSON.stringify({ approve, note: note || undefined }) });
+      const body = await response.json().catch(() => null);
+      setMessage(response.ok ? (body?.outcome || 'Done.') : (body?.error?.message || 'Unable to record the decision.'));
+      reload();
+    } catch { setMessage('Unable to reach the backend.'); } finally { setBusyId(null); }
+  };
+  if (scope === 'mine' && (!rows || rows.length === 0)) return null;
+  return <section className="panel">
+    <div className="panel-head"><h2>{scope === 'mine' ? 'Approvals: start a leaver process' : 'Leaver requests (manual start)'}</h2></div>
+    <div className="detail-section">
+      <p className="subtitle" style={{marginTop:0,marginBottom:10}}>Flow: justification, then the accounts are disabled straight away, then the manager approves (lifecycle owners when there is no manager). Approved: the leaver process runs. Denied: the accounts are enabled again and the admin who started it is notified.</p>
+      {message && <div className="notice" style={{marginBottom:10}}>{message}</div>}
+      {error ? <div className="notice">{error}</div> : !rows ? <p className="subtitle">Loading...</p> : rows.length === 0 ? <p className="subtitle" style={{margin:0}}>No requests.</p> : <div className="table-wrap"><table><thead><tr><th>Person</th><th>Justification</th><th>Requested</th><th>Approver</th><th>Status</th><th></th></tr></thead><tbody>
+        {rows.map(row => <tr key={row.id}>
+          <td className="user-name">{row.user_display_name}{row.user_email && <div className="user-email">{row.user_email}</div>}</td>
+          <td style={{whiteSpace:'normal',maxWidth:320}}>{row.justification}<div className="user-email">by {row.requested_by_name || 'admin'}</div></td>
+          <td>{formatDateTime(row.created_at, timezone)}</td>
+          <td style={{whiteSpace:'normal'}}>{row.approvers.join(', ') || 'Admins'}</td>
+          <td style={{whiteSpace:'normal'}}><StatusBadge status={row.status === 'APPROVED' ? 'Active' : row.status === 'PENDING' ? 'SCHEDULED' : 'Disabled'}/><div className="user-email">{row.status}{row.decided_by_name ? ` by ${row.decided_by_name}` : ''}{row.decision_note ? `: ${row.decision_note}` : ''}{row.outcome ? ` - ${row.outcome}` : ''}</div></td>
+          <td>{row.can_decide && <div style={{display:'flex',flexDirection:'column',gap:6,minWidth:200}}>
+            <input className="select" placeholder="Optional note" value={noteById[row.id] || ''} onChange={event => setNoteById({...noteById, [row.id]: event.target.value})}/>
+            <span style={{display:'flex',gap:6}}><button className="btn btn-primary" disabled={busyId === row.id} onClick={() => void decide(row, true)}>Approve</button><button className="btn" disabled={busyId === row.id} onClick={() => void decide(row, false)}>Deny</button></span>
+          </div>}</td>
+        </tr>)}
+      </tbody></table></div>}
+    </div>
+  </section>;
+}
+interface ApiReenableRequest { id: string; user_id: string; user_display_name: string | null; user_email: string | null; requested_by_name: string | null; reason: string; status: string; approvers: string[]; decided_by_name: string | null; decision_note: string | null; decided_at: string | null; created_at: string; can_decide: boolean; scope_label: string; }
+// Requests to enable a leaver's account again: reason + approval by the person's manager (lifecycle owners when none).
+function ReenableRequestsPanel({ scope }: { scope: 'admin' | 'mine' }) {
+  const auth = useAuth();
+  const timezone = useAppTimezone();
+  const { data: rows, error, reload } = useApiResource<ApiReenableRequest[]>(scope === 'admin' ? '/api/v1/lifecycle/reenable-requests' : '/api/v1/lifecycle/reenable-requests/mine');
+  const [message, setMessage] = useState('');
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [noteById, setNoteById] = useState<Record<string, string>>({});
+  const decide = async (row: ApiReenableRequest, approve: boolean) => {
+    setBusyId(row.id); setMessage('');
+    try {
+      const note = (noteById[row.id] || '').trim();
+      const response = await auth.apiRequest(`/api/v1/lifecycle/reenable-requests/${row.id}/decision`, { method: 'POST', body: JSON.stringify({ approve, note: note || undefined }) });
+      const body = await response.json().catch(() => null);
+      setMessage(response.ok ? (approve ? `Approved. ${body?.accounts_note || ''}` : 'Rejected.') : (body?.error?.message || 'Unable to record the decision.'));
+      reload();
+    } catch { setMessage('Unable to reach the backend.'); } finally { setBusyId(null); }
+  };
+  if (scope === 'mine' && (!rows || rows.length === 0)) return null;
+  return <section className="panel">
+    <div className="panel-head"><h2>{scope === 'mine' ? 'Approvals: enable a leaver\'s account again' : 'Re-enable requests (after leaving)'}</h2></div>
+    <div className="detail-section">
+      <p className="subtitle" style={{marginTop:0,marginBottom:10}}>Once the leaver process has run, an account can only be enabled again with a valid reason and the manager's approval (lifecycle owners when there is no manager). Approval re-enables the accounts only; access is not restored.</p>
+      {message && <div className="notice" style={{marginBottom:10}}>{message}</div>}
+      {error ? <div className="notice">{error}</div> : !rows ? <p className="subtitle">Loading...</p> : rows.length === 0 ? <p className="subtitle" style={{margin:0}}>No requests.</p> : <div className="table-wrap"><table><thead><tr><th>Person</th><th>Scope</th><th>Reason</th><th>Requested</th><th>Approver</th><th>Status</th><th></th></tr></thead><tbody>
+        {rows.map(row => <tr key={row.id}>
+          <td className="user-name">{row.user_display_name}{row.user_email && <div className="user-email">{row.user_email}</div>}</td>
+          <td><span className="badge neutral">{row.scope_label}</span></td>
+          <td style={{whiteSpace:'normal',maxWidth:320}}>{row.reason}<div className="user-email">by {row.requested_by_name || 'admin'}</div></td>
+          <td>{formatDateTime(row.created_at, timezone)}</td>
+          <td style={{whiteSpace:'normal'}}>{row.approvers.join(', ') || 'Admins'}</td>
+          <td style={{whiteSpace:'normal'}}><StatusBadge status={row.status === 'APPROVED' ? 'Active' : row.status === 'PENDING' ? 'SCHEDULED' : 'Disabled'}/><div className="user-email">{row.status}{row.decided_by_name ? ` by ${row.decided_by_name}` : ''}{row.decision_note ? `: ${row.decision_note}` : ''}</div></td>
+          <td>{row.can_decide && <div style={{display:'flex',flexDirection:'column',gap:6,minWidth:200}}>
+            <input className="select" placeholder="Optional note" value={noteById[row.id] || ''} onChange={event => setNoteById({...noteById, [row.id]: event.target.value})}/>
+            <span style={{display:'flex',gap:6}}><button className="btn btn-primary" disabled={busyId === row.id} onClick={() => void decide(row, true)}>Approve</button><button className="btn" disabled={busyId === row.id} onClick={() => void decide(row, false)}>Reject</button></span>
+          </div>}</td>
+        </tr>)}
+      </tbody></table></div>}
+    </div>
+  </section>;
+}
+function MoversPage() {
+  const auth = useAuth();
+  const timezone = useAppTimezone();
+  const [eventType, setEventType] = useState('MOVER');
+  const { data: events, loading, error, reload } = useApiResource<ApiLifecycleEvent[]>(`/api/v1/lifecycle/events?event_type=${eventType}`);
+  const { data: settings, reload: reloadSettings } = useApiResource<ApiLifecycleSettings>('/api/v1/lifecycle/settings');
+  const { data: users } = useApiResource<ApiUser[]>('/api/v1/users');
+  const { data: allMoves, reload: reloadMoves } = useApiResource<ApiPendingMove[]>('/api/v1/lifecycle/moves');
+  const { data: departments } = useApiResource<{ id: string; name: string }[]>('/api/v1/policies/departments');
+  const moves = (allMoves || []).filter(m => m.status === 'SCHEDULED' || m.status === 'FAILED');
+  const [moveOpen, setMoveOpen] = useState(false);
+  const [moveForm, setMoveForm] = useState({ user_id: '', department: '', job_title: '', effective_at: '' });
+  const [moveSaving, setMoveSaving] = useState(false);
+  const [moveMessage, setMoveMessage] = useState('');
+  const scheduleMove = async () => {
+    if (!moveForm.user_id || !moveForm.effective_at || (!moveForm.department.trim() && !moveForm.job_title.trim())) { setMoveMessage('Pick a person, a date and a new department and/or job title.'); return; }
+    setMoveSaving(true); setMoveMessage('');
+    try {
+      const response = await auth.apiRequest('/api/v1/lifecycle/moves', { method: 'POST', body: JSON.stringify({ user_id: moveForm.user_id, department: moveForm.department.trim() || undefined, job_title: moveForm.job_title.trim() || undefined, effective_at: new Date(moveForm.effective_at).toISOString() }) });
+      if (response.ok) { setMoveOpen(false); setMoveForm({ user_id: '', department: '', job_title: '', effective_at: '' }); reloadMoves(); }
+      else setMoveMessage((await response.json().catch(() => null))?.error?.message || 'Unable to schedule this move.');
+    } catch { setMoveMessage('Unable to reach the backend.'); } finally { setMoveSaving(false); }
+  };
+  const cancelMove = async (move: ApiPendingMove) => {
+    if (!window.confirm(`Cancel the scheduled move for ${move.user_display_name || 'this person'}? Nothing about them will change.`)) return;
+    await auth.apiRequest(`/api/v1/lifecycle/moves/${move.id}`, { method: 'DELETE' });
+    reloadMoves();
+  };
+  const [enabled, setEnabled] = useState(true);
+  const [revokeOnDisable, setRevokeOnDisable] = useState(true);
+  const [dueDays, setDueDays] = useState('14');
+  const [ownerIds, setOwnerIds] = useState<string[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  useEffect(() => {
+    if (!settings) return;
+    setEnabled(settings.mover_review_enabled); setRevokeOnDisable(settings.revoke_on_directory_disable); setDueDays(String(settings.review_due_days)); setOwnerIds(settings.lifecycle_owners.map(o => o.user_id));
+  }, [settings]);
+  useEffect(() => {
+    const timer = setInterval(() => { reload(); reloadMoves(); }, 30000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const save = async () => {
+    if (!dueDays || Number(dueDays) < 1) { setMessage('Enter a due window of at least 1 day.'); return; }
+    setSaving(true); setMessage('');
+    try {
+      const response = await auth.apiRequest('/api/v1/lifecycle/settings', { method: 'PUT', body: JSON.stringify({ mover_review_enabled: enabled, revoke_on_directory_disable: revokeOnDisable, review_due_days: Number(dueDays), lifecycle_owner_ids: ownerIds }) });
+      if (response.ok) { setMessage('Saved.'); reloadSettings(); }
+      else setMessage((await response.json().catch(() => null))?.error?.message || 'Unable to save these settings.');
+    } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
+  };
+  return <Page eyebrow="JOINER · MOVER · LEAVER" title="Movers" subtitle="People whose department or job title changed — what happened to their access and who reviews what is left. Switch the list below to joiners too. Leavers now have their own page." action={<button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button>}>
+    <section className="panel" style={{marginBottom:18}}>
+      <div className="panel-head"><h2>Mover setup</h2></div>
+      <div className="detail-section">
+        <p className="subtitle" style={{marginTop:0,marginBottom:14}}>When someone's department or job title changes, AccessPilot removes the access their old attributes granted and grants what the new ones qualify for. It can then start a review of the access <strong>no policy granted</strong> (manual, package or requested access). The reviewer is the person's manager from the Org Chart; if they have none, the first lifecycle owner below reviews it, and the next owner is the fallback.</p>
+        <label style={{display:'flex',alignItems:'center',gap:8,fontWeight:600,fontSize:13,marginBottom:12}}><input type="checkbox" checked={enabled} onChange={event => setEnabled(event.target.checked)}/> Automatically review a mover's remaining access</label>
+        <label style={{display:'flex',alignItems:'center',gap:8,fontWeight:600,fontSize:13,marginBottom:4}}><input type="checkbox" checked={revokeOnDisable} onChange={event => setRevokeOnDisable(event.target.checked)}/> Leavers: revoke all access when the directory shows someone as disabled</label>
+        <p className="subtitle" style={{marginTop:0,marginBottom:12}}>When directory sync sees a person switched from active to disabled in Entra/Okta, all their AccessPilot access is revoked (including in Entra) and their linked privileged/test accounts are disabled — like a CSV termination. Switch this off if people are sometimes disabled only temporarily; the leaver is then just recorded.</p>
+        <div className="key-grid" style={{marginBottom:12}}>
+          <label className="key"><span>Review is due in (days)</span><input className="select" type="number" min={1} max={365} value={dueDays} onChange={event => setDueDays(event.target.value)}/></label>
+          <label className="key"><span>Lifecycle owners (notified about every move; review it when there is no manager)</span>
+            <select className="select" value="" onChange={event => { const id = event.target.value; if (id && !ownerIds.includes(id)) setOwnerIds([...ownerIds, id]); }}><option value="">Add an owner…</option>{(users || []).filter(u => !ownerIds.includes(u.id)).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+        </div>
+        {ownerIds.length > 0 && <div style={{display:'flex',flexWrap:'wrap',gap:8,marginBottom:12}}>{ownerIds.map((id, index) => <span key={id} className="badge neutral" style={{display:'inline-flex',alignItems:'center',gap:6}}>{index === 0 ? '1st · ' : ''}{(users || []).find(u => u.id === id)?.display_name || id}<button type="button" className="btn" aria-label="Remove owner" onClick={() => setOwnerIds(ownerIds.filter(x => x !== id))} style={{padding:'0 6px',minWidth:0}}><X size={11}/></button></span>)}</div>}
+        {message && <div className="notice" style={{marginBottom:12}}>{message}</div>}
+        <button className="btn btn-primary" disabled={saving} onClick={() => void save()}>{saving ? 'Saving...' : 'Save mover setup'}</button>
+      </div>
+    </section>
+    <section className="panel" style={{marginBottom:18}}>
+      <div className="panel-head"><h2>Scheduled moves</h2><button className="btn" onClick={() => { setMoveOpen(!moveOpen); setMoveMessage(''); }}><Plus size={14}/> Schedule a move</button></div>
+      <div className="detail-section">
+        <p className="subtitle" style={{marginTop:0,marginBottom:12}}>A move with a future date changes nothing until then. On that date the department/job title is updated, old birthright access is removed, new access is granted and the leftover-access review starts — all together. A CSV import can schedule moves too, with an <strong>effectiveDate</strong> column (YYYY-MM-DD).</p>
+        {moveOpen && <div style={{border:'1px solid #e1e8ea',borderRadius:8,padding:14,marginBottom:14}}>
+          <div className="key-grid" style={{marginBottom:10}}>
+            <label className="key"><span>Person</span><select className="select" value={moveForm.user_id} onChange={event => setMoveForm({...moveForm, user_id: event.target.value})}><option value="">Select a person</option>{(users || []).filter(u => u.account_type === 'NORMAL').map(u => <option key={u.id} value={u.id}>{u.display_name}{u.department ? ` — ${u.department}` : ''}</option>)}</select></label>
+            <label className="key"><span>Takes effect (your device's local time)</span><input className="select" type="datetime-local" value={moveForm.effective_at} onChange={event => setMoveForm({...moveForm, effective_at: event.target.value})}/></label>
+            <label className="key"><span>New department</span><input className="select" list="mover-departments" value={moveForm.department} onChange={event => setMoveForm({...moveForm, department: event.target.value})} placeholder="leave empty to keep the current one"/><datalist id="mover-departments">{(departments || []).map(d => <option key={d.id} value={d.name}/>)}</datalist></label>
+            <label className="key"><span>New job title</span><input className="select" value={moveForm.job_title} onChange={event => setMoveForm({...moveForm, job_title: event.target.value})} placeholder="leave empty to keep the current one"/></label>
+          </div>
+          {moveMessage && <div className="notice" style={{marginBottom:10}}>{moveMessage}</div>}
+          <div style={{display:'flex',gap:8}}><button className="btn btn-primary" disabled={moveSaving} onClick={() => void scheduleMove()}>{moveSaving ? 'Scheduling...' : 'Schedule move'}</button><button className="btn" onClick={() => setMoveOpen(false)}>Cancel</button></div>
+        </div>}
+        {moves.length === 0 ? <p className="subtitle" style={{margin:0}}>No moves are scheduled.</p> : <div className="table-wrap"><table><thead><tr><th>Person</th><th>Now</th><th>Will become</th><th>Takes effect</th><th>Source</th><th>Status</th><th></th></tr></thead><tbody>
+          {moves.map(move => <tr key={move.id}>
+            <td><Link to={`/admin/users/${move.user_id}`} className="user-cell"><span className="avatar">{initialsFor(move.user_display_name || '?')}</span><span><span className="user-name">{move.user_display_name || move.user_id}</span>{move.user_email && <span className="user-email">{move.user_email}</span>}</span></Link></td>
+            <td style={{whiteSpace:'normal'}}>{move.current_department || '—'}<div className="user-email">{move.current_job_title || '—'}</div></td>
+            <td style={{whiteSpace:'normal'}}><strong>{move.new_department || (move.current_department ? '(unchanged)' : '—')}</strong><div className="user-email">{move.new_job_title || '(unchanged)'}</div></td>
+            <td>{formatDateTime(move.effective_at, timezone)}</td>
+            <td>{SOURCE_LABELS[move.source] || move.source}</td>
+            <td style={{whiteSpace:'normal'}}><StatusBadge status={move.status === 'FAILED' ? 'FAILED' : 'SCHEDULED'}/>{move.failure_reason && move.status === 'FAILED' && <div className="user-email">{move.failure_reason}</div>}</td>
+            <td>{move.status === 'SCHEDULED' && <button className="btn" onClick={() => void cancelMove(move)}>Cancel</button>}</td>
+          </tr>)}
+        </tbody></table></div>}
+      </div>
+    </section>
+    <div className="toolbar"><div className="toolbar-left"><select className="select" aria-label="Event type" value={eventType} onChange={event => setEventType(event.target.value)}><option value="MOVER">Movers</option><option value="JOINER">Joiners</option></select></div></div>
+    <TablePanel toolbar={undefined}>
+      {loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : !events || events.length === 0 ? <div className="empty">No {eventType.toLowerCase()}s recorded yet. A move shows up here after a directory sync, an edit, or a CSV import changes someone's department or job title.</div> : <table><thead><tr><th>Person</th><th>What changed</th><th>Source</th><th>Access removed</th><th>New eligible</th><th>{eventType === 'MOVER' ? 'Review of remaining access' : 'Note'}</th><th>Notified</th><th>When</th></tr></thead><tbody>
+        {events.map(event => <tr key={event.id}>
+          <td><Link to={`/admin/users/${event.user_id}`} className="user-cell"><span className="avatar">{initialsFor(event.user_display_name || '?')}</span><span><span className="user-name">{event.user_display_name || event.user_id}</span>{event.user_email && <span className="user-email">{event.user_email}</span>}</span></Link></td>
+          <td style={{whiteSpace:'normal'}}>{event.event_type === 'JOINER' ? <strong>New person</strong> : event.event_type === 'LEAVER' ? <><strong>Disabled in the directory</strong>{Number((event.changes as Record<string, unknown>).linked_accounts_disabled) > 0 && <div className="user-email">{String((event.changes as Record<string, unknown>).linked_accounts_disabled)} linked PU/TU account(s) disabled</div>}</> : null}{event.event_type === 'MOVER' && Object.entries(event.changes).filter(([field]) => field === 'department' || field === 'job_title').map(([field, change]) => <div key={field}><span className="user-email" style={{display:'inline',marginRight:6}}>{field.replace('_', ' ')}</span>{change.from || '—'} → <strong>{change.to || '—'}</strong></div>)}</td>
+          <td>{SOURCE_LABELS[event.source] || event.source}</td>
+          <td>{event.revoked_count > 0 ? <span className="badge danger">{event.revoked_count}</span> : '0'}</td>
+          <td>{event.granted_count > 0 ? <span className="badge success">{event.granted_count}</span> : '0'}</td>
+          <td style={{whiteSpace:'normal',minWidth:220}}>{event.review_campaign_id
+            ? <><Link to="/admin/access-reviews" className="user-name">{event.review_campaign_name}</Link><div style={{display:'flex',gap:8,alignItems:'center',marginTop:4}}><StatusBadge status={event.review_status || 'ACTIVE'}/><span className="user-email" style={{margin:0}}>{event.review_decided_count}/{event.review_item_count} decided · reviewer {event.review_reviewer_name || '—'}</span></div>{event.privileged_flagged_count > 0 && <div style={{marginTop:4}}><span className="badge warning" title="Access held by this person's linked privileged (PU) or test (TU) accounts is part of this review">{event.privileged_flagged_count} PU/TU access item{event.privileged_flagged_count === 1 ? '' : 's'} flagged</span></div>}</>
+            : <span className="user-email" style={{margin:0}}>{(event.review_note && MOVER_NOTES[event.review_note]) || 'No review started'}</span>}</td>
+          <td style={{whiteSpace:'normal'}}>{event.notified.length > 0 ? event.notified.join(', ') : '—'}</td>
+          <td>{formatDateTime(event.created_at, timezone)}</td>
+        </tr>)}
+      </tbody></table>}
+    </TablePanel>
+  </Page>;
+}
+// Leavers get their own page, same as Joiners and Movers: requests waiting on a manager's approval, scheduled
+// leaver dates, the leaver policies that decide what happens and when, and the log of every leaver run.
+function LeaversPage() {
+  const timezone = useAppTimezone();
+  const { data: events, loading, error, reload } = useApiResource<ApiLifecycleEvent[]>('/api/v1/lifecycle/events?event_type=LEAVER');
+  useEffect(() => { const timer = setInterval(() => reload(), 30000); return () => clearInterval(timer); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  return <Page eyebrow="JOINER · MOVER · LEAVER" title="Leavers" subtitle="People who left, or are about to — manual start requests waiting on a manager, scheduled leaver dates, the policies that decide what happens, and the log of every run. Global settings (revoke access when a directory shows someone disabled, lifecycle owners) are on the Movers page." action={<button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button>}>
+    <JmlReportButton/>
+    <LeaverRequestsPanel scope="admin"/>
+    <ReenableRequestsPanel scope="admin"/>
+    <ScheduledLeaversPanel/>
+    <LeaverPoliciesPanel/>
+    <TablePanel toolbar={<div className="panel-head" style={{border:'none',padding:0,marginBottom:0}}><h2 style={{fontSize:15}}>Leaver log</h2></div>}>
+      {loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : !events || events.length === 0 ? <div className="empty">No leavers recorded yet. A leaver shows up here after their leaver date runs, a manual request is approved, a CSV termination, or a directory disable.</div> : <table><thead><tr><th>Person</th><th>What changed</th><th>Source</th><th>Access removed</th><th>Note</th><th>Notified</th><th>When</th></tr></thead><tbody>
+        {events.map(event => <tr key={event.id}>
+          <td><Link to={`/admin/users/${event.user_id}`} className="user-cell"><span className="avatar">{initialsFor(event.user_display_name || '?')}</span><span><span className="user-name">{event.user_display_name || event.user_id}</span>{event.user_email && <span className="user-email">{event.user_email}</span>}</span></Link></td>
+          <td style={{whiteSpace:'normal'}}><strong>Disabled in the directory</strong>{Number((event.changes as Record<string, unknown>).linked_accounts_disabled) > 0 && <div className="user-email">{String((event.changes as Record<string, unknown>).linked_accounts_disabled)} linked PU/TU account(s) disabled</div>}{Number((event.changes as Record<string, unknown>).groups_removed) > 0 && <div className="user-email">removed from {String((event.changes as Record<string, unknown>).groups_removed)} group(s)</div>}</td>
+          <td>{SOURCE_LABELS[event.source] || event.source}</td>
+          <td>{event.revoked_count > 0 ? <span className="badge danger">{event.revoked_count}</span> : '0'}</td>
+          <td style={{whiteSpace:'normal'}}><span className="user-email" style={{margin:0}}>{(event.review_note && MOVER_NOTES[event.review_note]) || ((event.changes as Record<string, unknown>).policy ? `Policy: ${(event.changes as Record<string, unknown>).policy}` : '—')}</span></td>
+          <td style={{whiteSpace:'normal'}}>{event.notified.length > 0 ? event.notified.join(', ') : '—'}</td>
+          <td>{formatDateTime(event.created_at, timezone)}</td>
+        </tr>)}
+      </tbody></table>}
+    </TablePanel>
+  </Page>;
+}
+interface ApiJoinerTarget { provider_id: string; name: string; provider_type: string; status: string; provision_joiners: boolean; provisioning_domain: string | null; username_convention: string | null; }
+interface ApiJoinerAccount { provider_id: string; provider_name: string; username: string; status: string; error: string | null; temporary_password: string | null; }
+interface ApiJoiner { id: string; user_id: string | null; display_name: string; work_email: string; employee_id: string | null; department: string | null; job_title: string | null; start_at: string; leaver_date: string | null; status: string; targets: ApiJoinerAccount[]; created_at: string; activated_at: string | null; }
+// Mirrors the backend's provisioning policy (services/joiner._username_for) so the admin sees the account name that will be created.
+function joinerUsernamePreview(t: { provisioning_domain: string | null; username_convention: string | null }, first: string, last: string, workEmail: string): string {
+  if (!t.provisioning_domain && !t.username_convention) return workEmail;
+  const slug = (v: string) => v.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const [f, l] = [slug(first), slug(last)];
+  const fallback = (workEmail.split('@')[0] || workEmail).toLowerCase();
+  let local = fallback;
+  if (t.username_convention && f && l) local = t.username_convention.replace(/\{first\}/g, f).replace(/\{last\}/g, l).replace(/\{f\}/g, f.slice(0, 1)).replace(/\{l\}/g, l.slice(0, 1)).trim().toLowerCase() || fallback;
+  const domain = t.provisioning_domain || (workEmail.includes('@') ? workEmail.split('@')[1] : '');
+  return domain ? `${local}@${domain}` : local;
+}
+const emptyJoinerForm = { first_name: '', last_name: '', work_email: '', employee_id: '', department: '', job_title: '', manager_id: '', employee_category: 'EMPLOYEE', employment_type: 'EMPLOYEE', start_now: false, start_at: '', leaver_date: '' };
+// The joiner process: fill in the person once, choose the IdPs, and AccessPilot creates their account in each one
+// DISABLED, shows each one-time temporary password, and enables everything (and grants their birthright access) on the
+// start date. A leaver date entered here is picked up by the leaver process later.
+function JoinersPage() {
+  const auth = useAuth();
+  const timezone = useAppTimezone();
+  const { data: joiners, loading, error, reload } = useApiResource<ApiJoiner[]>('/api/v1/lifecycle/joiners');
+  const { data: targets, reload: reloadTargets } = useApiResource<ApiJoinerTarget[]>('/api/v1/lifecycle/joiner-targets');
+  const { data: users } = useApiResource<ApiUser[]>('/api/v1/users');
+  const { data: departments } = useApiResource<{ id: string; name: string }[]>('/api/v1/policies/departments');
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState(emptyJoinerForm);
+  const [picked, setPicked] = useState<Record<string, { checked: boolean; username: string }>>({});
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  const [result, setResult] = useState<ApiJoiner | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+  useEffect(() => {
+    const timer = setInterval(() => reload(), 30000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const activeTargets = (targets || []).filter(t => t.provision_joiners);
+  // Work email is generated from the primary directory's provisioning policy (Entra first) as the name is typed,
+  // until the admin types their own address.
+  const [emailEdited, setEmailEdited] = useState(false);
+  useEffect(() => {
+    if (emailEdited || !form.first_name.trim() || !form.last_name.trim()) return;
+    const primary = activeTargets.find(t => t.provider_type === 'ENTRA' && t.provisioning_domain) || activeTargets.find(t => t.provisioning_domain);
+    if (!primary) return;
+    const generated = joinerUsernamePreview(primary, form.first_name, form.last_name, '');
+    if (generated && generated !== form.work_email) setForm(current => ({ ...current, work_email: generated }));
+  }, [form.first_name, form.last_name, targets, emailEdited]); // eslint-disable-line react-hooks/exhaustive-deps
+  const openForm = () => {
+    setEmailEdited(false); setForm({ ...emptyJoinerForm, start_at: toLocalDateTimeInput(new Date(Date.now() + 86400000).toISOString()) });
+    setPicked(Object.fromEntries(activeTargets.map(t => [t.provider_id, { checked: true, username: '' }])));
+    setMessage(''); setOpen(true);
+  };
+  const toggleTarget = async (target: ApiJoinerTarget) => {
+    await auth.apiRequest(`/api/v1/lifecycle/joiner-targets/${target.provider_id}`, { method: 'PUT', body: JSON.stringify({ enabled: !target.provision_joiners }) });
+    reloadTargets();
+  };
+  const submit = async () => {
+    const chosen = Object.entries(picked).filter(([, v]) => v.checked);
+    if (!form.first_name.trim() || !form.last_name.trim() || !form.work_email.trim() || !form.department.trim()) { setMessage('First name, last name, work email and department are required.'); return; }
+    if (chosen.length === 0) { setMessage('Choose at least one IdP to create the account in.'); return; }
+    if (!form.start_now && !form.start_at) { setMessage('Pick a start date and time, or tick "Start immediately".'); return; }
+    setSaving(true); setMessage('');
+    try {
+      const payload: Record<string, unknown> = {
+        first_name: form.first_name.trim(), last_name: form.last_name.trim(), work_email: form.work_email.trim(), department: form.department.trim(),
+        job_title: form.job_title.trim() || undefined, employee_id: form.employee_id.trim() || undefined, manager_id: form.manager_id || undefined,
+        employee_category: form.employee_category || undefined, employment_type: form.employment_type || undefined,
+        start_at: form.start_now ? new Date().toISOString() : new Date(form.start_at).toISOString(), leaver_date: form.leaver_date || undefined,
+        targets: chosen.map(([provider_id, v]) => ({ provider_id, username: v.username.trim() || undefined })),
+      };
+      const response = await auth.apiRequest('/api/v1/lifecycle/joiners', { method: 'POST', body: JSON.stringify(payload) });
+      const body = await response.json().catch(() => null);
+      if (response.ok) { setResult(body); setOpen(false); reload(); }
+      else setMessage(body?.error?.message || 'Unable to create this joiner.');
+    } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
+  };
+  const retry = async (joiner: ApiJoiner) => {
+    const response = await auth.apiRequest(`/api/v1/lifecycle/joiners/${joiner.id}/retry`, { method: 'POST' });
+    const body = await response.json().catch(() => null);
+    if (response.ok) setResult(body); else setMessage(body?.error?.message || 'Unable to retry.');
+    reload();
+  };
+  const cancel = async (joiner: ApiJoiner) => {
+    if (!window.confirm(`Cancel ${joiner.display_name}'s start? The accounts already created stay in the directories, disabled.`)) return;
+    const alsoDelete = window.confirm('Also DELETE the accounts that were created in the directories? This cannot be undone (Entra keeps a deleted user recoverable for 30 days). OK = delete, Cancel = keep them disabled.');
+    const response = await auth.apiRequest(`/api/v1/lifecycle/joiners/${joiner.id}${alsoDelete ? '?delete_accounts=true' : ''}`, { method: 'DELETE' });
+    if (!response.ok) setMessage((await response.json().catch(() => null))?.error?.message || 'Unable to cancel.');
+    reload();
+  };
+  const copy = async (key: string, text: string) => { try { await navigator.clipboard.writeText(text); setCopied(key); setTimeout(() => setCopied(null), 1500); } catch { /* clipboard unavailable */ } };
+  const statusBadge = (status: string) => <StatusBadge status={status === 'ACTIVE' ? 'ACTIVE' : status === 'CANCELLED' ? 'REJECTED' : status === 'PARTIAL' ? 'PARTIAL' : 'SCHEDULED'}/>;
+  return <Page eyebrow="JOINER · MOVER · LEAVER" title="Joiners" subtitle="Onboard a new person once — accounts are created in every chosen IdP and switched on for their start date." action={<button className="btn btn-primary" onClick={openForm}><Plus size={14}/> New joiner</button>}>
+    {result && <section className="panel" style={{marginBottom:18,borderColor:'#e0a24d'}}>
+      <div className="panel-head"><h2>Accounts for {result.display_name}</h2><button className="btn" aria-label="Dismiss" onClick={() => setResult(null)}><X size={14}/></button></div>
+      <div className="detail-section">
+        <div className="notice" style={{marginBottom:12}}>Copy each temporary password now and pass it on securely — <strong>it is not stored and cannot be shown again</strong>. The person must change it at first sign-in.</div>
+        {result.targets.map(t => <div key={t.provider_id} style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap',padding:'8px 0',borderBottom:'1px solid #edf1f2'}}>
+          <div style={{minWidth:180}}><strong>{t.provider_name}</strong><div className="user-email">{t.username}</div></div>
+          <StatusBadge status={t.status === 'FAILED' ? 'FAILED' : t.status === 'ENABLED' ? 'ACTIVE' : 'SCHEDULED'}/>
+          {t.temporary_password ? <><code style={{background:'#f4f7f8',padding:'4px 8px',borderRadius:4}}>{t.temporary_password}</code><button className="btn" onClick={() => void copy(t.provider_id, t.temporary_password || '')}>{copied === t.provider_id ? 'Copied' : 'Copy'}</button></> : t.error ? <span className="user-email" style={{margin:0,color:'#ae4949'}}>{t.error}</span> : null}
+        </div>)}
+        <p className="subtitle" style={{marginBottom:0,marginTop:10}}>{result.status === 'ACTIVE' ? 'The accounts are enabled — the person can sign in now.' : `The accounts are disabled until ${formatDateTime(result.start_at, timezone)}, when they are enabled automatically.`}</p>
+      </div>
+    </section>}
+    <section className="panel" style={{marginBottom:18}}>
+      <div className="panel-head"><h2>Where joiners get accounts</h2></div>
+      <div className="detail-section">
+        <p className="subtitle" style={{marginTop:0,marginBottom:10}}>Each connected directory can be a default target for new joiners. The username comes from the directory's naming convention and provisioning domain (Providers page) unless you type one in the form.</p>
+        {!targets || targets.length === 0 ? <p className="subtitle" style={{margin:0}}>No directory is connected yet.</p> : targets.map(t => <label key={t.provider_id} style={{display:'flex',alignItems:'center',gap:8,fontSize:13,padding:'4px 0'}}><input type="checkbox" checked={t.provision_joiners} onChange={() => void toggleTarget(t)}/> <strong>{t.name}</strong> <span className="user-email" style={{margin:0}}>{t.provider_type}{t.provisioning_domain ? ` · @${t.provisioning_domain}` : ''}{t.username_convention ? ` · ${t.username_convention}` : ''}</span></label>)}
+      </div>
+    </section>
+    {open && <section className="panel" style={{marginBottom:18}}>
+      <div className="panel-head"><h2>New joiner</h2></div>
+      <div className="detail-section">
+        <div className="key-grid" style={{marginBottom:12}}>
+          <label className="key"><span>First name</span><input className="select" value={form.first_name} onChange={event => setForm({...form, first_name: event.target.value})}/></label>
+          <label className="key"><span>Last name</span><input className="select" value={form.last_name} onChange={event => setForm({...form, last_name: event.target.value})}/></label>
+          <label className="key"><span>Work email</span><input className="select" type="email" value={form.work_email} onChange={event => { setEmailEdited(true); setForm({...form, work_email: event.target.value}); }} placeholder="generated from the directory's naming policy"/></label>
+          <label className="key"><span>Employee ID (optional)</span><input className="select" value={form.employee_id} onChange={event => setForm({...form, employee_id: event.target.value})}/></label>
+          <label className="key"><span>Department</span><select className="select" value={form.department} onChange={event => setForm({...form, department: event.target.value})}><option value="">Select a department</option>{(departments || []).map(d => <option key={d.id} value={d.name}>{d.name}</option>)}</select></label>
+          <label className="key"><span>Job title</span><input className="select" value={form.job_title} onChange={event => setForm({...form, job_title: event.target.value})}/></label>
+          <label className="key"><span>Manager</span><select className="select" value={form.manager_id} onChange={event => setForm({...form, manager_id: event.target.value})}><option value="">No manager</option>{(users || []).filter(u => u.account_type === 'NORMAL' && u.status === 'ACTIVE').map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+          <label className="key"><span>Role in the org chart</span><select className="select" value={form.employee_category} onChange={event => setForm({...form, employee_category: event.target.value})}><option value="EMPLOYEE">Employee</option><option value="MANAGER">Manager</option></select></label>
+          <label className="key"><span>Employment type</span><select className="select" value={form.employment_type} onChange={event => setForm({...form, employment_type: event.target.value})}>{EMPLOYMENT_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></label>
+          <label className="key"><span>Leaver date (optional — known end of contract)</span><input className="select" type="date" value={form.leaver_date} onChange={event => setForm({...form, leaver_date: event.target.value})}/></label>
+        </div>
+        <label style={{display:'flex',alignItems:'center',gap:8,fontWeight:600,fontSize:13,marginBottom:8}}><input type="checkbox" checked={form.start_now} onChange={event => setForm({...form, start_now: event.target.checked})}/> Start immediately (accounts are enabled right away)</label>
+        {!form.start_now && <label className="key" style={{display:'block',marginBottom:12,maxWidth:340}}><span>Starts (your device's local time) — accounts stay disabled until then</span><input className="select" style={{width:'100%'}} type="datetime-local" value={form.start_at} onChange={event => setForm({...form, start_at: event.target.value})}/></label>}
+        <div className="key" style={{marginBottom:6}}><span>Create accounts in</span></div>
+        {activeTargets.length === 0 ? <div className="notice" style={{marginBottom:12}}>No directory is switched on for joiners — turn one on above.</div> : activeTargets.map(t => <div key={t.provider_id} style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',padding:'4px 0'}}>
+          <label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,minWidth:200}}><input type="checkbox" checked={picked[t.provider_id]?.checked ?? false} onChange={event => setPicked({...picked, [t.provider_id]: { checked: event.target.checked, username: picked[t.provider_id]?.username || '' }})}/> <strong>{t.name}</strong></label>
+          <input className="select" style={{minWidth:280}} placeholder={(t.provisioning_domain || t.username_convention) ? `per provider policy: ${joinerUsernamePreview(t, form.first_name, form.last_name, form.work_email) || '...'}` : 'username (defaults to the work email)'} value={picked[t.provider_id]?.username || ''} onChange={event => setPicked({...picked, [t.provider_id]: { checked: picked[t.provider_id]?.checked ?? true, username: event.target.value }})}/>
+        </div>)}
+        {message && <div className="notice" style={{margin:'12px 0'}}>{message}</div>}
+        <div style={{display:'flex',gap:8,marginTop:12}}><button className="btn btn-primary" disabled={saving} onClick={() => void submit()}>{saving ? 'Creating accounts...' : form.start_now ? 'Create and start now' : 'Create and schedule'}</button><button className="btn" onClick={() => setOpen(false)}>Cancel</button></div>
+      </div>
+    </section>}
+    {!open && message && <div className="notice" style={{marginBottom:14}}>{message}</div>}
+    <TablePanel toolbar={undefined}>
+      {loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : !joiners || joiners.length === 0 ? <div className="empty">No joiners yet. Use "New joiner" to onboard someone.</div> : <table><thead><tr><th>Person</th><th>Department</th><th>Starts</th><th>Leaver date</th><th>Accounts</th><th>Status</th><th></th></tr></thead><tbody>
+        {joiners.map(joiner => <tr key={joiner.id}>
+          <td>{joiner.user_id ? <Link to={`/admin/users/${joiner.user_id}`} className="user-cell"><span className="avatar">{initialsFor(joiner.display_name)}</span><span><span className="user-name">{joiner.display_name}</span><span className="user-email">{joiner.work_email}</span></span></Link> : joiner.display_name}</td>
+          <td style={{whiteSpace:'normal'}}>{joiner.department || '—'}<div className="user-email">{joiner.job_title || ''}</div></td>
+          <td>{formatDateTime(joiner.start_at, timezone)}</td>
+          <td>{joiner.leaver_date || '—'}</td>
+          <td style={{whiteSpace:'normal'}}>{joiner.targets.map(t => <div key={t.provider_id} title={t.error || undefined}><span className={`badge ${t.status === 'ENABLED' ? 'success' : t.status === 'FAILED' ? 'danger' : 'neutral'}`}>{t.provider_name}: {t.status === 'ENABLED' ? 'enabled' : t.status === 'FAILED' ? 'failed' : 'created, disabled'}</span></div>)}</td>
+          <td>{statusBadge(joiner.status)}</td>
+          <td><span style={{display:'flex',gap:6}}>{joiner.targets.some(t => t.status === 'FAILED') && joiner.status !== 'CANCELLED' && <button className="btn" onClick={() => void retry(joiner)}>Retry failed</button>}{joiner.status === 'SCHEDULED' && <button className="btn" onClick={() => void cancel(joiner)}>Cancel</button>}</span></td>
+        </tr>)}
+      </tbody></table>}
+    </TablePanel>
   </Page>;
 }
 function ProvidersPage() { return <ProviderConfiguration />; }
@@ -3651,7 +4441,7 @@ function OnboardingPage() {
           <div className="key"><span>No change</span><strong>{currentImport.no_change_count}</strong></div>
           <div className="key"><span>Disable (leavers)</span><strong>{currentImport.disabled_count}</strong></div>
           <div className="key"><span>Row errors</span><strong>{currentImport.failed_count}</strong></div>
-          {currentImport.status === 'COMMITTED' && <><div className="key"><span>Real accounts provisioned</span><strong>{currentImport.real_accounts_provisioned_count}</strong></div><div className="key"><span>Birthright grants</span><strong>{currentImport.birthright_assignments_created_count}</strong></div><div className="key"><span>Access revoked</span><strong>{currentImport.access_revoked_count}</strong></div><div className="key"><span>Revoke failures</span><strong>{currentImport.access_revoke_failed_count}</strong></div></>}
+          {currentImport.status === 'COMMITTED' && <><div className="key"><span>Real accounts provisioned</span><strong>{currentImport.real_accounts_provisioned_count}</strong></div><div className="key"><span>Birthright grants</span><strong>{currentImport.birthright_assignments_created_count}</strong></div><div className="key"><span>Birthright grants removed (movers)</span><strong>{currentImport.birthright_assignments_revoked_count}</strong></div><div className="key"><span>Moves scheduled (future effectiveDate)</span><strong>{currentImport.moves_scheduled_count}</strong></div><div className="key"><span>Access revoked</span><strong>{currentImport.access_revoked_count}</strong></div><div className="key"><span>Revoke failures</span><strong>{currentImport.access_revoke_failed_count}</strong></div></>}
         </div>
         {currentImport.error_summary && <div className="notice" style={{marginBottom:14}}>{String(currentImport.error_summary.error || 'Validation failed.')}{Array.isArray(currentImport.error_summary.missingColumns) && <> Missing: {(currentImport.error_summary.missingColumns as string[]).join(', ')}</>}</div>}
         {currentImport.status === 'VALIDATED' && <button className="btn btn-primary" disabled={committing} onClick={() => void commit()}>{committing ? 'Committing...' : 'Commit import'}</button>}

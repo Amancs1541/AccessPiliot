@@ -27,6 +27,9 @@ from app.api.v1.notifications import router as notifications_router
 from app.api.v1.nhi import router as nhi_router
 from app.api.v1.privileged_accounts import router as privileged_accounts_router
 from app.api.v1.access_reviews import router as access_reviews_router
+from app.api.v1.lifecycle import router as lifecycle_router
+from app.api.v1.accounts import router as accounts_router
+from app.api.v1.joiner import router as joiner_router
 
 logger = logging.getLogger("accesspilot.api.v1")
 router = APIRouter(prefix="/api/v1")
@@ -48,6 +51,9 @@ router.include_router(notifications_router)
 router.include_router(nhi_router)
 router.include_router(privileged_accounts_router)
 router.include_router(access_reviews_router)
+router.include_router(lifecycle_router)
+router.include_router(accounts_router)
+router.include_router(joiner_router)
 router.include_router(placeholder_router)
 router.include_router(providers_router)
 

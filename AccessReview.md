@@ -245,3 +245,66 @@ Every reviewed item ends in exactly one outcome, shown with the same colours on 
 **Approved** (green — reviewer kept the access), **Revoked** (red — reviewer removed it), **Auto-revoked** (amber — removed
 because the deadline passed or the campaign was closed with the item undecided), **Pending** (grey). "Auto-revoked" is
 deliberately not counted as a reviewer decision.
+
+## 13. Movers, effective dates and the Movers page
+
+When a person's department or job title changes (seen by directory sync, an edit in AccessPilot, or a CSV import),
+AccessPilot removes the access their old attributes granted, grants what the new ones qualify for, and starts a review
+of the access **no policy granted** — including any linked privileged (PU) / test (TU) accounts, which are flagged into
+that review but never disabled. The reviewer is the person's manager (Org Chart), else the first "lifecycle owner";
+the manager and every lifecycle owner are notified. Set this up, and see every move, on **Movers** (admin).
+
+**Effective dating.** A move can take effect later: add an optional `effectiveDate` column (YYYY-MM-DD) to the CSV, or
+use **Schedule a move** on the Movers page. Until that date nothing about the person changes; then a worker applies it
+all at once (attribute update pushed to the directory, access swap, review). A newer schedule for the same person
+replaces the older one; a scheduled move can be cancelled; if the directory rejects the update the move shows as FAILED.
+`effectiveDate` only affects an existing person whose department/title actually changes.
+
+**Leavers and joiners.** When directory sync sees someone switched from active to disabled in Entra/Okta, all their
+AccessPilot access is revoked (including in Entra) and their linked PU/TU accounts are disabled, exactly like a CSV
+termination; the manager and lifecycle owners are notified. This can be switched off on the Movers page
+("Leavers: revoke all access…") — the leaver is then only recorded. New people first seen by sync or created by a CSV
+import are recorded as joiners. The Movers page can list Movers, Joiners or Leavers.
+
+## 14. Leaver dates and leaver policies
+
+Give a person a **leaver date** (their user page, or a `leaverDate` column in a CSV import). On that date, at the matching
+**leaver policy**'s time (app timezone), the leaver process runs by itself. Manager and lifecycle owners get reminders
+first (default 7 and 1 days before). Policies (Movers page) choose who they apply to (everyone / a department / an
+employment type), the time of day, the reminders and the actions: revoke all access, disable the account in every
+connected IdP, disable linked PU/TU accounts, remove from all groups. The first active policy by priority whose scope
+matches wins; the Default covers the rest. The same process runs for a CSV termination, when the directory shows someone
+disabled, and from the **Start leaver process now** button on the user page — and it now disables the real accounts,
+which a CSV termination previously did not.
+
+## 15. The joiner process
+
+**Joiners** (admin): fill in the new person once — name, work email, employee ID, department, job title, manager, org-chart role,
+employment type, start date/time, optional leaver date — and tick the IdPs to create accounts in (each connected directory has a
+default "joiner target" switch). AccessPilot creates the account in every chosen IdP **disabled**, shows each **one-time temporary
+password** (never stored), and on the start date a worker enables all accounts, marks the person active, makes their birthright access
+eligible and notifies the manager/lifecycle owners. "Start immediately" does all of that at once. If one IdP fails, the others still
+succeed and the joiner is PARTIAL — **Retry failed** creates the missing account. A scheduled joiner can be cancelled; accounts already
+created stay in the directories, disabled. The leaver date entered here feeds the leaver process (§14).
+
+## 16. If nobody decides by the due date
+
+When creating a campaign you can choose what happens to items still undecided at the due date: **Revoke the access** (default, unchanged behaviour: items become Auto-revoked) or **Keep the access** (items are auto-approved). Recurring and scheduled campaigns carry the choice forward. Note: the *Inactive users* scope needs Microsoft Entra ID P1/P2 licensing in addition to the AuditLog.Read.All permission.
+
+## 17. After the leaver process: re-enable, deletion, report
+
+- **Re-enable needs approval.** Once the leaver process has run, the Enable buttons on the user's Accounts panel ask for a valid reason (min. 10 characters) and create a request. The person's manager approves it (lifecycle owners when there is no manager; admins can also decide; nobody approves their own request). Managers see requests on *My Access Reviews*; admins see all on the *Movers* page. Approval enables the accounts in every IdP and resets the leaver cycle; access is NOT restored. The leaver date can no longer be edited after the process ran.
+- **Delete accounts after N days.** Each leaver policy has *Delete accounts from all IdPs after (days)* (blank = never). When the time comes a worker deletes the person's account in every IdP (irreversible; Entra keeps deleted users 30 days). The person stays in AccessPilot labelled *Deleted*, with an audit entry. Deletion waits while a re-enable request is pending, and a deleted person can only return as a new joiner.
+- **JML report.** *Movers* page: **Download JML report (PDF)**: summary, policies, joiners with accounts, movers with revoked items and reviews, leavers with per-IdP results, scheduled leavers, deletions, re-enable requests.
+
+## 18. Manual "Start leaver process now" (approval flow)
+
+Button on the user page (and *Run now* in Scheduled leavers): **justification** (min. 10 characters) -> the person's accounts are **disabled in every IdP immediately** -> the **manager** (lifecycle owners if none; admins can also decide; the initiator cannot) **approves or denies**. *Approved*: the leaver process runs (access revoked etc., per the leaver policy). *Denied*: the accounts that were active are **enabled again** and the admin who started it is notified. While a request is pending the account cannot be enabled by hand. If no directory can disable the account, no request is created. Managers decide on *My Access Reviews*; admins see all on *Movers* > Leaver requests. Automatic leavers (leaver date, CSV, directory-disabled) do not need approval. If a processed leaver is enabled directly in the directory, sync alerts the manager and lifecycle owners (nothing is changed automatically).
+
+## 19. Leavers has its own page
+
+*Leavers* is now a separate sidebar page (`/admin/leavers`), next to *Joiners* and *Movers* — no longer a tab mixed into Movers. It has the manual leaver requests waiting on a manager, re-enable requests, scheduled leaver dates, leaver policies, the JML PDF report button, and the leaver-only activity log. The Movers page keeps the shared global settings (revoke access on directory-disable, lifecycle owners) since those also drive Leaver approver fallback.
+
+## 20. Re-enabling a leaver's account is scoped to what you clicked
+
+Clicking **Enable** on one IdP account for a leaver asks for a reason and sends the manager (or a lifecycle owner) an approval request scoped to **just that one account** — approving it enables only that account, the others stay exactly as they are. Clicking **Enable in all IdPs** does the same but scoped to every account. The pending request (visible on the user's Leaver tab and on the Leavers page) shows which scope it covers. The person is only treated as fully "returned" (leaver cycle reset, a new leaver date can be set) once every account is active again — a partial approval keeps them recorded as a leaver until the rest come back too.

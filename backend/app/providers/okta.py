@@ -148,6 +148,18 @@ class OktaProvider(IdentityProvider):
             await client.request("POST", f"/users/{external_id}/lifecycle/{'activate' if enabled else 'deactivate'}", params={"sendEmail": "false"} if enabled else None)
         return True
 
+    async def delete_user(self, external_id: str) -> bool:
+        """Okta needs two DELETEs: the first deactivates a live user, the second permanently removes it. UNVERIFIED
+        against a live org (same caveat as the rest of this file)."""
+        async with self._client() as client:
+            await client.request("DELETE", f"/users/{external_id}", params={"sendEmail": "false"})
+            try:
+                await client.request("DELETE", f"/users/{external_id}", params={"sendEmail": "false"})
+            except GraphError as exc:
+                if exc.http_status != 404:
+                    raise
+        return True
+
     async def get_groups(self, query: str | None = None) -> list[NormalizedGroup]:
         params: dict[str, Any] = {"limit": 200}
         if query:
@@ -308,12 +320,15 @@ class OktaProvider(IdentityProvider):
                 raise ProviderConflictError("A user with this login already exists in Okta.")
             password = secrets.token_urlsafe(18)
             first_name, _, last_name = request.display_name.partition(" ")
+            first_name, last_name = request.given_name or first_name, request.surname or last_name
             profile: dict[str, Any] = {"firstName": first_name, "lastName": last_name, "email": request.user_principal_name, "login": request.user_principal_name}
             if request.department:
                 profile["department"] = request.department
             if request.job_title:
                 profile["title"] = request.job_title
-            response = await client.request("POST", "/users", params={"activate": "true"}, json={"profile": profile, "credentials": {"password": {"value": password}}})
+            if request.employee_id:
+                profile["employeeNumber"] = request.employee_id
+            response = await client.request("POST", "/users", params={"activate": "true" if request.enabled else "false"}, json={"profile": profile, "credentials": {"password": {"value": password}}})
         created = self._user_from_okta(response.json())
         normalized = NormalizedUser(external_id=created.external_id, email=created.email, display_name=created.display_name, given_name=created.given_name, surname=created.surname, department=request.department or created.department, job_title=request.job_title or created.job_title, status=created.status)
         return CreatedUser(user=normalized, temporary_password=password)

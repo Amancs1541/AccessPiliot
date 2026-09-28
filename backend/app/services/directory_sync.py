@@ -20,11 +20,12 @@ from app.services.provider_configuration import _connector
 SYSTEM_ACTOR_SUBJECT = "system:directory-sync"
 
 
-async def upsert_user(session: AsyncSession, provider_id: UUID, normalized: NormalizedUser) -> tuple[User, bool]:
+async def upsert_user(session: AsyncSession, provider_id: UUID, normalized: NormalizedUser, changes_out: dict | None = None) -> tuple[User, bool]:
     """Returns (row, birthright_relevant_change) — the second value is True when this call either created a
-    brand-new user or changed department/job_title on an existing one, i.e. exactly the moments a birthright
-    mover/joiner reconciliation should re-run (see run_sync below and app.services.birthright). Most callers
-    don't care and just unpack `row, _ = await upsert_user(...)`."""
+    brand-new user or changed ANY attribute a birthright rule can read (department, job_title, status, email —
+    see birthright.CONDITION_FIELD_MAP) on an existing one, i.e. exactly the moments a birthright mover/joiner
+    reconciliation should re-run (see run_sync below and app.services.birthright). Most callers don't care and
+    just unpack `row, _ = await upsert_user(...)`."""
     row = (await session.execute(select(User).where(User.provider_id == provider_id, User.external_id == normalized.external_id))).scalar_one_or_none()
     now = datetime.now(timezone.utc)
     if row is None:
@@ -32,7 +33,10 @@ async def upsert_user(session: AsyncSession, provider_id: UUID, normalized: Norm
         session.add(row)
         await session.flush()
         return row, True
-    birthright_relevant_change = row.department != normalized.department or row.job_title != normalized.job_title
+    if changes_out is not None:
+        from app.services.lifecycle import build_changes
+        changes_out.update(build_changes({"department": row.department, "job_title": row.job_title, "status": row.status, "email": row.email}, {"department": normalized.department, "job_title": normalized.job_title, "status": normalized.status, "email": normalized.email}))
+    birthright_relevant_change = row.department != normalized.department or row.job_title != normalized.job_title or row.status != normalized.status or (row.email or "").lower() != (normalized.email or "").lower()
     row.email, row.display_name, row.given_name, row.surname = normalized.email, normalized.display_name, normalized.given_name, normalized.surname
     row.department, row.job_title, row.status, row.last_synced_at = normalized.department, normalized.job_title, normalized.status, now
     await session.flush()
@@ -127,15 +131,22 @@ async def run_sync(session: AsyncSession, provider: IdentityProvider, request_id
 
     errors_count = 0
     users_needing_birthright_reconciliation: list[UUID] = []
+    changes_by_user: dict[UUID, dict] = {}
+    created_user_ids: set[UUID] = set()
     users_needing_group_mapping_reconciliation: set[UUID] = set()
     try:
         users = await connector.get_users()
         user_by_external_id: dict[str, User] = {}
         for normalized_user in users:
-            user_row, birthright_relevant_change = await upsert_user(session, provider.id, normalized_user)
+            user_changes: dict = {}
+            user_row, birthright_relevant_change = await upsert_user(session, provider.id, normalized_user, user_changes)
             user_by_external_id[normalized_user.external_id] = user_row
             if birthright_relevant_change:
                 users_needing_birthright_reconciliation.append(user_row.id)
+                if user_changes:
+                    changes_by_user[user_row.id] = user_changes
+                else:
+                    created_user_ids.add(user_row.id)
 
         groups = await connector.get_groups()
         for normalized_group in groups:
@@ -157,6 +168,7 @@ async def run_sync(session: AsyncSession, provider: IdentityProvider, request_id
                     user_by_external_id[member.external_id] = user_row
                     if birthright_relevant_change:
                         users_needing_birthright_reconciliation.append(user_row.id)
+                        created_user_ids.add(user_row.id)
                 member_ids.add(user_row.id)
                 newly_joined = await _upsert_membership(session, user_row.id, group_row.id)
                 if newly_joined and group_has_mapping:
@@ -182,7 +194,17 @@ async def run_sync(session: AsyncSession, provider: IdentityProvider, request_id
         from app.services.birthright import reconcile_birthright_policies_for_user
         for user_id in users_needing_birthright_reconciliation:
             try:
-                await reconcile_birthright_policies_for_user(session, user_id, SYSTEM_ACTOR_SUBJECT, request_id)
+                outcome = await reconcile_birthright_policies_for_user(session, user_id, SYSTEM_ACTOR_SUBJECT, request_id)
+                if user_id in changes_by_user:
+                    from app.services.lifecycle import record_mover
+                    await record_mover(session, user_id, changes_by_user[user_id], "SYNC", outcome, request_id)
+                    from app.services.lifecycle import handle_directory_disable
+                    await handle_directory_disable(session, user_id, changes_by_user[user_id], request_id, len(outcome["revoked"]))
+                    from app.services.lifecycle import handle_leaver_reactivated
+                    await handle_leaver_reactivated(session, user_id, changes_by_user[user_id], request_id)
+                if user_id in created_user_ids:
+                    from app.services.lifecycle import record_joiner
+                    await record_joiner(session, user_id, "SYNC", outcome, request_id)
             except AccessPilotError:
                 errors_count += 1
                 session.add(SyncError(sync_run_id=sync_run.id, resource_type="BIRTHRIGHT_RECONCILIATION", external_id=str(user_id), error_code="BIRTHRIGHT_RECONCILIATION_FAILED", error_message="Could not reconcile birthright policies for this user after their attributes changed."))

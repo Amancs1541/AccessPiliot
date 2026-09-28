@@ -119,3 +119,20 @@ async def test_a_normal_user_cannot_edit_hierarchy(db_override):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.patch(f"/api/v1/users/{seeded['employee_id']}/hierarchy", json={"employee_category": "EMPLOYEE"})
     assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_changing_a_manager_notifies_the_person_and_both_managers(db_override):
+    from app.models import Notification, User
+    from sqlalchemy import select
+    seeded = await _seed_manager_and_employee(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.patch(f"/api/v1/users/{seeded['manager_id']}/hierarchy", json={"employee_category": "MANAGER"})
+        first = await client.patch(f"/api/v1/users/{seeded['employee_id']}/hierarchy", json={"manager_id": str(seeded["manager_id"])})
+        same = await client.patch(f"/api/v1/users/{seeded['employee_id']}/hierarchy", json={"manager_id": str(seeded["manager_id"])})
+    assert first.status_code == 200 and same.status_code == 200
+    async with db_override.factory() as session:
+        notes = list((await session.scalars(select(Notification).where(Notification.notification_type == "MANAGER_CHANGED"))).all())
+    assert {n.user_id for n in notes} == {seeded["employee_id"], seeded["manager_id"]}   # the repeat save (no change) notified nobody
+    assert len(notes) == 2

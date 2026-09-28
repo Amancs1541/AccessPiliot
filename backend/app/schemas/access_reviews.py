@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SCOPE_TYPES = ("ALL", "RESOURCE_TYPE", "SPECIFIC_RESOURCE", "MULTIPLE_RESOURCES", "USER", "ACCOUNT_TYPE", "INACTIVE_USERS")
+SCOPE_TYPES = ("ALL", "RESOURCE_TYPE", "SPECIFIC_RESOURCE", "MULTIPLE_RESOURCES", "USER", "ACCOUNT_TYPE", "INACTIVE_USERS", "MOVER")
 
 
 class ScopeTargetItem(BaseModel):
@@ -19,7 +19,7 @@ class ScopeTargetItem(BaseModel):
 class AccessReviewCampaignCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     description: Optional[str] = None
-    scope_type: str = Field(pattern="^(ALL|RESOURCE_TYPE|SPECIFIC_RESOURCE|MULTIPLE_RESOURCES|USER|ACCOUNT_TYPE|INACTIVE_USERS)$")
+    scope_type: str = Field(pattern="^(ALL|RESOURCE_TYPE|SPECIFIC_RESOURCE|MULTIPLE_RESOURCES|USER|ACCOUNT_TYPE|INACTIVE_USERS|MOVER)$")
     scope_resource_type: Optional[str] = Field(default=None, pattern="^(GROUP|ROLE|APPLICATION|PACKAGE)$")
     scope_resource_id: Optional[UUID] = None
     scope_targets: Optional[list[ScopeTargetItem]] = None
@@ -30,6 +30,7 @@ class AccessReviewCampaignCreate(BaseModel):
     fallback_reviewer_id: Optional[UUID] = None
     fallback_unlock_hours: Optional[int] = Field(default=None, gt=0)
     due_at: datetime
+    on_no_response: str = Field(default="REVOKE", pattern=r"^(REVOKE|KEEP)$")
     # Recurrence: NULL/omitted means a one-time campaign, unchanged from before this field existed. A positive
     # value means "when this campaign completes, automatically create the next one due this many days later,
     # with the same scope/reviewer" — see app.services.access_reviews._maybe_spawn_recurrence.
@@ -57,8 +58,8 @@ class AccessReviewCampaignCreate(BaseModel):
             raise ValueError("scope_resource_type and scope_resource_id are required when scope_type is SPECIFIC_RESOURCE")
         if self.scope_type == "MULTIPLE_RESOURCES" and not self.scope_targets:
             raise ValueError("scope_targets must have at least one entry when scope_type is MULTIPLE_RESOURCES")
-        if self.scope_type == "USER" and not self.scope_user_id:
-            raise ValueError("scope_user_id is required when scope_type is USER")
+        if self.scope_type in ("USER", "MOVER") and not self.scope_user_id:
+            raise ValueError("scope_user_id is required when scope_type is USER or MOVER")
         if self.scope_type == "ACCOUNT_TYPE" and not self.scope_account_type:
             raise ValueError("scope_account_type is required when scope_type is ACCOUNT_TYPE")
         if self.scope_type == "INACTIVE_USERS" and not self.scope_inactive_days:
@@ -113,6 +114,7 @@ class AccessReviewCampaignResponse(BaseModel):
     fallback_unlock_hours: Optional[int]
     status: str
     due_at: datetime
+    on_no_response: str = "REVOKE"
     frequency_days: Optional[int] = None
     schedule_day_of_month: Optional[int] = None
     schedule_time: Optional[str] = None

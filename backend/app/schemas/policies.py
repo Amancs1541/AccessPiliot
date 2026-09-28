@@ -50,6 +50,10 @@ class BirthrightPolicyResponse(BaseModel):
     conditions_count: int = 0
     actions_count: int = 0
     reconciliation_enabled: bool = True
+    # Set only on the response to a create/update: what the immediate re-check of everyone affected did.
+    recheck: Optional[dict] = None
+    # Soft, non-blocking notices on create/update (e.g. a department nobody has) — the policy is saved regardless.
+    warnings: list[str] = []
     created_at: datetime
     updated_at: datetime
 

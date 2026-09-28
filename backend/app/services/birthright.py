@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Optional
 from uuid import UUID, uuid4
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AccessPilotError
@@ -46,6 +46,23 @@ async def create_birthright_policy(session: AsyncSession, data: BirthrightPolicy
     await session.commit()
     await session.refresh(row)
     return row
+
+
+async def policy_warnings(session: AsyncSession, policy: BirthrightPolicy) -> list[str]:
+    """Advisory only — never blocks a save. Departments legitimately arrive from Entra/CSV without being in the
+    Departments picker list, so a hard check would be wrong; this just flags a value that will likely match nobody."""
+    if policy.match_field != "department" or not policy.match_value:
+        return []
+    from app.models import Department
+    wanted = policy.match_value.strip().lower()
+    warnings: list[str] = []
+    known = {name.lower() for name in (await session.scalars(select(Department.name))).all()}
+    if wanted not in known:
+        warnings.append(f"\"{policy.match_value}\" is not in the Departments list. The policy is saved, but check the spelling.")
+    holders = (await session.execute(select(func.count()).select_from(User).where(func.lower(User.department) == wanted))).scalar_one()
+    if holders == 0:
+        warnings.append(f"No user currently has the department \"{policy.match_value}\", so this policy matches nobody yet.")
+    return warnings
 
 
 async def _get_policy(session: AsyncSession, policy_id: UUID) -> BirthrightPolicy:
@@ -219,7 +236,7 @@ async def backfill_birthright_package_links(session: AsyncSession) -> int:
     return created
 
 
-async def reconcile_birthright_policies_for_user(session: AsyncSession, user_id: UUID, actor_subject: str, request_id: str) -> dict:
+async def reconcile_birthright_policies_for_user(session: AsyncSession, user_id: UUID, actor_subject: str, request_id: str, justification: Optional[str] = None) -> dict:
     """Mover reconciliation: call this whenever a user's department/job_title has just changed (from either
     direction — a directory sync picking up a change made in Entra/Okta, or an admin editing it inside
     AccessPilot itself). Diffs what birthright policies match the user's CURRENT attributes against what's
@@ -259,13 +276,43 @@ async def reconcile_birthright_policies_for_user(session: AsyncSession, user_id:
         if owning_policy is not None and not owning_policy.reconciliation_enabled:
             continue
         try:
-            await revoke_assignment(session, assignment.id, actor_subject, "Birthright policy no longer applies — the user's department/job title changed.", request_id, reason="BIRTHRIGHT_POLICY_NO_LONGER_APPLIES")
+            await revoke_assignment(session, assignment.id, actor_subject, justification or "Birthright policy no longer applies — the user's department/job title changed.", request_id, reason="BIRTHRIGHT_POLICY_NO_LONGER_APPLIES")
             revoked_ids.append(assignment.id)
         except AccessPilotError:
             continue
 
+    # A disabled account is never a candidate for NEW birthright access — this matters now that a status change
+    # itself triggers a reconcile: without it, a leaver whose access was just revoked could be handed fresh
+    # eligible grants again because their department still matches a policy.
+    if user.status == "DISABLED":
+        return {"revoked": revoked_ids, "granted": []}
     granted_ids = await evaluate_birthright_policies(session, user_id, actor_subject, request_id)
     return {"revoked": revoked_ids, "granted": granted_ids}
+
+
+async def recheck_users_for_policy(session: AsyncSession, policy_id: UUID, actor_subject: str, request_id: str) -> dict:
+    """"Apply on save": right after a birthright policy is created or edited (rule, enable/disable, actions),
+    re-check every person it could affect — everyone it matches NOW plus everyone still holding a grant it made
+    earlier — with the same reconcile a directory sync runs (grant what now matches, revoke what no longer does,
+    never touching manual grants). Without this a fix (e.g. correcting a typo in the rule) only reached people the
+    next time their department or job title changed. One person's failure never blocks the others."""
+    policy = await session.get(BirthrightPolicy, policy_id)
+    users = (await session.execute(select(User).where(User.account_type == "NORMAL"))).scalars().all()
+    holders = set((await session.execute(select(AccessAssignment.user_id).where(
+        AccessAssignment.birthright_policy_id == policy_id, AccessAssignment.status.notin_(NON_FINAL_ASSIGNMENT_STATUSES),
+    ))).scalars().all())
+    candidates = [u for u in users if u.id in holders or (policy is not None and policy.status == "ACTIVE" and u.status == "ACTIVE" and _policy_matches_user(u, policy))]
+    granted = revoked = 0
+    for user in candidates:
+        try:
+            outcome = await reconcile_birthright_policies_for_user(session, user.id, actor_subject, request_id, "Birthright policy changed — this person no longer matches it.")
+        except AccessPilotError:
+            continue
+        granted += len(outcome["granted"])
+        revoked += len(outcome["revoked"])
+    await record_audit(session, action="BIRTHRIGHT_POLICY_RECHECKED", target_type="BIRTHRIGHT_POLICY", target_id=policy_id, request_id=request_id, metadata={"users_checked": len(candidates), "granted": granted, "revoked": revoked})
+    await session.commit()
+    return {"users_checked": len(candidates), "granted": granted, "revoked": revoked}
 
 
 _RESOURCE_MODELS = {"GROUP": Group, "ROLE": Role, "APPLICATION": Application, "PACKAGE": AccessPackage}

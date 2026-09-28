@@ -97,6 +97,11 @@ class NewUserRequest:
     mail_nickname: str
     department: str | None = None
     job_title: str | None = None
+    # Joiner process extras — all optional, so every existing caller is unaffected.
+    given_name: str | None = None
+    surname: str | None = None
+    employee_id: str | None = None
+    enabled: bool = True  # False = create the account disabled (pre-boarding; enabled on the start date)
 
 
 @dataclass(frozen=True)
@@ -135,6 +140,16 @@ class IdentityProvider(ABC):
         to enable/disable a Privileged (PU) or Test (TU) shadow account (see app.services.privileged_accounts),
         the human-user analog of set_application_enabled for a service principal."""
         ...
+
+    async def set_user_manager(self, external_id: str, manager_external_id: str) -> bool:
+        """Optional: point the user's directory `manager` relationship at another user. Connectors that cannot do
+        this keep this default, and callers treat NotImplementedError as 'not supported here', never as a failure."""
+        raise NotImplementedError("This directory does not support setting a manager.")
+
+    async def delete_user(self, external_id: str) -> bool:
+        """Optional and irreversible (Entra keeps a deleted user recoverable for 30 days). Same default contract as
+        set_user_manager."""
+        raise NotImplementedError("This directory does not support deleting users.")
 
     @abstractmethod
     async def get_groups(self, query: str | None = None) -> list[NormalizedGroup]: ...

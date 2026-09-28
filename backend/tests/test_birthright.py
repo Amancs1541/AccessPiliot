@@ -248,8 +248,10 @@ async def test_reconciliation_revokes_a_birthright_grant_once_its_policy_is_disa
         await client.patch(f"/api/v1/policies/birthright/{policy_id}", json={"status": "DISABLED"})
 
     async with db_override.factory() as session:
+        # Disabling the policy already revoked its grant at save time (re-check on save), so a manual reconcile
+        # afterwards is a harmless no-op.
         result = await reconcile_birthright_policies_for_user(session, user_id, "admin-oid", "req-2")
-        assert len(result["revoked"]) == 1
+        assert result["revoked"] == []
         assert result["granted"] == []
 
         assignments = (await session.execute(select(AccessAssignment).where(AccessAssignment.user_id == user_id))).scalars().all()
@@ -390,7 +392,7 @@ async def test_reconciliation_revokes_every_item_of_a_disabled_package_birthrigh
 
     async with db_override.factory() as session:
         result = await reconcile_birthright_policies_for_user(session, user_id, "admin-oid", "req-pkg-5")
-        assert len(result["revoked"]) == 2
+        assert result["revoked"] == []  # already revoked when the policy was disabled
         assignments = (await session.execute(select(AccessAssignment).where(AccessAssignment.user_id == user_id))).scalars().all()
     assert all(a.status == "REVOKED" for a in assignments)
 
@@ -699,3 +701,93 @@ async def test_a_normal_user_cannot_manage_birthright_policies(db_override):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/api/v1/policies/birthright", json={"name": "x", "match_field": "department", "match_value": "Finance", "resource_type": "GROUP", "resource_id": group_id})
     assert response.status_code == 403
+
+
+async def _seed_finance_people(factory):
+    async with factory() as session:
+        provider = IdentityProvider(name="Directory", type="MOCK", status="CONNECTED", tenant_id="t")
+        session.add(provider)
+        await session.flush()
+        group = Group(provider_id=provider.id, external_id="g-fin-recheck", name="Finance Group", status="ACTIVE", is_privileged=False)
+        sam = User(provider_id=provider.id, external_id="sam", email="sam@x.com", display_name="Sam", status="ACTIVE", department="Finance")
+        amy = User(provider_id=provider.id, external_id="amy", email="amy@x.com", display_name="Amy", status="ACTIVE", department="Finance")
+        ian = User(provider_id=provider.id, external_id="ian", email="ian@x.com", display_name="Ian", status="ACTIVE", department="IT")
+        session.add_all([group, sam, amy, ian])
+        await session.commit()
+        return {"group": group.id, "sam": sam.id, "amy": amy.id, "ian": ian.id}
+
+
+async def _statuses(factory, ids):
+    async with factory() as session:
+        rows = (await session.execute(select(AccessAssignment))).scalars().all()
+    result = {}
+    for name, user_id in (("sam", ids["sam"]), ("amy", ids["amy"]), ("ian", ids["ian"])):
+        result[name] = sorted(r.status for r in rows if r.user_id == user_id)
+    return result
+
+
+@pytest.mark.asyncio
+async def test_creating_a_policy_immediately_grants_everyone_it_already_matches(db_override):
+    ids = await _seed_finance_people(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/policies/birthright", json={"name": "Finance access", "match_field": "department", "match_value": "Finance", "resource_type": "GROUP", "resource_id": str(ids["group"])})
+    assert created.status_code == 201
+    assert created.json()["recheck"] == {"users_checked": 2, "granted": 2, "revoked": 0}
+    assert await _statuses(db_override.factory, ids) == {"sam": ["ELIGIBLE"], "amy": ["ELIGIBLE"], "ian": []}
+
+
+@pytest.mark.asyncio
+async def test_fixing_a_typo_in_a_policy_takes_effect_at_once_and_a_wrong_edit_takes_access_back(db_override):
+    ids = await _seed_finance_people(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/policies/birthright", json={"name": "Finance access", "match_field": "department", "match_value": "Finanace", "resource_type": "GROUP", "resource_id": str(ids["group"])})
+        assert created.json()["recheck"]["granted"] == 0  # the typo matches nobody
+        policy_id = created.json()["id"]
+        fixed = await client.patch(f"/api/v1/policies/birthright/{policy_id}", json={"match_value": "Finance"})
+        assert fixed.json()["recheck"] == {"users_checked": 2, "granted": 2, "revoked": 0}
+        assert await _statuses(db_override.factory, ids) == {"sam": ["ELIGIBLE"], "amy": ["ELIGIBLE"], "ian": []}
+        broken = await client.patch(f"/api/v1/policies/birthright/{policy_id}", json={"match_value": "Legal"})
+        assert broken.json()["recheck"] == {"users_checked": 2, "granted": 0, "revoked": 2}
+    assert await _statuses(db_override.factory, ids) == {"sam": ["REVOKED"], "amy": ["REVOKED"], "ian": []}
+
+
+@pytest.mark.asyncio
+async def test_disabling_a_policy_revokes_what_it_granted_and_manual_grants_are_untouched(db_override):
+    ids = await _seed_finance_people(db_override.factory)
+    async with db_override.factory() as session:
+        other = Group(provider_id=(await session.execute(select(IdentityProvider.id))).scalars().first(), external_id="g-manual-x", name="Manual", status="ACTIVE", is_privileged=False)
+        session.add(other)
+        await session.flush()
+        session.add(AccessAssignment(provider_id=other.provider_id, user_id=ids["sam"], resource_type="GROUP", resource_id=other.id, assignment_type="PERMANENT", status="ELIGIBLE", justification="Manual."))
+        await session.commit()
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/policies/birthright", json={"name": "Finance access", "match_field": "department", "match_value": "Finance", "resource_type": "GROUP", "resource_id": str(ids["group"])})
+        disabled = await client.patch(f"/api/v1/policies/birthright/{created.json()['id']}", json={"status": "DISABLED"})
+    assert disabled.json()["recheck"]["revoked"] == 2
+    assert await _statuses(db_override.factory, ids) == {"sam": ["ELIGIBLE", "REVOKED"], "amy": ["REVOKED"], "ian": []}  # Sam's manual grant survives
+
+
+@pytest.mark.asyncio
+async def test_department_policy_returns_soft_warnings_but_still_saves(db_override):
+    from app.models import Department
+    group_id = await _seed_group(db_override.factory)
+    async with db_override.factory() as session:
+        provider = (await session.scalars(select(IdentityProvider))).first()
+        session.add(Department(name="Finance"))
+        session.add(User(provider_id=provider.id, external_id="fin-1", email="f@x.com", display_name="Fin User", department="finance", status="ACTIVE"))
+        await session.commit()
+    authenticate_as("AccessPilot.Admin")
+    def payload(name, dept):
+        return {"name": name, "match_field": "department", "match_value": dept, "resource_type": "GROUP", "resource_id": group_id}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        good = await client.post("/api/v1/policies/birthright", json=payload("Good", "Finance"))      # in list, one holder (case-insensitive)
+        typo = await client.post("/api/v1/policies/birthright", json=payload("Typo", "Finanace"))     # not in list, nobody has it
+        edited = await client.patch(f"/api/v1/policies/birthright/{typo.json()['id']}", json={"match_value": "Financ"})
+        fixed = await client.patch(f"/api/v1/policies/birthright/{typo.json()['id']}", json={"match_value": "Finance"})
+    assert good.status_code == 201 and good.json()["warnings"] == []
+    assert typo.status_code == 201 and len(typo.json()["warnings"]) == 2 and "Departments list" in typo.json()["warnings"][0] and "matches nobody" in typo.json()["warnings"][1]
+    assert edited.status_code == 200 and len(edited.json()["warnings"]) == 2
+    assert fixed.json()["warnings"] == []

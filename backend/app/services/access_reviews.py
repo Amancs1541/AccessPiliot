@@ -115,7 +115,7 @@ async def _resolve_inactive_user_ids(session: AsyncSession, candidate_user_ids: 
             activity = await connector.get_user_sign_in_activity(user.external_id)
         except GraphError as exc:
             if index == 0:
-                raise AccessPilotError("INACTIVE_USER_CHECK_UNAVAILABLE", "This tenant hasn't granted Microsoft Graph AuditLog.Read.All, so last-sign-in data can't be read. Grant that permission in Entra to use the Inactive Users scope.", 424) from exc
+                raise AccessPilotError("INACTIVE_USER_CHECK_UNAVAILABLE", "Last-sign-in data can't be read from Microsoft Entra. Two things are required: the Graph permission AuditLog.Read.All, AND a tenant with Microsoft Entra ID P1/P2 licensing (Microsoft rejects signInActivity on unlicensed tenants even when the permission is granted).", 424) from exc
             logger.warning("Sign-in activity lookup failed for %s during inactive-user scope resolution: %s", user.external_id, exc)
             continue
         last_raw = (activity or {}).get("last_sign_in_at") or (activity or {}).get("last_non_interactive_sign_in_at")
@@ -146,6 +146,18 @@ async def _matching_assignments(session: AsyncSession, data: AccessReviewCampaig
                     seen_ids.add(assignment.id)
                     combined.append(assignment)
         return combined
+
+    if data.scope_type == "MOVER":
+        # A person's access that NO automation granted — neither a birthright policy nor a group-role mapping. What
+        # a policy granted is already re-decided by the mover reconcile; everything else (manual grants, packages
+        # assigned by hand, requested access) is exactly what a mover review has to re-certify.
+        # The person's linked Privileged (PU) / Test (TU) shadow accounts move with them: their access is always a
+        # deliberate manual grant, so it is flagged into the same review (never disabled or revoked here).
+        linked_ids = (await session.scalars(select(User.id).where(User.linked_user_id == data.scope_user_id, User.account_type.in_(("PU", "TU"))))).all()
+        return list((await session.scalars(select(AccessAssignment).where(
+            AccessAssignment.user_id.in_([data.scope_user_id, *linked_ids]), AccessAssignment.status.in_(NON_FINAL_ASSIGNMENT_STATUSES),
+            AccessAssignment.birthright_policy_id.is_(None), AccessAssignment.group_role_mapping_id.is_(None),
+        ))).all())
 
     if data.scope_type == "INACTIVE_USERS":
         # Every non-final assignment first, then narrow to holders who haven't signed in within the threshold —
@@ -185,7 +197,7 @@ async def create_campaign(session: AsyncSession, data: AccessReviewCampaignCreat
         raise AccessPilotError("USER_NOT_FOUND", "The selected reviewer was not found.", 404)
     if data.fallback_reviewer_id is not None and await session.get(User, data.fallback_reviewer_id) is None:
         raise AccessPilotError("USER_NOT_FOUND", "The selected fallback reviewer was not found.", 404)
-    if data.scope_type == "USER" and await session.get(User, data.scope_user_id) is None:
+    if data.scope_type in ("USER", "MOVER") and await session.get(User, data.scope_user_id) is None:
         raise AccessPilotError("USER_NOT_FOUND", "The user this campaign is scoped to was not found.", 404)
     if data.scope_type == "SPECIFIC_RESOURCE":
         await _validate_target_exists(session, data.scope_resource_type, data.scope_resource_id)
@@ -201,7 +213,7 @@ async def create_campaign(session: AsyncSession, data: AccessReviewCampaignCreat
         scope_resource_type=data.scope_resource_type, scope_resource_id=data.scope_resource_id, scope_targets=scope_targets_json,
         scope_user_id=data.scope_user_id, scope_account_type=data.scope_account_type, scope_inactive_days=data.scope_inactive_days,
         reviewer_id=data.reviewer_id, fallback_reviewer_id=data.fallback_reviewer_id, fallback_unlock_hours=data.fallback_unlock_hours,
-        status="ACTIVE", due_at=data.due_at, frequency_days=data.frequency_days, created_by=created_by,
+        status="ACTIVE", due_at=data.due_at, on_no_response=data.on_no_response, frequency_days=data.frequency_days, created_by=created_by,
     )
     if data.schedule_day_of_month is not None:
         now = datetime.now(timezone.utc)
@@ -393,7 +405,7 @@ async def _maybe_spawn_recurrence(session: AsyncSession, campaign: AccessReviewC
         scope_resource_type=campaign.scope_resource_type, scope_resource_id=campaign.scope_resource_id, scope_targets=scope_targets,
         scope_user_id=campaign.scope_user_id, scope_account_type=campaign.scope_account_type, scope_inactive_days=campaign.scope_inactive_days,
         reviewer_id=campaign.reviewer_id, fallback_reviewer_id=campaign.fallback_reviewer_id, fallback_unlock_hours=campaign.fallback_unlock_hours,
-        due_at=datetime.now(timezone.utc) + timedelta(days=campaign.frequency_days), frequency_days=campaign.frequency_days,
+        due_at=datetime.now(timezone.utc) + timedelta(days=campaign.frequency_days), frequency_days=campaign.frequency_days, on_no_response=campaign.on_no_response,
     )
     try:
         next_campaign = await create_campaign(session, next_data, "system:access-review-recurrence", f"{request_id}-recurrence")
@@ -463,6 +475,10 @@ async def complete_campaign(session: AsyncSession, campaign_id: UUID, actor_subj
         raise AccessPilotError("REQUEST_ALREADY_PROCESSED", "This campaign is already closed.", 409)
     pending_items = list((await session.scalars(select(AccessReviewItem).where(AccessReviewItem.campaign_id == campaign_id, AccessReviewItem.decision == "PENDING"))).all())
     for item in pending_items:
+        if campaign.on_no_response == "KEEP":
+            item.decision = "APPROVED"  # the campaign was set up to keep access nobody objected to
+            item.decided_at = datetime.now(timezone.utc)
+            continue
         try:
             await revoke_assignment(session, item.assignment_id, actor_subject, "Access review campaign closed with no decision — auto-revoked.", request_id, reason="ACCESS_REVIEW_AUTO_REVOKED")
         except AccessPilotError:
@@ -604,7 +620,7 @@ async def sweep_scheduled_campaigns(session: AsyncSession) -> int:
             scope_resource_type=holder.scope_resource_type, scope_resource_id=holder.scope_resource_id, scope_targets=scope_targets,
             scope_user_id=holder.scope_user_id, scope_account_type=holder.scope_account_type, scope_inactive_days=holder.scope_inactive_days,
             reviewer_id=holder.reviewer_id, fallback_reviewer_id=holder.fallback_reviewer_id, fallback_unlock_hours=holder.fallback_unlock_hours,
-            due_at=now + timedelta(days=due_days),
+            due_at=now + timedelta(days=due_days), on_no_response=holder.on_no_response,
             schedule_day_of_month=holder.schedule_day_of_month, schedule_time=holder.schedule_time, schedule_every_months=holder.schedule_every_months or 1, schedule_due_days=due_days,
         )
         try:

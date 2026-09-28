@@ -36,7 +36,7 @@ async def _hydrate_campaign(db: AsyncSession, campaign) -> AccessReviewCampaignR
         reviewer_id=campaign.reviewer_id, reviewer_display_name=reviewer.display_name if reviewer else None,
         fallback_reviewer_id=campaign.fallback_reviewer_id, fallback_reviewer_display_name=fallback.display_name if fallback else None,
         fallback_unlock_hours=campaign.fallback_unlock_hours, status=campaign.status, due_at=campaign.due_at,
-        frequency_days=campaign.frequency_days, schedule_day_of_month=campaign.schedule_day_of_month, schedule_time=campaign.schedule_time, schedule_every_months=campaign.schedule_every_months, schedule_due_days=campaign.schedule_due_days, next_run_at=campaign.next_run_at, parent_campaign_id=campaign.parent_campaign_id,
+        frequency_days=campaign.frequency_days, on_no_response=campaign.on_no_response, schedule_day_of_month=campaign.schedule_day_of_month, schedule_time=campaign.schedule_time, schedule_every_months=campaign.schedule_every_months, schedule_due_days=campaign.schedule_due_days, next_run_at=campaign.next_run_at, parent_campaign_id=campaign.parent_campaign_id,
         created_by=campaign.created_by, created_at=campaign.created_at, completed_at=campaign.completed_at,
         item_count=total, decided_count=decided, approved_count=outcomes["approved"], revoked_count=outcomes["revoked"], auto_revoked_count=outcomes["auto_revoked"],
     )

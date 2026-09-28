@@ -719,3 +719,22 @@ async def test_outcomes_separate_approved_revoked_and_auto_revoked(db_override):
         dashboard = (await client.get("/api/v1/access-reviews/dashboard")).json()
     assert (campaign["approved_count"], campaign["revoked_count"], campaign["auto_revoked_count"]) == (1, 0, 1)
     assert (dashboard["approved_items"], dashboard["revoked_items"], dashboard["auto_revoked_items"], dashboard["pending_items"]) == (1, 0, 1, 0)
+
+
+@pytest.mark.asyncio
+async def test_keep_on_no_response_auto_approves_instead_of_revoking(db_override):
+    seeded = await _seed(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/access-reviews", json={
+            "name": "Keep On Silence", "scope_type": "SPECIFIC_RESOURCE", "scope_resource_type": "GROUP", "scope_resource_id": str(seeded["group_id"]),
+            "reviewer_id": str(seeded["reviewer_id"]), "due_at": future(24), "on_no_response": "KEEP",
+        })
+        completed = await client.post(f"/api/v1/access-reviews/{created.json()['id']}/complete")
+        bad = await client.post("/api/v1/access-reviews", json={"name": "Bad", "scope_type": "ALL", "reviewer_id": str(seeded["reviewer_id"]), "due_at": future(24), "on_no_response": "DELETE"})
+    assert created.json()["on_no_response"] == "KEEP" and completed.status_code == 200
+    async with db_override.factory() as session:
+        assignment = await session.get(AccessAssignment, seeded["assignment_id"])
+        item = (await session.execute(select(AccessReviewItem).where(AccessReviewItem.campaign_id == UUID(created.json()["id"])))).scalars().one()
+    assert assignment.status != "REVOKED" and item.decision == "APPROVED"
+    assert bad.status_code == 422

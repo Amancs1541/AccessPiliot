@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID, uuid4
 
 from typing import Optional
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, Uuid, func
+from sqlalchemy import JSON, Date, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -33,6 +33,8 @@ class IdentityProvider(Base):
     sync_interval_minutes: Mapped[Optional[int]] = mapped_column(Integer)
     max_self_activation_hours: Mapped[int] = mapped_column(Integer, nullable=False, server_default="8")
     provisioning_domain: Mapped[Optional[str]] = mapped_column(String(255)); username_convention: Mapped[Optional[str]] = mapped_column(String(100))
+    # Joiner process: is this IdP a default target when a new joiner's accounts are created? (per-IdP switch, default on)
+    provision_joiners: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
     created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at()
 
     @property
@@ -61,6 +63,20 @@ class User(Base):
     # column from linked_user_id on purpose — different relationship, different lifecycle.
     employee_category: Mapped[Optional[str]] = mapped_column(String(20))
     manager_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
+    # Joiner/leaver lifecycle dates and the kind of worker — used by the joiner form and by leaver policies (scoped by
+    # department / employment_type). Local to AccessPilot: nothing here is pushed to the directory.
+    start_date: Mapped[Optional[date]] = mapped_column(Date)
+    leaver_date: Mapped[Optional[date]] = mapped_column(Date)
+    employment_type: Mapped[Optional[str]] = mapped_column(String(20))
+    # Set once the leaver process has run for this person (scheduled, CSV, sync or manual); cleared when the leaver
+    # date is changed. leaver_reminders_sent lists the 'N days before' reminders already sent for the current date.
+    leaver_processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    leaver_reminders_sent: Mapped[Optional[list]] = mapped_column("leaver_reminders_sent", JSON)
+    # Set by the leaver process from the person's leaver policy (delete_after_days); when the moment passes the worker
+    # deletes their account in every IdP and stamps accounts_deleted_at (status becomes DELETED). The row itself stays
+    # so history and audit remain intact.
+    accounts_delete_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    accounts_deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at(); last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     __table_args__ = (UniqueConstraint("provider_id", "external_id", name="uq_users_provider_external"), Index("ix_users_provider_external", "provider_id", "external_id"), UniqueConstraint("employee_id", name="uq_users_employee_id"))
 
@@ -193,6 +209,146 @@ class ProviderResource(Base):
 class AccessPackage(Base):
     __tablename__ = "access_packages"
     id: Mapped[UUID] = uuid_pk(); name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True); description: Mapped[Optional[str]] = mapped_column(Text); status: Mapped[str] = mapped_column(String(50), nullable=False); default_approver_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); default_fallback_approver_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); fallback_unlock_hours: Mapped[Optional[int]] = mapped_column(Integer); created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at()
+
+
+class LifecycleEvent(Base):
+    """One detected Joiner/Mover/Leaver change for a person, recorded by app.services.lifecycle no matter which
+    source noticed it (directory sync, an in-app attribute edit, or a CSV import) — the single record the Movers
+    report and notifications are built from. `changes` is {field: {"from": ..., "to": ...}}; review_note says why
+    no review campaign was started when review_campaign_id is NULL."""
+    __tablename__ = "lifecycle_events"
+    id: Mapped[UUID] = uuid_pk(); user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(20), nullable=False); source: Mapped[str] = mapped_column(String(20), nullable=False)
+    changes: Mapped[Optional[dict]] = mapped_column("changes", JSON)
+    revoked_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0"); granted_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    review_campaign_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("access_review_campaigns.id")); review_note: Mapped[Optional[str]] = mapped_column(String(50))
+    notified_user_ids: Mapped[Optional[list]] = mapped_column("notified_user_ids", JSON)
+    # How many items in the started review belong to the mover's linked Privileged (PU) / Test (TU) accounts.
+    privileged_flagged_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    created_at: Mapped[datetime] = created_at()
+    __table_args__ = (Index("ix_lifecycle_events_user", "user_id"), Index("ix_lifecycle_events_type_created", "event_type", "created_at"))
+
+
+class PendingMove(Base):
+    """A department/job-title change that takes effect at a FUTURE moment (effective dating). Nothing about the
+    person changes until effective_at: a worker then applies the whole change together — the attribute update
+    (pushed to the directory provider like an in-app edit), the birthright reconcile, and the leftover-access
+    review. status: SCHEDULED -> APPLIED | CANCELLED | FAILED."""
+    __tablename__ = "pending_moves"
+    id: Mapped[UUID] = uuid_pk(); user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    new_department: Mapped[Optional[str]] = mapped_column(String(255)); new_job_title: Mapped[Optional[str]] = mapped_column(String(255))
+    effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="SCHEDULED", server_default="SCHEDULED")
+    created_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); import_id: Mapped[Optional[UUID]] = mapped_column(Uuid)
+    applied_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); failure_reason: Mapped[Optional[str]] = mapped_column(String(500))
+    lifecycle_event_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("lifecycle_events.id"))
+    created_at: Mapped[datetime] = created_at()
+    __table_args__ = (Index("ix_pending_moves_status_effective", "status", "effective_at"), Index("ix_pending_moves_user", "user_id"))
+
+
+class LifecycleSettings(Base):
+    """Singleton (get-or-create, like SecuritySettings). lifecycle_owner_ids: users who act as reviewer/fallback
+    (and, later, get notified) when a mover has no manager tagged in the Org Chart."""
+    __tablename__ = "lifecycle_settings"
+    id: Mapped[UUID] = uuid_pk()
+    mover_review_enabled: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
+    review_due_days: Mapped[int] = mapped_column(Integer, nullable=False, default=14, server_default="14")
+    # Leaver gap: when directory sync sees a person flip ACTIVE -> DISABLED in Entra/Okta, revoke ALL their access
+    # (and disable their linked PU/TU accounts), exactly like the CSV leaver path. Off = only record the event.
+    revoke_on_directory_disable: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
+    lifecycle_owner_ids: Mapped[Optional[list]] = mapped_column("lifecycle_owner_ids", JSON)
+    updated_at: Mapped[datetime] = updated_at()
+
+
+class JoinerRequest(Base):
+    """A joiner submitted through the New joiner form: the person's details, when they start, and — per connected
+    IdP — the account that was created (disabled) for them. `targets` is a list of {provider_id, provider_name,
+    username, external_id, account_id, status (CREATED / ENABLED / FAILED), error}; temporary passwords are NEVER
+    stored, they are shown once when the accounts are created. status: SCHEDULED (accounts exist, disabled, waiting
+    for start_at) -> ACTIVE (all enabled) | PARTIAL (some accounts could not be created/enabled) | CANCELLED."""
+    __tablename__ = "joiner_requests"
+    id: Mapped[UUID] = uuid_pk(); user_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
+    first_name: Mapped[str] = mapped_column(String(120), nullable=False); last_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    work_email: Mapped[str] = mapped_column(String(320), nullable=False); employee_id: Mapped[Optional[str]] = mapped_column(String(100))
+    department: Mapped[Optional[str]] = mapped_column(String(200)); job_title: Mapped[Optional[str]] = mapped_column(String(200))
+    manager_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); employee_category: Mapped[Optional[str]] = mapped_column(String(20)); employment_type: Mapped[Optional[str]] = mapped_column(String(20))
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False); leaver_date: Mapped[Optional[date]] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="SCHEDULED", server_default="SCHEDULED")
+    targets: Mapped[Optional[list]] = mapped_column("targets", JSON)
+    created_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); created_at: Mapped[datetime] = created_at(); activated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (Index("ix_joiner_requests_status_start", "status", "start_at"),)
+
+
+class LeaverPolicy(Base):
+    """What happens when someone leaves, and when. The first ACTIVE policy (lowest priority number) whose scope matches
+    the person wins; the seeded Default (is_default, scope ALL, priority 1000) covers everyone else. effective_time is
+    the time of day on the leaver date, in the app timezone, at which the leaver process runs; notify_days_before are
+    reminders to the manager / lifecycle owners. The switches choose which leaver actions run (app.services.lifecycle.run_leaver)."""
+    __tablename__ = "leaver_policies"
+    id: Mapped[UUID] = uuid_pk(); name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100, server_default="100")
+    scope_type: Mapped[str] = mapped_column(String(20), nullable=False, default="ALL", server_default="ALL"); scope_value: Mapped[Optional[str]] = mapped_column(String(200))
+    effective_time: Mapped[str] = mapped_column(String(5), nullable=False, default="23:59", server_default="23:59")
+    notify_days_before: Mapped[Optional[list]] = mapped_column("notify_days_before", JSON)
+    revoke_access: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
+    disable_accounts: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
+    disable_privileged_accounts: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
+    remove_group_memberships: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="false")
+    # NULL = never delete. Otherwise the person's accounts are deleted from every IdP this many days after the leaver
+    # process ran (irreversible in the directory; Entra keeps a deleted user recoverable for 30 days).
+    delete_after_days: Mapped[Optional[int]] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVE", server_default="ACTIVE")
+    is_default: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="false")
+    created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at()
+
+
+class ReenableRequest(Base):
+    """After the leaver process has run, enabling the person's accounts again needs a written reason and an approval
+    from their manager (lifecycle owners when there is no manager). status: PENDING -> APPROVED | REJECTED | CANCELLED.
+    approver_ids records who could decide at request time."""
+    __tablename__ = "reenable_requests"
+    id: Mapped[UUID] = uuid_pk(); user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    requested_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); reason: Mapped[str] = mapped_column(String(1000), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING", server_default="PENDING")
+    approver_ids: Mapped[Optional[list]] = mapped_column("approver_ids", JSON)
+    # NULL = every disabled account (an "Enable in all IdPs" click); a list of IdentityAccount ids = only those
+    # (a single-account "Enable" click) — approval enables exactly the accounts this request named, nothing more.
+    account_ids: Mapped[Optional[list]] = mapped_column("account_ids", JSON)
+    decided_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); decision_note: Mapped[Optional[str]] = mapped_column(String(1000))
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); created_at: Mapped[datetime] = created_at()
+    __table_args__ = (Index("ix_reenable_requests_user_status", "user_id", "status"),)
+
+
+class LeaverRequest(Base):
+    """A MANUAL 'Start leaver process now'. The initiator gives a justification, the person's accounts are disabled
+    immediately (disabled_accounts remembers which ones were active so a denial can restore exactly those), then the
+    manager (lifecycle owners when none) approves or denies. Approved -> the leaver process runs; denied -> accounts
+    are enabled again and the initiator is notified. status: PENDING -> APPROVED | DENIED."""
+    __tablename__ = "leaver_requests"
+    id: Mapped[UUID] = uuid_pk(); user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    requested_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); justification: Mapped[str] = mapped_column(String(1000), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING", server_default="PENDING")
+    approver_ids: Mapped[Optional[list]] = mapped_column("approver_ids", JSON); disabled_accounts: Mapped[Optional[list]] = mapped_column("disabled_accounts", JSON)
+    decided_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); decision_note: Mapped[Optional[str]] = mapped_column(String(1000))
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); outcome: Mapped[Optional[str]] = mapped_column(String(500))
+    created_at: Mapped[datetime] = created_at()
+    __table_args__ = (Index("ix_leaver_requests_user_status", "user_id", "status"),)
+
+
+class IdentityAccount(Base):
+    """One directory account belonging to a person. A person (a `User` row) may hold an account in several connected
+    IdPs; the person's own row keeps its (provider_id, external_id) and is mirrored here as the PRIMARY account
+    (lazily, by app.services.accounts), extra IdP accounts only ever appear through this table. status is what
+    AccessPilot last set/observed (ACTIVE / DISABLED); provisioned_by says how it came to exist (SYNC / JOINER / MANUAL)."""
+    __tablename__ = "identity_accounts"
+    id: Mapped[UUID] = uuid_pk(); user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    provider_id: Mapped[UUID] = mapped_column(ForeignKey("identity_providers.id"), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False); username: Mapped[Optional[str]] = mapped_column(String(320))
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVE", server_default="ACTIVE")
+    provisioned_by: Mapped[str] = mapped_column(String(20), nullable=False, default="SYNC", server_default="SYNC")
+    created_at: Mapped[datetime] = created_at()
+    __table_args__ = (UniqueConstraint("provider_id", "external_id", name="uq_identity_accounts_provider_external"), Index("ix_identity_accounts_user", "user_id"))
 
 
 class GroupOwner(Base):
@@ -374,7 +530,7 @@ class OnboardingImport(Base):
     id: Mapped[UUID] = uuid_pk(); provider_id: Mapped[UUID] = mapped_column(ForeignKey("identity_providers.id"), nullable=False); filename: Mapped[str] = mapped_column(String(255), nullable=False); status: Mapped[str] = mapped_column(String(50), nullable=False)
     total_records: Mapped[int] = mapped_column(Integer, nullable=False, default=0); created_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0); updated_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0); disabled_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0); no_change_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0); failed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     access_revoked_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0"); access_revoke_failed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
-    real_accounts_provisioned_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0"); birthright_assignments_created_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    real_accounts_provisioned_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0"); birthright_assignments_created_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0"); birthright_assignments_revoked_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0"); moves_scheduled_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     uploaded_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); error_summary: Mapped[Optional[dict]] = mapped_column("error_summary", JSON)
     created_at: Mapped[datetime] = created_at(); completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     __table_args__ = (Index("ix_onboarding_imports_provider", "provider_id"),)
@@ -629,6 +785,8 @@ class AccessReviewCampaign(Base):
     # automatically spawned, due frequency_days from then, linked back via parent_campaign_id (see
     # app.services.access_reviews._maybe_spawn_recurrence). Deliberately NOT retroactive to already-created items.
     frequency_days: Mapped[Optional[int]] = mapped_column(Integer)
+    # What happens to items still PENDING at the due date: REVOKE (auto-revoke, the original behaviour) or KEEP (auto-approve).
+    on_no_response: Mapped[str] = mapped_column(String(10), nullable=False, default="REVOKE", server_default="REVOKE")
     # Fixed-calendar recurrence (alternative to frequency_days, never both): a NEW campaign STARTS on
     # schedule_day_of_month (1-31, clamped to short months) at schedule_time ("HH:MM", in the app's configured
     # timezone) every schedule_every_months months, staying open for schedule_due_days. next_run_at (UTC) is

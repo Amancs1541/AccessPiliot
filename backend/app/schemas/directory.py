@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Optional
 from uuid import UUID
 
@@ -25,6 +25,9 @@ class UserResponse(BaseModel):
     linked_user_id: Optional[UUID] = None
     employee_category: Optional[str] = None
     manager_id: Optional[UUID] = None
+    start_date: Optional[date] = None
+    leaver_date: Optional[date] = None
+    employment_type: Optional[str] = None
     last_synced_at: Optional[datetime]
 
 

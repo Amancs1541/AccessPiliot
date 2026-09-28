@@ -42,6 +42,7 @@ async def update_user_hierarchy(session: AsyncSession, user_id: UUID, data, acto
     if user is None:
         raise AccessPilotError("USER_NOT_FOUND", "The user was not found.", 404)
 
+    previous_manager_id = user.manager_id
     changes: dict[str, object] = {}
     if data.clear_employee_category:
         user.employee_category = None
@@ -67,5 +68,16 @@ async def update_user_hierarchy(session: AsyncSession, user_id: UUID, data, acto
     if changes:
         await record_audit(session, action="USER_HIERARCHY_UPDATED", target_type="USER", target_id=user.id, actor_user_id=actor_id, request_id=request_id, metadata=changes)
     await session.commit()
+    if user.manager_id != previous_manager_id:
+        # Tell the person and both managers — a manager change shifts who reviews their access.
+        from app.services.notifications import create_notification
+        recipients = {user.id: "Your manager was changed." if user.manager_id else "Your manager was removed."}
+        if user.manager_id:
+            recipients[user.manager_id] = f"{user.display_name} now reports to you."
+        if previous_manager_id:
+            recipients[previous_manager_id] = f"{user.display_name} no longer reports to you."
+        for recipient_id, message in recipients.items():
+            await create_notification(session, recipient_id, "MANAGER_CHANGED", message, "/my-access")
+        await session.commit()
     await session.refresh(user)
     return user

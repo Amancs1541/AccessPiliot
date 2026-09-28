@@ -351,3 +351,114 @@ async def test_an_identity_graduates_in_place_when_a_real_provider_becomes_avail
         surviving_assignment = await session.get(AccessAssignment, assignment_id)
         assert surviving_assignment is not None
         assert surviving_assignment.user_id == original_id
+
+
+@pytest.mark.asyncio
+async def test_a_csv_mover_loses_old_birthright_access_gains_new_and_keeps_manual_grants(db_override):
+    """A CSV update that changes department/job title must run the SAME reconcile a directory sync would: revoke
+    what the old attributes' birthright policy granted, grant what the new one qualifies for, and never touch a
+    manually granted assignment."""
+    async with db_override.factory() as session:
+        provider = IdentityProvider(name="Directory", type="MOCK", status="CONNECTED", tenant_id="t")
+        session.add(provider)
+        await session.flush()
+        finance = Group(provider_id=provider.id, external_id="g-fin", name="Finance Group", status="ACTIVE", is_privileged=False)
+        marketing = Group(provider_id=provider.id, external_id="g-mkt", name="Marketing Group", status="ACTIVE", is_privileged=False)
+        manual = Group(provider_id=provider.id, external_id="g-man", name="Manual Group", status="ACTIVE", is_privileged=False)
+        session.add_all([finance, marketing, manual])
+        await session.commit()
+        ids = {"finance": finance.id, "marketing": marketing.id, "manual": manual.id}
+
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        for name, dept, gid in (("Finance -> Finance Group", "Finance", ids["finance"]), ("Marketing -> Marketing Group", "Marketing", ids["marketing"])):
+            created = await client.post("/api/v1/policies/birthright", json={"name": name, "match_field": "department", "match_value": dept, "resource_type": "GROUP", "resource_id": str(gid)})
+            assert created.status_code == 201
+
+        joiner_csv = "employeeId,firstName,lastName,email,department,jobTitle,status\nEMP3001,Mia,Mover,mia.mover@company.com,Finance,Analyst,ACTIVE\n"
+        joined = await client.post("/api/v1/onboarding/csv", json={"filename": "joiner.csv", "content": joiner_csv})
+        joined_commit = await client.post(f"/api/v1/onboarding/imports/{joined.json()['id']}/commit")
+        assert joined_commit.json()["birthright_assignments_created_count"] == 1
+        assert joined_commit.json()["birthright_assignments_revoked_count"] == 0
+
+        async with db_override.factory() as session:
+            user = (await session.execute(select(User).where(User.employee_id == "EMP3001"))).scalar_one()
+        grant = await client.post("/api/v1/assignments", json={"user_id": str(user.id), "resource_type": "GROUP", "resource_id": str(ids["manual"]), "assignment_type": "PERMANENT", "justification": "Needed for a project."})
+        assert grant.status_code in (200, 201)
+
+        mover_csv = "employeeId,firstName,lastName,email,department,jobTitle,status\nEMP3001,Mia,Mover,mia.mover@company.com,Marketing,Analyst,ACTIVE\n"
+        moved = await client.post("/api/v1/onboarding/csv", json={"filename": "mover.csv", "content": mover_csv})
+        moved_commit = await client.post(f"/api/v1/onboarding/imports/{moved.json()['id']}/commit")
+
+    assert moved_commit.json()["birthright_assignments_revoked_count"] == 1
+    assert moved_commit.json()["birthright_assignments_created_count"] == 1
+    async with db_override.factory() as session:
+        rows = (await session.execute(select(AccessAssignment).where(AccessAssignment.user_id == user.id))).scalars().all()
+    by_group = {r.resource_id: r for r in rows}
+    assert by_group[ids["finance"]].status == "REVOKED"        # old department's birthright access removed
+    assert by_group[ids["marketing"]].status == "ELIGIBLE"     # new department's birthright access granted
+    assert by_group[ids["manual"]].status in ("ELIGIBLE", "ACTIVE")  # manual grant untouched
+    from app.models import LifecycleEvent
+    async with db_override.factory() as session:
+        events = (await session.execute(select(LifecycleEvent).where(LifecycleEvent.event_type == "MOVER"))).scalars().all()
+    assert len(events) == 1 and events[0].source == "CSV" and events[0].revoked_count == 1 and events[0].granted_count == 1
+    assert events[0].review_note == "NO_REVIEWER"  # no manager and no lifecycle owners configured yet
+
+
+@pytest.mark.asyncio
+async def test_a_csv_row_with_unchanged_attributes_does_not_run_the_mover_reconcile(db_override):
+    async with db_override.factory() as session:
+        provider = IdentityProvider(name="Directory", type="MOCK", status="CONNECTED", tenant_id="t")
+        session.add(provider)
+        await session.flush()
+        finance = Group(provider_id=provider.id, external_id="g-fin2", name="Finance Group 2", status="ACTIVE", is_privileged=False)
+        session.add(finance)
+        await session.commit()
+        finance_id = finance.id
+    authenticate_as("AccessPilot.Admin")
+    csv = "employeeId,firstName,lastName,email,department,jobTitle,status\nEMP3002,Sam,Same,sam.same@company.com,Finance,Analyst,ACTIVE\n"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/policies/birthright", json={"name": "Finance only", "match_field": "department", "match_value": "Finance", "resource_type": "GROUP", "resource_id": str(finance_id)})
+        first = await client.post("/api/v1/onboarding/csv", json={"filename": "a.csv", "content": csv})
+        await client.post(f"/api/v1/onboarding/imports/{first.json()['id']}/commit")
+        second = await client.post("/api/v1/onboarding/csv", json={"filename": "b.csv", "content": csv})
+        again = await client.post(f"/api/v1/onboarding/imports/{second.json()['id']}/commit")
+    assert again.json()["birthright_assignments_revoked_count"] == 0
+    assert again.json()["birthright_assignments_created_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_csv_effective_date_schedules_a_future_move_and_leaves_the_person_untouched(db_override):
+    from datetime import date, timedelta
+    from app.models import PendingMove
+
+    authenticate_as("AccessPilot.Admin")
+    future_day = (date.today() + timedelta(days=10)).isoformat()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        joined = await client.post("/api/v1/onboarding/csv", json={"filename": "j.csv", "content": "employeeId,firstName,lastName,email,department,jobTitle,status\nEMP4001,Fay,Future,fay.future@company.com,Finance,Analyst,ACTIVE\n"})
+        await client.post(f"/api/v1/onboarding/imports/{joined.json()['id']}/commit")
+        bad = await client.post("/api/v1/onboarding/csv", json={"filename": "bad.csv", "content": "employeeId,firstName,lastName,email,department,jobTitle,status,effectiveDate\nEMP4001,Fay,Future,fay.future@company.com,Marketing,Analyst,ACTIVE,10/05/2030\n"})
+        moved = await client.post("/api/v1/onboarding/csv", json={"filename": "m.csv", "content": f"employeeId,firstName,lastName,email,department,jobTitle,status,effectiveDate\nEMP4001,Fay,Future,fay.future@company.com,Marketing,Analyst,ACTIVE,{future_day}\n"})
+        committed = await client.post(f"/api/v1/onboarding/imports/{moved.json()['id']}/commit")
+    assert bad.json()["failed_count"] == 1
+    assert committed.json()["moves_scheduled_count"] == 1
+    async with db_override.factory() as session:
+        user = (await session.execute(select(User).where(User.employee_id == "EMP4001"))).scalar_one()
+        moves = (await session.execute(select(PendingMove))).scalars().all()
+    assert user.department == "Finance"  # unchanged until the effective date
+    assert len(moves) == 1 and moves[0].new_department == "Marketing" and moves[0].source == "CSV" and moves[0].status == "SCHEDULED"
+
+
+@pytest.mark.asyncio
+async def test_csv_joiners_and_leavers_are_recorded_in_the_lifecycle_history(db_override):
+    from app.models import LifecycleEvent
+
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        joined = await client.post("/api/v1/onboarding/csv", json={"filename": "j.csv", "content": "employeeId,firstName,lastName,email,department,jobTitle,status\nEMP5001,Lee,Leaver,lee.leaver@company.com,Finance,Analyst,ACTIVE\n"})
+        await client.post(f"/api/v1/onboarding/imports/{joined.json()['id']}/commit")
+        left = await client.post("/api/v1/onboarding/csv", json={"filename": "l.csv", "content": "employeeId,firstName,lastName,email,department,jobTitle,status\nEMP5001,Lee,Leaver,lee.leaver@company.com,Finance,Analyst,TERMINATED\n"})
+        await client.post(f"/api/v1/onboarding/imports/{left.json()['id']}/commit")
+    async with db_override.factory() as session:
+        events = (await session.execute(select(LifecycleEvent).order_by(LifecycleEvent.created_at))).scalars().all()
+    assert [(e.event_type, e.source) for e in events] == [("JOINER", "CSV"), ("LEAVER", "CSV")]

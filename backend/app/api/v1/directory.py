@@ -92,6 +92,7 @@ async def update_user_attributes(user_id: UUID, data: UserAttributeUpdate, reque
     except GraphError as exc:
         raise AccessPilotError(exc.code, exc.message, exc.status_code) from exc
     attributes_changed = user.department != updated.department or user.job_title != updated.job_title
+    previous_attributes = {"department": user.department, "job_title": user.job_title}
     user.department, user.job_title = updated.department, updated.job_title
     await record_audit(db, action="USER_ATTRIBUTES_UPDATED", target_type="USER", target_id=user.id, provider_id=provider.id, request_id=request.state.request_id, metadata={"department": updated.department, "job_title": updated.job_title})
     await db.commit()
@@ -99,7 +100,9 @@ async def update_user_attributes(user_id: UUID, data: UserAttributeUpdate, reque
     if attributes_changed:
         # Reconciliation records the admin who made this edit as the actor (not "system") — a human deliberately
         # changed this, unlike a directory-sync-triggered reconciliation.
-        await reconcile_birthright_policies_for_user(db, user.id, actor.directory_object_id, request.state.request_id)
+        outcome = await reconcile_birthright_policies_for_user(db, user.id, actor.directory_object_id, request.state.request_id)
+        from app.services.lifecycle import build_changes, record_mover
+        await record_mover(db, user.id, build_changes(previous_attributes, {"department": user.department, "job_title": user.job_title}), "ADMIN_EDIT", outcome, request.state.request_id)
     return user
 
 

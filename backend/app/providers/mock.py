@@ -35,6 +35,18 @@ class MockProvider(IdentityProvider):
                 self.users[index] = NormalizedUser(external_id=user.external_id, email=user.email, display_name=user.display_name, given_name=user.given_name, surname=user.surname, department=user.department, job_title=user.job_title, status="ACTIVE" if enabled else "DISABLED")
                 return True
         raise GraphError("PROVIDER_RESOURCE_NOT_FOUND", "No such mock user.", 502)
+
+    async def set_user_manager(self, external_id: str, manager_external_id: str) -> bool:
+        if not any(user.external_id == external_id for user in self.users):
+            raise GraphError("PROVIDER_RESOURCE_NOT_FOUND", "No such mock user.", 502)
+        return True
+
+    async def delete_user(self, external_id: str) -> bool:
+        before = len(self.users)
+        self.users = [user for user in self.users if user.external_id != external_id]
+        if len(self.users) == before:
+            raise GraphError("PROVIDER_RESOURCE_NOT_FOUND", "No such mock user.", 502)
+        return True
     async def get_groups(self, query: str | None = None) -> list[NormalizedGroup]: return self._filter(self.groups, query, lambda item: f"{item.name} {item.description or ''}")
     async def get_group(self, external_id: str) -> NormalizedGroup | None: return next((item for item in self.groups if item.external_id == external_id), None)
     async def get_group_members(self, external_id: str) -> list[NormalizedUser]: return [user for user in self.users if user.external_id in self.memberships.get(external_id, set())]
@@ -77,7 +89,7 @@ class MockProvider(IdentityProvider):
     async def create_user(self, request: NewUserRequest) -> CreatedUser:
         if any(user.email.lower() == request.user_principal_name.lower() for user in self.users):
             raise ProviderConflictError("A user with this email already exists.")
-        user = NormalizedUser(f"user-{len(self.users) + 1:03d}", request.user_principal_name, request.display_name, department=request.department, job_title=request.job_title)
+        user = NormalizedUser(f"user-{len(self.users) + 1:03d}", request.user_principal_name, request.display_name, given_name=request.given_name, surname=request.surname, department=request.department, job_title=request.job_title, status="ACTIVE" if request.enabled else "DISABLED")
         self.users.append(user)
         return CreatedUser(user=user, temporary_password="Mock-Only-Password-1!")
 

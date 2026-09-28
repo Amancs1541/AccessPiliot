@@ -27,6 +27,8 @@ class OnboardingImportResponse(BaseModel):
     access_revoke_failed_count: int
     real_accounts_provisioned_count: int
     birthright_assignments_created_count: int
+    birthright_assignments_revoked_count: int = 0
+    moves_scheduled_count: int = 0
     error_summary: Optional[dict[str, Any]]
     created_at: datetime
     completed_at: Optional[datetime]

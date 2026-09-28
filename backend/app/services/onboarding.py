@@ -13,7 +13,7 @@ from app.core.errors import AccessPilotError
 from app.models import AccessAssignment, IdentityProvider, OnboardingImport, OnboardingImportRecord, User
 from app.providers.base import NormalizedUser
 from app.services.assignments import _resolve_internal_user_id, revoke_assignment
-from app.services.birthright import evaluate_birthright_policies
+from app.services.birthright import evaluate_birthright_policies, reconcile_birthright_policies_for_user
 from app.services.provisioning import provision_real_account
 from app.services.audit import record_audit
 from app.services.directory_sync import upsert_user
@@ -42,6 +42,17 @@ async def _get_or_create_csv_provider(session: AsyncSession) -> IdentityProvider
 
 def _normalize_status(raw: str) -> str:
     return (raw or "").strip().upper()
+
+
+def _parse_effective_date(value: Optional[str]):
+    """Optional CSV effectiveDate (YYYY-MM-DD) -> a date, or None if blank/invalid."""
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
 
 
 def _valid_email(value: str) -> bool:
@@ -121,6 +132,10 @@ async def _plan_row(session: AsyncSession, row: dict, employee_id: str, seen_emp
     email = row["email"].strip()
     if not _valid_email(email):
         return "ERROR", f"Invalid email address: {email}"
+    if not _parse_effective_date(row.get("effectiveDate")) and (row.get("effectiveDate") or "").strip():
+        return "ERROR", f"Invalid effectiveDate '{row.get('effectiveDate')}' — use YYYY-MM-DD"
+    if not _parse_effective_date(row.get("leaverDate")) and (row.get("leaverDate") or "").strip():
+        return "ERROR", f"Invalid leaverDate '{row.get('leaverDate')}' — use YYYY-MM-DD"
     status = _normalize_status(row.get("status", ""))
     if status not in VALID_STATUSES:
         return "ERROR", f"Invalid status '{row.get('status')}' — must be ACTIVE or TERMINATED"
@@ -145,6 +160,7 @@ async def _plan_row(session: AsyncSession, row: dict, employee_id: str, seen_emp
         or existing.department != row["department"].strip()
         or (existing.job_title or None) != job_title
         or existing.status != "ACTIVE"
+        or (_parse_effective_date(row.get("leaverDate")) is not None and existing.leaver_date != _parse_effective_date(row.get("leaverDate")))
     )
     return ("UPDATE", None) if changed else ("NO_CHANGE", None)
 
@@ -233,7 +249,7 @@ async def commit_import(session: AsyncSession, import_id: UUID, actor_subject: s
 
     actor_id = await _resolve_internal_user_id(session, actor_subject)
     records = await get_import_preview(session, import_id)
-    access_revoked = access_revoke_failed = birthright_assignments_created = real_accounts_provisioned = 0
+    access_revoked = access_revoke_failed = birthright_assignments_created = birthright_assignments_revoked = real_accounts_provisioned = moves_scheduled = 0
     for record in records:
         if record.action == "ERROR":
             continue
@@ -249,10 +265,11 @@ async def commit_import(session: AsyncSession, import_id: UUID, actor_subject: s
             revoked, failed = await _revoke_all_access_for_leaver(session, existing.id, actor_subject, record.employee_id, onboarding_import, request_id)
             access_revoked += revoked
             access_revoke_failed += failed
-            # A leaver's Privileged (PU) / Test (TU) shadow accounts must never survive their departure
-            # unnoticed — same principle as revoking their own access above, extended to anything linked to them.
-            from app.services.privileged_accounts import disable_linked_accounts_for_leaver
-            await disable_linked_accounts_for_leaver(session, existing.id, actor_subject, request_id)
+            # The one leaver runner (app.services.lifecycle.run_leaver): per the person's leaver policy it disables
+            # their linked PU/TU accounts and — new — their REAL account in every connected IdP (a CSV termination
+            # used to flip only the local status). Access was already revoked just above.
+            from app.services.lifecycle import run_leaver
+            await run_leaver(session, existing.id, "CSV", actor_subject, request_id, skip_revoke=True, already_revoked=revoked)
             continue
 
         # CREATE / UPDATE / NO_CHANGE all resolve to the same one identity row, and are all worth re-evaluating —
@@ -268,12 +285,47 @@ async def commit_import(session: AsyncSession, import_id: UUID, actor_subject: s
             job_title=(row.get("jobTitle") or "").strip() or None,
             status="ACTIVE",
         )
+        # Captured BEFORE _find_or_create_identity overwrites the row: a person who already exists and whose
+        # department/job title differs from this CSV row is a mover, and must go through the same reconcile a
+        # directory sync or an in-app attribute edit would run (revoke what the old attributes granted, then grant
+        # what the new ones qualify for) — not just the grant half.
+        previous = (await session.execute(select(User).where(User.employee_id == record.employee_id))).scalar_one_or_none()
+        previous_attributes = (previous.department, previous.job_title, previous.status, (previous.email or "").lower()) if previous is not None else None
+        previous_values = {"department": previous.department, "job_title": previous.job_title} if previous is not None else None
+        # Effective dating: an existing person's department/job-title change with a FUTURE effectiveDate is scheduled
+        # instead of applied — nothing about them changes until that moment (see app.services.lifecycle).
+        effective_date = _parse_effective_date(row.get("effectiveDate"))
+        if effective_date is not None and previous is not None and (previous.department != normalized.department or previous.job_title != normalized.job_title):
+            from zoneinfo import ZoneInfo
+            from app.services.lifecycle import schedule_move
+            from app.services.security_settings import get_security_settings
+            tz = ZoneInfo((await get_security_settings(session)).timezone)
+            effective_at = datetime(effective_date.year, effective_date.month, effective_date.day, tzinfo=tz).astimezone(timezone.utc)
+            if effective_at > datetime.now(timezone.utc):
+                await schedule_move(session, previous.id, normalized.department, normalized.job_title, effective_at, "CSV", actor_subject, request_id, import_id=onboarding_import.id)
+                moves_scheduled += 1
+                continue
         identity, _, newly_provisioned = await _find_or_create_identity(session, record.employee_id, normalized, request_id)
+        csv_leaver_date = _parse_effective_date(row.get("leaverDate"))
+        if csv_leaver_date is not None and identity.leaver_date != csv_leaver_date:
+            identity.leaver_date, identity.leaver_processed_at, identity.leaver_reminders_sent = csv_leaver_date, None, []
+            await session.flush()
         # Birthright grants always land ELIGIBLE, never bypassed straight to ACTIVE — even for a real, freshly
         # provisioned account. This matches the rest of AccessPilot's custom PIM model consistently: birthright
         # decides WHAT a joiner is entitled to, but the person (or an Admin on their behalf) still has to
         # self-activate it via My Access, exactly like every other eligible grant in the app.
-        birthright_assignments_created += len(await evaluate_birthright_policies(session, identity.id, actor_subject, request_id))
+        if previous_attributes is not None and previous_attributes != (identity.department, identity.job_title, identity.status, (identity.email or "").lower()):
+            outcome = await reconcile_birthright_policies_for_user(session, identity.id, actor_subject, request_id)
+            birthright_assignments_created += len(outcome["granted"])
+            birthright_assignments_revoked += len(outcome["revoked"])
+            from app.services.lifecycle import build_changes, record_mover
+            await record_mover(session, identity.id, build_changes(previous_values, {"department": identity.department, "job_title": identity.job_title}), "CSV", outcome, request_id)
+        else:
+            joiner_grants = await evaluate_birthright_policies(session, identity.id, actor_subject, request_id)
+            birthright_assignments_created += len(joiner_grants)
+            if previous is None:
+                from app.services.lifecycle import record_joiner
+                await record_joiner(session, identity.id, "CSV", {"granted": joiner_grants}, request_id)
         if newly_provisioned:
             real_accounts_provisioned += 1
 
@@ -283,6 +335,8 @@ async def commit_import(session: AsyncSession, import_id: UUID, actor_subject: s
     onboarding_import.access_revoke_failed_count = access_revoke_failed
     onboarding_import.real_accounts_provisioned_count = real_accounts_provisioned
     onboarding_import.birthright_assignments_created_count = birthright_assignments_created
+    onboarding_import.birthright_assignments_revoked_count = birthright_assignments_revoked
+    onboarding_import.moves_scheduled_count = moves_scheduled
     await record_audit(
         session, action="ONBOARDING_IMPORT_COMMITTED", target_type="ONBOARDING_IMPORT", target_id=onboarding_import.id,
         provider_id=onboarding_import.provider_id, actor_user_id=actor_id, request_id=request_id,

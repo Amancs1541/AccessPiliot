@@ -247,3 +247,135 @@ async def test_sync_failure_marks_run_failed_and_audits(session, monkeypatch):
     assert runs[0].status == "FAILED"
     audit_actions = {a.action for a in (await db.scalars(select(AuditLog))).all()}
     assert "SYNC_FAILED" in audit_actions
+
+
+@pytest.mark.asyncio
+async def test_a_status_or_email_change_now_triggers_reconcile_but_a_name_change_does_not(session, monkeypatch):
+    """Rules can read status/email, so a change to either must re-run the reconcile; cosmetic changes must not."""
+    from app.models import BirthrightPolicy
+
+    db, provider = session
+    users, groups, members, roles = connector_fixture()
+    monkeypatch.setattr("app.services.directory_sync._connector", lambda p: FakeConnector(users, groups, members, roles))
+    await run_sync(db, provider, "req-1")
+    group_row = (await db.execute(select(Group).where(Group.external_id == "g1"))).scalar_one()
+    user_row = (await db.execute(select(User).where(User.external_id == "u1"))).scalar_one()
+    user_row.department = "Finance"
+    db.add(BirthrightPolicy(name="Active finance staff", match_field="department", match_value="Finance", conditions_json=[{"field": "department", "operator": "EQUALS", "value": "Finance"}, {"field": "employmentStatus", "operator": "EQUALS", "value": "ACTIVE"}], conditions_operator="AND", actions_json=[{"resource_type": "GROUP", "resource_id": str(group_row.id), "assignment_type": "PERMANENT"}], resource_type="GROUP", resource_id=group_row.id))
+    await db.commit()
+
+    def sync_with(**changes):
+        base = {"external_id": "u1", "email": "u1@x.com", "display_name": "User One", "department": "Finance"}
+        base.update(changes)
+        monkeypatch.setattr("app.services.directory_sync._connector", lambda p: FakeConnector([NormalizedUser(**base), users[1]], groups, members, roles))
+
+    async def held():
+        return (await db.execute(select(AccessAssignment).where(AccessAssignment.user_id == user_row.id))).scalars().all()
+
+    # Cosmetic change (display name) — no reconcile, so nothing is granted even though the rule matches.
+    sync_with(display_name="User One Renamed")
+    await run_sync(db, provider, "req-2")
+    assert await held() == []
+
+    # Email change — reconcile runs and the matching rule grants.
+    sync_with(email="new.address@x.com")
+    await run_sync(db, provider, "req-3")
+    rows = await held()
+    assert len(rows) == 1 and rows[0].status == "ELIGIBLE"
+
+    # Status flips to DISABLED — the "ACTIVE only" rule stops matching, so its access is revoked, and a disabled
+    # account is never handed fresh birthright grants.
+    sync_with(email="new.address@x.com", status="DISABLED")
+    await run_sync(db, provider, "req-4")
+    rows = await held()
+    assert len(rows) == 1 and rows[0].status == "REVOKED"
+
+
+@pytest.mark.asyncio
+async def test_a_department_move_seen_by_sync_records_an_event_and_starts_the_leftover_review(session, monkeypatch):
+    from app.models import AccessReviewCampaign, LifecycleEvent
+
+    db, provider = session
+    users, groups, members, roles = connector_fixture()
+    users_sales = [NormalizedUser("u1", "u1@x.com", "User One", department="Sales"), users[1]]
+    monkeypatch.setattr("app.services.directory_sync._connector", lambda p: FakeConnector(users_sales, groups, members, roles))
+    await run_sync(db, provider, "req-1")
+
+    group_row = (await db.execute(select(Group).where(Group.external_id == "g1"))).scalar_one()
+    user_row = (await db.execute(select(User).where(User.external_id == "u1"))).scalar_one()
+    boss = User(provider_id=provider.id, external_id="boss", email="boss@x.com", display_name="Boss", status="ACTIVE")
+    db.add(boss)
+    await db.flush()
+    user_row.manager_id = boss.id
+    db.add(AccessAssignment(provider_id=provider.id, user_id=user_row.id, resource_type="GROUP", resource_id=group_row.id, assignment_type="PERMANENT", status="ELIGIBLE", justification="Manual grant."))
+    await db.commit()
+
+    users_finance = [NormalizedUser("u1", "u1@x.com", "User One", department="Finance"), users[1]]
+    monkeypatch.setattr("app.services.directory_sync._connector", lambda p: FakeConnector(users_finance, groups, members, roles))
+    await run_sync(db, provider, "req-2")
+
+    event = (await db.execute(select(LifecycleEvent).where(LifecycleEvent.event_type == "MOVER"))).scalars().one()
+    assert event.event_type == "MOVER" and event.source == "SYNC" and event.changes["department"] == {"from": "Sales", "to": "Finance"}
+    campaign = await db.get(AccessReviewCampaign, event.review_campaign_id)
+    assert campaign.scope_type == "MOVER" and campaign.reviewer_id == boss.id
+
+
+async def _leaver_setup(db, provider, monkeypatch, revoke_on_disable=True):
+    from app.models import LifecycleSettings
+
+    users, groups, members, roles = connector_fixture()
+    monkeypatch.setattr("app.services.directory_sync._connector", lambda p: FakeConnector(users, groups, members, roles))
+    await run_sync(db, provider, "req-1")
+    group_row = (await db.execute(select(Group).where(Group.external_id == "g1"))).scalar_one()
+    user_row = (await db.execute(select(User).where(User.external_id == "u1"))).scalar_one()
+    boss = User(provider_id=provider.id, external_id="boss", email="boss@x.com", display_name="Boss", status="ACTIVE")
+    db.add(boss)
+    await db.flush()
+    user_row.manager_id = boss.id
+    db.add(AccessAssignment(provider_id=provider.id, user_id=user_row.id, resource_type="GROUP", resource_id=group_row.id, assignment_type="PERMANENT", status="ELIGIBLE", justification="Manual grant."))
+    settings = (await db.execute(select(LifecycleSettings))).scalars().first() or LifecycleSettings(lifecycle_owner_ids=[])
+    settings.revoke_on_directory_disable = revoke_on_disable
+    db.add(settings)
+    await db.commit()
+    disabled = [NormalizedUser("u1", "u1@x.com", "User One", status="DISABLED"), users[1]]
+    monkeypatch.setattr("app.services.directory_sync._connector", lambda p: FakeConnector(disabled, groups, members, roles))
+    await run_sync(db, provider, "req-2")
+    return user_row, boss
+
+
+@pytest.mark.asyncio
+async def test_a_person_disabled_in_the_directory_is_treated_as_a_leaver(session, monkeypatch):
+    from app.models import LifecycleEvent, Notification
+
+    db, provider = session
+    user_row, boss = await _leaver_setup(db, provider, monkeypatch)
+    rows = (await db.execute(select(AccessAssignment).where(AccessAssignment.user_id == user_row.id))).scalars().all()
+    event = (await db.execute(select(LifecycleEvent).where(LifecycleEvent.event_type == "LEAVER"))).scalars().one()
+    notes = (await db.execute(select(Notification).where(Notification.notification_type == "LIFECYCLE_LEAVER"))).scalars().all()
+    assert [r.status for r in rows] == ["REVOKED"]
+    assert event.source == "SYNC" and event.revoked_count == 1 and event.review_note is None
+    assert [n.user_id for n in notes] == [boss.id]
+
+
+@pytest.mark.asyncio
+async def test_with_directory_revocation_switched_off_the_leaver_is_recorded_but_keeps_access(session, monkeypatch):
+    from app.models import LifecycleEvent
+
+    db, provider = session
+    user_row, _ = await _leaver_setup(db, provider, monkeypatch, revoke_on_disable=False)
+    rows = (await db.execute(select(AccessAssignment).where(AccessAssignment.user_id == user_row.id))).scalars().all()
+    event = (await db.execute(select(LifecycleEvent).where(LifecycleEvent.event_type == "LEAVER"))).scalars().one()
+    assert [r.status for r in rows] == ["ELIGIBLE"] and event.review_note == "AUTO_REVOKE_OFF" and event.revoked_count == 0
+
+
+@pytest.mark.asyncio
+async def test_people_first_seen_by_sync_are_recorded_as_joiners(session, monkeypatch):
+    from app.models import LifecycleEvent
+
+    db, provider = session
+    users, groups, members, roles = connector_fixture()
+    monkeypatch.setattr("app.services.directory_sync._connector", lambda p: FakeConnector(users, groups, members, roles))
+    await run_sync(db, provider, "req-1")
+    await run_sync(db, provider, "req-2")  # nobody new the second time
+    joiners = (await db.execute(select(LifecycleEvent).where(LifecycleEvent.event_type == "JOINER"))).scalars().all()
+    assert len(joiners) == len(users) and all(j.source == "SYNC" for j in joiners)

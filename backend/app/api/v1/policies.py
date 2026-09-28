@@ -27,13 +27,19 @@ async def list_birthright_policies(_: AuthenticatedUser = Depends(policy_read), 
 
 
 @router.post("/birthright", response_model=BirthrightPolicyResponse, status_code=201)
-async def create_birthright_policy(data: BirthrightPolicyCreate, request: Request, _: AuthenticatedUser = Depends(policy_create), db: AsyncSession = Depends(get_db)):
-    return await birthright_service.create_birthright_policy(db, data, get_request_id(request))
+async def create_birthright_policy(data: BirthrightPolicyCreate, request: Request, actor: AuthenticatedUser = Depends(policy_create), db: AsyncSession = Depends(get_db)):
+    row = await birthright_service.create_birthright_policy(db, data, get_request_id(request))
+    row.recheck = await birthright_service.recheck_users_for_policy(db, row.id, actor.directory_object_id, get_request_id(request))
+    row.warnings = await birthright_service.policy_warnings(db, row)
+    return row
 
 
 @router.patch("/birthright/{policy_id}", response_model=BirthrightPolicyResponse)
-async def update_birthright_policy(policy_id: UUID, data: BirthrightPolicyUpdate, request: Request, _: AuthenticatedUser = Depends(policy_update), db: AsyncSession = Depends(get_db)):
-    return await birthright_service.update_birthright_policy(db, policy_id, data, get_request_id(request))
+async def update_birthright_policy(policy_id: UUID, data: BirthrightPolicyUpdate, request: Request, actor: AuthenticatedUser = Depends(policy_update), db: AsyncSession = Depends(get_db)):
+    row = await birthright_service.update_birthright_policy(db, policy_id, data, get_request_id(request))
+    row.recheck = await birthright_service.recheck_users_for_policy(db, row.id, actor.directory_object_id, get_request_id(request))
+    row.warnings = await birthright_service.policy_warnings(db, row)
+    return row
 
 
 @router.delete("/birthright/{policy_id}", status_code=204)
@@ -42,10 +48,11 @@ async def delete_birthright_policy(policy_id: UUID, request: Request, _: Authent
 
 
 @router.post("/birthright/json", response_model=BirthrightPolicyJson, status_code=201)
-async def create_birthright_policy_json(data: BirthrightPolicyJson, request: Request, _: AuthenticatedUser = Depends(policy_create), db: AsyncSession = Depends(get_db)):
+async def create_birthright_policy_json(data: BirthrightPolicyJson, request: Request, actor: AuthenticatedUser = Depends(policy_create), db: AsyncSession = Depends(get_db)):
     """Create a birthright policy from the full multi-condition/multi-action JSON shape — the counterpart to the
     simple GUI form's POST /birthright, for policies that need more than one condition or more than one grant."""
     row = await birthright_service.create_birthright_policy_from_json(db, data, get_request_id(request))
+    await birthright_service.recheck_users_for_policy(db, row.id, actor.directory_object_id, get_request_id(request))
     return await birthright_service.to_birthright_policy_json(db, row)
 
 
@@ -58,8 +65,9 @@ async def get_birthright_policy_json(policy_id: UUID, _: AuthenticatedUser = Dep
 
 
 @router.put("/birthright/{policy_id}/json", response_model=BirthrightPolicyJson)
-async def update_birthright_policy_json(policy_id: UUID, data: BirthrightPolicyJson, request: Request, _: AuthenticatedUser = Depends(policy_update), db: AsyncSession = Depends(get_db)):
+async def update_birthright_policy_json(policy_id: UUID, data: BirthrightPolicyJson, request: Request, actor: AuthenticatedUser = Depends(policy_update), db: AsyncSession = Depends(get_db)):
     row = await birthright_service.update_birthright_policy_from_json(db, policy_id, data, get_request_id(request))
+    await birthright_service.recheck_users_for_policy(db, row.id, actor.directory_object_id, get_request_id(request))
     return await birthright_service.to_birthright_policy_json(db, row)
 
 
