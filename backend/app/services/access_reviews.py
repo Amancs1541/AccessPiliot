@@ -11,7 +11,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AccessPilotError
-from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, AccessPackageOwner, AccessReviewCampaign, AccessReviewItem, Application, ApplicationOwner, Group, GroupOwner, User
+from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, AccessPackageOwner, AccessReviewCampaign, AccessReviewItem, Application, ApplicationOwner, BusinessRole, BusinessRoleOwner, Group, GroupOwner, User
 from app.providers.entra import EntraProvider
 from app.providers.graph_client import GraphError
 from app.schemas.access_reviews import AccessReviewCampaignCreate, AccessReviewCampaignUpdate, AccessReviewDashboard, AccessReviewItemDecide, ResourceTally, ScopeTargetItem
@@ -36,6 +36,9 @@ async def _resolve_display_name(session: AsyncSession, resource_type: str, resou
         # scope_targets list can legitimately contain one, so this needs to resolve it too.
         package = await session.get(AccessPackage, resource_id)
         return package.name if package else None
+    if resource_type == "BUSINESS_ROLE":
+        role = await session.get(BusinessRole, resource_id)
+        return role.name if role else None
     try:
         _, name, _ = await _resolve_target(session, resource_type, resource_id)
     except AccessPilotError:
@@ -55,12 +58,15 @@ async def _matching_assignments_for_target(session: AsyncSession, resource_type:
     resource_type is always the real underlying GROUP/ROLE/APPLICATION item, never literally "PACKAGE" — a
     package-sourced grant is only identifiable via the AccessPackageAssignment join table (see
     app.services.packages), so this means "every assignment that came from THIS package" rather than a
-    resource_type/resource_id equality filter. Shared by both SPECIFIC_RESOURCE (one target) and
-    MULTIPLE_RESOURCES (several, possibly mixed-type, targets in one campaign) so there's exactly one place this
-    per-target resolution logic lives."""
+    resource_type/resource_id equality filter. BUSINESS_ROLE is simpler: AccessAssignment.business_role_id is a
+    direct column (no join table needed), set at grant time by app.services.business_roles.assign_business_role.
+    Shared by both SPECIFIC_RESOURCE (one target) and MULTIPLE_RESOURCES (several, possibly mixed-type, targets in
+    one campaign) so there's exactly one place this per-target resolution logic lives."""
     stmt = select(AccessAssignment).where(AccessAssignment.status.in_(NON_FINAL_ASSIGNMENT_STATUSES))
     if resource_type == "PACKAGE":
         stmt = stmt.join(AccessPackageAssignment, AccessPackageAssignment.assignment_id == AccessAssignment.id).where(AccessPackageAssignment.package_id == resource_id)
+    elif resource_type == "BUSINESS_ROLE":
+        stmt = stmt.where(AccessAssignment.business_role_id == resource_id)
     else:
         stmt = stmt.where(AccessAssignment.resource_type == resource_type, AccessAssignment.resource_id == resource_id)
     return list((await session.scalars(stmt)).all())
@@ -171,6 +177,8 @@ async def _matching_assignments(session: AsyncSession, data: AccessReviewCampaig
     if data.scope_type == "RESOURCE_TYPE":
         if data.scope_resource_type == "PACKAGE":
             stmt = stmt.join(AccessPackageAssignment, AccessPackageAssignment.assignment_id == AccessAssignment.id)
+        elif data.scope_resource_type == "BUSINESS_ROLE":
+            stmt = stmt.where(AccessAssignment.business_role_id.is_not(None))
         else:
             stmt = stmt.where(AccessAssignment.resource_type == data.scope_resource_type)
     elif data.scope_type == "USER":
@@ -182,11 +190,14 @@ async def _matching_assignments(session: AsyncSession, data: AccessReviewCampaig
 
 
 async def _validate_target_exists(session: AsyncSession, resource_type: str, resource_id: UUID) -> None:
-    """_resolve_target doesn't know about PACKAGE (see app.services.birthright's identical local check) —
-    validate it exists here instead. Raises a 404 AccessPilotError if the target doesn't exist."""
+    """_resolve_target doesn't know about PACKAGE or BUSINESS_ROLE (see app.services.birthright's identical local
+    check) — validate those here instead. Raises a 404 AccessPilotError if the target doesn't exist."""
     if resource_type == "PACKAGE":
         if await session.get(AccessPackage, resource_id) is None:
             raise AccessPilotError("PACKAGE_NOT_FOUND", "The access package was not found.", 404)
+    elif resource_type == "BUSINESS_ROLE":
+        if await session.get(BusinessRole, resource_id) is None:
+            raise AccessPilotError("BUSINESS_ROLE_NOT_FOUND", "The business role was not found.", 404)
     else:
         await _resolve_target(session, resource_type, resource_id)  # 404s if missing
 
@@ -552,13 +563,18 @@ async def get_dashboard_summary(session: AsyncSession) -> AccessReviewDashboard:
 
 
 async def suggest_owner_reviewers(session: AsyncSession, resource_type: str, resource_id: UUID) -> list[dict]:
-    """Reviewer suggestions for a campaign scoped to one Package / Application / Group: the resource's owners.
-    PACKAGE and APPLICATION owners are AccessPilot's own records; a GROUP's owners are read live from Entra
-    (best-effort — an unavailable lookup just yields no suggestion). Returns [{user_id, display_name, source}]."""
+    """Reviewer suggestions for a campaign scoped to one Package / Business Role / Application / Group: the
+    resource's owners. PACKAGE, BUSINESS_ROLE and APPLICATION owners are AccessPilot's own records; a GROUP's
+    owners are read live from Entra (best-effort — an unavailable lookup just yields no suggestion). Returns
+    [{user_id, display_name, source}]."""
     suggestions: list[dict] = []
     if resource_type == "PACKAGE":
         rows = (await session.scalars(select(AccessPackageOwner).where(AccessPackageOwner.package_id == resource_id))).all()
         source = "Package owner"
+        user_ids = [row.user_id for row in rows]
+    elif resource_type == "BUSINESS_ROLE":
+        rows = (await session.scalars(select(BusinessRoleOwner).where(BusinessRoleOwner.role_id == resource_id))).all()
+        source = "Business Role owner"
         user_ids = [row.user_id for row in rows]
     elif resource_type == "APPLICATION":
         rows = (await session.scalars(select(ApplicationOwner).where(ApplicationOwner.application_id == resource_id))).all()

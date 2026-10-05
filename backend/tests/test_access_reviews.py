@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
-from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, AccessPackageItem, AccessReviewCampaign, AccessReviewItem, Group, IdentityProvider, Notification, Role, User
+from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, AccessPackageItem, AccessReviewCampaign, AccessReviewItem, BusinessRole, BusinessRoleItem, BusinessRoleOwner, Group, IdentityProvider, Notification, Role, User
 from app.security.auth import AuthenticatedUser, require_authenticated_user
 
 
@@ -606,6 +606,68 @@ async def test_items_report_where_the_entitlement_came_from_and_package_scope_ex
     assert len(items) == 1
     assert items[0]["user_display_name"] == "Member B"
     assert items[0]["granted_via"] == "Package: Starter Kit (multi)"
+
+
+async def _seed_business_role_scope(factory) -> dict:
+    """A Business Role with one mapped Group item, granted to one person through assign_business_role (so
+    business_role_id is actually set), plus a second person holding the same raw group DIRECTLY — the BUSINESS_ROLE
+    scope's analog of _seed_multi_scope's package-vs-direct-holder setup."""
+    async with factory() as session:
+        provider = IdentityProvider(name="Directory", type="MOCK", status="CONNECTED", tenant_id="t")
+        session.add(provider)
+        await session.flush()
+        group = Group(provider_id=provider.id, external_id="g-br", name="Finance Group", status="ACTIVE", is_privileged=False)
+        owner = User(provider_id=provider.id, external_id="br-owner", email="owner@x.com", display_name="Role Owner", status="ACTIVE")
+        holder = User(provider_id=provider.id, external_id="br-holder", email="holder@x.com", display_name="Role Holder", status="ACTIVE")
+        direct_holder = User(provider_id=provider.id, external_id="br-direct", email="direct@x.com", display_name="Direct Holder", status="ACTIVE")
+        reviewer = User(provider_id=provider.id, external_id="br-reviewer", email="brreviewer@x.com", display_name="BR Reviewer", status="ACTIVE")
+        session.add_all([group, owner, holder, direct_holder, reviewer])
+        await session.flush()
+        role = BusinessRole(name="Finance Analyst (AR test)", status="ACTIVE")
+        session.add(role)
+        await session.flush()
+        session.add(BusinessRoleItem(role_id=role.id, resource_type="GROUP", resource_id=group.id))
+        session.add(BusinessRoleOwner(role_id=role.id, user_id=owner.id))
+        batch_id = holder.id  # any UUID works as the batch id for this seed
+        role_assignment = AccessAssignment(provider_id=provider.id, user_id=holder.id, resource_type="GROUP", resource_id=group.id, assignment_type="PERMANENT", status="ELIGIBLE", justification="Business Role: Finance Analyst (AR test)", business_role_id=role.id, role_assignment_id=batch_id)
+        direct_assignment = AccessAssignment(provider_id=provider.id, user_id=direct_holder.id, resource_type="GROUP", resource_id=group.id, assignment_type="PERMANENT", status="ACTIVE", justification="Direct grant.")
+        session.add_all([role_assignment, direct_assignment])
+        await session.commit()
+        await session.refresh(role_assignment)
+        await session.refresh(direct_assignment)
+        return {"provider_id": provider.id, "group_id": group.id, "role_id": role.id, "owner_id": owner.id, "reviewer_id": reviewer.id, "role_assignment_id": role_assignment.id, "direct_assignment_id": direct_assignment.id}
+
+
+@pytest.mark.asyncio
+async def test_business_role_scope_includes_only_role_sourced_grants_and_reports_its_source(db_override):
+    """Completing the loop from this session's Business Role work: a BUSINESS_ROLE-scoped campaign must contain
+    ONLY grants tagged with that role's business_role_id — a direct holder of the same raw group must not appear —
+    and the item states its source, mirroring the existing PACKAGE-scope test above."""
+    seeded = await _seed_business_role_scope(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/access-reviews", json={"name": "Business role only", "scope_type": "SPECIFIC_RESOURCE", "scope_resource_type": "BUSINESS_ROLE", "scope_resource_id": str(seeded["role_id"]), "reviewer_id": str(seeded["reviewer_id"]), "due_at": future(24)})
+        assert created.status_code == 201
+        assert created.json()["item_count"] == 1
+        items = (await client.get(f"/api/v1/access-reviews/{created.json()['id']}/items")).json()
+    assert len(items) == 1
+    assert items[0]["assignment_id"] == str(seeded["role_assignment_id"])
+    assert items[0]["user_display_name"] == "Role Holder"
+    assert items[0]["granted_via"] == "Business Role: Finance Analyst (AR test)"
+    assert items[0]["business_role_id"] == str(seeded["role_id"])
+    assert items[0]["business_role_name"] == "Finance Analyst (AR test)"
+
+
+@pytest.mark.asyncio
+async def test_business_role_scope_rejects_an_unknown_role_and_suggests_its_owner(db_override):
+    seeded = await _seed_business_role_scope(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        from uuid import uuid4
+        rejected = await client.post("/api/v1/access-reviews", json={"name": "Bad role", "scope_type": "SPECIFIC_RESOURCE", "scope_resource_type": "BUSINESS_ROLE", "scope_resource_id": str(uuid4()), "reviewer_id": str(seeded["reviewer_id"]), "due_at": future(24)})
+        assert rejected.status_code == 404
+        suggestions = (await client.get(f"/api/v1/access-reviews/owner-suggestions?resource_type=BUSINESS_ROLE&resource_id={seeded['role_id']}")).json()
+    assert len(suggestions) == 1 and suggestions[0]["display_name"] == "Role Owner" and suggestions[0]["source"] == "Business Role owner"
 
 
 def test_compute_next_run_handles_day_time_timezone_and_short_months():

@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
-from app.models import AccessAssignment, AccessPackage, AccessPackageItem, Application, Group, IdentityProvider, Role, User
+from app.models import AccessAssignment, AccessPackage, AccessPackageItem, Application, BusinessRole, BusinessRoleItem, Group, IdentityProvider, Role, User
 from app.security.auth import AuthenticatedUser, require_authenticated_user
 
 
@@ -404,6 +404,144 @@ async def test_a_birthright_policy_referencing_a_nonexistent_package_is_rejected
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/api/v1/policies/birthright", json={"name": "Bad package rule", "match_field": "department", "match_value": "Finance", "resource_type": "PACKAGE", "resource_id": "00000000-0000-0000-0000-000000000000"})
     assert response.status_code == 404
+
+
+async def _seed_business_role_with_two_items(factory, *, status: str = "ACTIVE") -> dict:
+    async with factory() as session:
+        provider = IdentityProvider(name="Directory", type="MOCK", status="CONNECTED", tenant_id="t")
+        session.add(provider)
+        await session.flush()
+        group = Group(provider_id=provider.id, external_id="g-br", name="Finance Team (BR)", status="ACTIVE", is_privileged=False)
+        role = Role(provider_id=provider.id, external_id="r-br", name="Finance Reports Reader (BR)", role_type="DIRECTORY_ROLE", status="ACTIVE")
+        session.add_all([group, role])
+        await session.flush()
+        business_role = BusinessRole(name="Finance Analyst (birthright test)", status=status)
+        session.add(business_role)
+        await session.flush()
+        session.add_all([
+            BusinessRoleItem(role_id=business_role.id, resource_type="GROUP", resource_id=group.id),
+            BusinessRoleItem(role_id=business_role.id, resource_type="ROLE", resource_id=role.id),
+        ])
+        await session.commit()
+        return {"provider_id": provider.id, "group_id": group.id, "role_id": role.id, "business_role_id": business_role.id}
+
+
+@pytest.mark.asyncio
+async def test_a_birthright_policy_can_grant_a_business_role(db_override):
+    """Completing the loop from this session's Business Role work: BUSINESS_ROLE fans out into one birthright-
+    tagged AccessAssignment per mapped item, EACH ALSO tagged business_role_id/role_assignment_id so it shows up
+    correctly in Assignments/My Approvals/the role's own Holders view — mirroring the PACKAGE test above."""
+    seeded = await _seed_business_role_with_two_items(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/policies/birthright", json={"name": "Finance -> Finance Analyst", "match_field": "department", "match_value": "Finance", "resource_type": "BUSINESS_ROLE", "resource_id": str(seeded["business_role_id"])})
+    assert created.status_code == 201
+    assert created.json()["resource_type"] == "BUSINESS_ROLE"
+
+    async with db_override.factory() as session:
+        user = User(provider_id=seeded["provider_id"], external_id="u-br", email="br.user@x.com", display_name="BR User", status="ACTIVE", department="Finance")
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+        user_id = user.id
+
+        from app.services.birthright import evaluate_birthright_policies
+        granted = await evaluate_birthright_policies(session, user_id, "admin-oid", "req-br-1")
+        assert len(granted) == 2
+
+        assignments = (await session.execute(select(AccessAssignment).where(AccessAssignment.user_id == user_id))).scalars().all()
+    resource_types = sorted(a.resource_type for a in assignments)
+    assert resource_types == ["GROUP", "ROLE"]
+    assert all(a.status == "ELIGIBLE" for a in assignments)
+    assert all(a.birthright_policy_id is not None for a in assignments)
+    assert all(a.business_role_id == seeded["business_role_id"] for a in assignments)
+    assert assignments[0].role_assignment_id is not None and assignments[0].role_assignment_id == assignments[1].role_assignment_id
+
+
+@pytest.mark.asyncio
+async def test_re_evaluating_a_business_role_birthright_policy_does_not_duplicate_items(db_override):
+    seeded = await _seed_business_role_with_two_items(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/policies/birthright", json={"name": "Finance -> Finance Analyst", "match_field": "department", "match_value": "Finance", "resource_type": "BUSINESS_ROLE", "resource_id": str(seeded["business_role_id"])})
+
+    async with db_override.factory() as session:
+        user = User(provider_id=seeded["provider_id"], external_id="u-br2", email="br.user2@x.com", display_name="BR User 2", status="ACTIVE", department="Finance")
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+        user_id = user.id
+
+        from app.services.birthright import evaluate_birthright_policies
+        first = await evaluate_birthright_policies(session, user_id, "admin-oid", "req-br-2")
+        assert len(first) == 2
+        second = await evaluate_birthright_policies(session, user_id, "admin-oid", "req-br-3")
+        assert second == []
+
+        assignments = (await session.execute(select(AccessAssignment).where(AccessAssignment.user_id == user_id))).scalars().all()
+    assert len(assignments) == 2
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_revokes_every_item_of_a_disabled_business_role_birthright_policy(db_override):
+    """The existing mover-reconciliation loop revokes purely by birthright_policy_id, regardless of resource_type
+    — proves it covers every one of a BUSINESS_ROLE policy's item-level assignments automatically, with no changes
+    of its own needed for this feature."""
+    from app.services.birthright import evaluate_birthright_policies, reconcile_birthright_policies_for_user
+
+    seeded = await _seed_business_role_with_two_items(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/policies/birthright", json={"name": "Finance -> Finance Analyst", "match_field": "department", "match_value": "Finance", "resource_type": "BUSINESS_ROLE", "resource_id": str(seeded["business_role_id"])})
+        policy_id = created.json()["id"]
+
+    async with db_override.factory() as session:
+        user = User(provider_id=seeded["provider_id"], external_id="u-br3", email="br.user3@x.com", display_name="BR User 3", status="ACTIVE", department="Finance")
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+        user_id = user.id
+        granted = await evaluate_birthright_policies(session, user_id, "admin-oid", "req-br-4")
+        assert len(granted) == 2
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        authenticate_as("AccessPilot.Admin")
+        await client.patch(f"/api/v1/policies/birthright/{policy_id}", json={"status": "DISABLED"})
+
+    async with db_override.factory() as session:
+        result = await reconcile_birthright_policies_for_user(session, user_id, "admin-oid", "req-br-5")
+        assert result["revoked"] == []  # already revoked when the policy was disabled
+        assignments = (await session.execute(select(AccessAssignment).where(AccessAssignment.user_id == user_id))).scalars().all()
+    assert all(a.status == "REVOKED" for a in assignments)
+
+
+@pytest.mark.asyncio
+async def test_a_birthright_policy_referencing_a_nonexistent_business_role_is_rejected(db_override):
+    await _seed_business_role_with_two_items(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/policies/birthright", json={"name": "Bad business role rule", "match_field": "department", "match_value": "Finance", "resource_type": "BUSINESS_ROLE", "resource_id": "00000000-0000-0000-0000-000000000000"})
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_a_non_active_business_role_grants_nothing(db_override):
+    """A DRAFT/DISABLED/ARCHIVED Business Role is the safe 'matches nothing' default — the same guarantee the
+    direct-assign path (assign_business_role) already enforces, now also honored by the automated path."""
+    seeded = await _seed_business_role_with_two_items(db_override.factory, status="DRAFT")
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/policies/birthright", json={"name": "Finance -> Draft Role", "match_field": "department", "match_value": "Finance", "resource_type": "BUSINESS_ROLE", "resource_id": str(seeded["business_role_id"])})
+
+    async with db_override.factory() as session:
+        user = User(provider_id=seeded["provider_id"], external_id="u-br-draft", email="br.draft@x.com", display_name="BR Draft User", status="ACTIVE", department="Finance")
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+
+        from app.services.birthright import evaluate_birthright_policies
+        granted = await evaluate_birthright_policies(session, user.id, "admin-oid", "req-br-draft")
+    assert granted == []
 
 
 async def _seed_json_rule_targets(factory) -> dict:

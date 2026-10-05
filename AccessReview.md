@@ -308,3 +308,33 @@ Button on the user page (and *Run now* in Scheduled leavers): **justification** 
 ## 20. Re-enabling a leaver's account is scoped to what you clicked
 
 Clicking **Enable** on one IdP account for a leaver asks for a reason and sends the manager (or a lifecycle owner) an approval request scoped to **just that one account** — approving it enables only that account, the others stay exactly as they are. Clicking **Enable in all IdPs** does the same but scoped to every account. The pending request (visible on the user's Leaver tab and on the Leavers page) shows which scope it covers. The person is only treated as fully "returned" (leaver cycle reset, a new leaver date can be set) once every account is active again — a partial approval keeps them recorded as a leaver until the rest come back too.
+
+## 21. Business Roles (Entitlement Management, Step 1)
+
+*Business Roles* (`/admin/business-roles`, next to Access Packages) is a named, owned bundle of real entitlements — map an Entra group, directory role, or application role onto one business-facing role (e.g. "Finance Analyst") instead of managing five separate group memberships. Each mapping row carries an optional **IT Role label** (what IT itself calls that technical access level) and inherits the underlying resource's **Resource Code** and **Naming Convention** — two purely cosmetic reference fields (editable per-resource via "Code/Naming" on any mapped item, or "Edit reference" on the Unmapped entitlements list below the table) that cross-reference AccessPilot's own record of that resource, never used for any internal lookup. One raw entitlement can only belong to one Business Role at a time. Lifecycle: DRAFT → ACTIVE → DISABLED → ARCHIVED (archived once it has assignment history; deletable outright until then).
+
+## 22. Assigning a Business Role (Step 3)
+
+On the Business Roles page, an **ACTIVE** role gets an **Assign** button: pick a person, Permanent or Temporary (with an expiration), an optional approver (leave blank to land the grant directly ELIGIBLE), and a justification. This fans out to one ordinary access grant per mapped item — the same approval/activation/SoD path every other grant in AccessPilot uses, so nothing is actually real until it's activated. The **Holders** column shows how many people currently hold the role; clicking it expands the list with each person's per-item status. A role with holders archives instead of deleting outright when removed.
+
+If an approver is set, each pending item on the admin **Assignments** page and on the approver's **My Approvals** page shows which Business Role it belongs to (a small "🏷 Role Name" line under the resource), so an approver reviewing a raw group/role/application grant can tell at a glance it's part of a named Business Role rather than a one-off request. This also shows on decided (already approved/denied) rows for the same reason it already shows the package name.
+
+When a Business Role has more than one mapped item, assigning it no longer shows one separate row per item — the Assignments list and My Approvals both collapse it into a single "🏷 Role Name (N items)" row, click to expand and see each underlying item's own status, with **Approve all / Reject all / Revoke all** acting on every item at once. This is the same grouping Access Packages already use.
+
+## 23. Business Roles are now a first-class citizen everywhere else (Steps 4–5)
+
+A Business Role can now be referenced anywhere a Package, Group, Role, or Application already could:
+
+- **Conditional auto-assignment**: a **Birthright policy** can grant a Business Role (match on department/job title, "Grant" = Business Role) — every mapped item is granted automatically, tagged so it reconciles (auto-revokes if the person stops matching) exactly like any other birthright grant. A **Group-role mapping** can do the same, membership-triggered instead of attribute-triggered. Either way, a role that's DRAFT/DISABLED/ARCHIVED simply grants nothing — the safe default.
+- **Separation of Duties**: an SoD rule can name a Business Role as one side of a conflict (next to Group/Role/Application/Package) — it's resolved live against the role's current items, so editing the role's mapping is reflected the next time a conflict check runs, no need to update the SoD rule itself.
+- **Access Review**: a campaign can be scoped to one specific Business Role (or include it in a mixed multi-resource campaign) — it captures only the grants that actually came from that role, reports "Business Role: X" (plus "via birthright: Y" when relevant) as the source, and Business Role owners are suggested as reviewers the same way package/application owners already are. A role's several items collapse into one expandable row in the review, the same batching the Assignments/My Approvals pages already do.
+
+## 24. Business Role Analytics and the owner portal (Step 6 — plan complete)
+
+The admin **Business Roles** page now opens with an **analytics panel**: total roles by status (Draft/Active/Disabled/Archived), privileged roles, how many people currently hold any role, unmapped entitlements, roles with no owner, roles with an **open** SoD conflict (a real violation right now — not just "referenced in a rule"), and the most-held roles. Everything here is computed live on every page load, never stored.
+
+Business Role **owners** (set on the create/edit form) get a narrow self-service portal at **My Business Roles** (visible to everyone; empty for non-owners) — the same model Access Packages already use. An owner can **rename** the role and **remove one mapped item** at a time (never emptying it completely); everything else — status, approvers, owners, assigning it to people, deleting it — stays Admin-only. This closes out the full Business Role plan from Steps 1 through 6.
+
+## 25. "Dormant access" on the Security Operations dashboard
+
+The **Security Operations** dashboard (`AccessPilot.SoCAdmin` only) has a new built-in widget: **Dormant access (90+ days)** — every currently-ACTIVE grant that was activated 90 or more days ago and never touched since. This is the honest proxy this app can offer without real sign-in/usage telemetry (the same limitation already noted for the Inactive Users review scope) — it flags standing access that's been sitting active a long time and may be worth a fresh look, not necessarily unused access in a literal sense. Click the card to see the real list behind the count, same as every other widget on this dashboard.

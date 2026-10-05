@@ -85,6 +85,12 @@ class Group(Base):
     __tablename__ = "groups"
     id: Mapped[UUID] = uuid_pk(); provider_id: Mapped[UUID] = mapped_column(ForeignKey("identity_providers.id"), nullable=False); external_id: Mapped[str] = mapped_column(String(255), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False); description: Mapped[Optional[str]] = mapped_column(Text); is_privileged: Mapped[bool] = mapped_column(nullable=False, default=False); status: Mapped[str] = mapped_column(String(50), nullable=False)
+    # Admin-set, cosmetic reference fields — same pattern as BirthrightPolicy.external_policy_id: never looked up
+    # internally (the real UUID id is what every FK uses), purely so a resource can be cited by a short business
+    # code (e.g. in a ticket, a Business Role mapping row, or an audit note) and documented against the naming
+    # pattern it's supposed to follow. Directory sync's upsert_group() never writes either field, so a value here
+    # survives every re-sync untouched with no extra override-flag needed.
+    resource_code: Mapped[Optional[str]] = mapped_column(String(100), unique=True); naming_convention: Mapped[Optional[str]] = mapped_column(String(255))
     created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at(); last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     __table_args__ = (UniqueConstraint("provider_id", "external_id", name="uq_groups_provider_external"), Index("ix_groups_provider_external", "provider_id", "external_id"))
 
@@ -93,6 +99,8 @@ class Role(Base):
     __tablename__ = "roles"
     id: Mapped[UUID] = uuid_pk(); provider_id: Mapped[UUID] = mapped_column(ForeignKey("identity_providers.id"), nullable=False); external_id: Mapped[str] = mapped_column(String(255), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False); description: Mapped[Optional[str]] = mapped_column(Text); role_type: Mapped[str] = mapped_column(String(50), nullable=False); is_privileged: Mapped[bool] = mapped_column(nullable=False, default=False); status: Mapped[str] = mapped_column(String(50), nullable=False)
+    # See Group.resource_code/naming_convention — identical cosmetic, sync-safe reference fields.
+    resource_code: Mapped[Optional[str]] = mapped_column(String(100), unique=True); naming_convention: Mapped[Optional[str]] = mapped_column(String(255))
     created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at(); last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     __table_args__ = (UniqueConstraint("provider_id", "external_id", name="uq_roles_provider_external"), Index("ix_roles_provider_external", "provider_id", "external_id"))
 
@@ -113,6 +121,8 @@ class Application(Base):
     # Full secret/certificate list behind credential_expires_at (which is just the soonest of these) — powers the
     # NHI detail page's "Certificates & Secrets" section. List of {credential_type, display_name, expires_at}.
     nhi_credentials: Mapped[Optional[list]] = mapped_column(JSON)
+    # See Group.resource_code/naming_convention — identical cosmetic, sync-safe reference fields.
+    resource_code: Mapped[Optional[str]] = mapped_column(String(100), unique=True); naming_convention: Mapped[Optional[str]] = mapped_column(String(255))
     created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at(); last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     __table_args__ = (UniqueConstraint("provider_id", "external_id", name="uq_applications_provider_external"), Index("ix_applications_provider_external", "provider_id", "external_id"))
 
@@ -163,7 +173,13 @@ class AccessAssignment(Base):
     # Same idea as birthright_policy_id, for a grant made by a GroupRoleMapping instead — set only when
     # create_assignment() was called by group-role-mapping evaluation, never a manual grant.
     group_role_mapping_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("group_role_mappings.id"))
-    activated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at(); __table_args__ = (Index("ix_access_assignments_user", "user_id"), Index("ix_access_assignments_status", "status"), Index("ix_access_assignments_expiration", "expiration_time"))
+    # Same provenance-tag idea, for a grant made by assigning a Business Role — set only when create_assignment()
+    # was called from services.business_roles.assign_business_role, never a manual grant. role_assignment_id is a
+    # plain batch id (not a FK), grouping every item one role-assignment action created — the same idea as
+    # AccessPackageAssignment.package_assignment_id, but kept as a column here instead of a second join table.
+    business_role_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("business_roles.id"))
+    role_assignment_id: Mapped[Optional[UUID]] = mapped_column(Uuid)
+    activated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at(); __table_args__ = (Index("ix_access_assignments_user", "user_id"), Index("ix_access_assignments_status", "status"), Index("ix_access_assignments_expiration", "expiration_time"), Index("ix_access_assignments_role_assignment", "role_assignment_id"))
 
 
 class AccessRequest(Base):
@@ -385,6 +401,51 @@ class AccessPackageItem(Base):
 class AccessPackageAssignment(Base):
     __tablename__ = "access_package_assignments"
     id: Mapped[UUID] = uuid_pk(); package_id: Mapped[UUID] = mapped_column(ForeignKey("access_packages.id"), nullable=False); package_assignment_id: Mapped[UUID] = mapped_column(Uuid, nullable=False); assignment_id: Mapped[UUID] = mapped_column(ForeignKey("access_assignments.id"), nullable=False, unique=True); user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False); created_at: Mapped[datetime] = created_at(); __table_args__ = (Index("ix_access_package_assignments_batch", "package_assignment_id"),)
+
+
+class BusinessRole(Base):
+    """A named, owned bundle of real entitlements (see BusinessRoleItem) — the thing an admin actually manages and
+    certifies ("Finance Analyst") instead of five separate group memberships. Modeled directly on AccessPackage:
+    status follows the same DRAFT -> ACTIVE -> DISABLED -> ARCHIVED lifecycle (archived once it has assignment
+    history, exactly like a package — see services.business_roles.delete_business_role), and the approver/
+    fallback-approver/fallback_unlock_hours trio is copied verbatim so a role request can reuse the exact same
+    approval wiring a package request already has. role_type/risk_level are cosmetic filtering labels only (no
+    schema branching per type, no enforcement keyed off risk_level — the same documented choice SoD's own
+    `severity` field already makes)."""
+    __tablename__ = "business_roles"
+    id: Mapped[UUID] = uuid_pk(); name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True); description: Mapped[Optional[str]] = mapped_column(Text)
+    role_type: Mapped[str] = mapped_column(String(30), nullable=False, default="BUSINESS", server_default="BUSINESS")
+    department: Mapped[Optional[str]] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="DRAFT", server_default="DRAFT")
+    risk_level: Mapped[str] = mapped_column(String(20), nullable=False, default="LOW", server_default="LOW")
+    is_privileged: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="false")
+    default_approver_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); default_fallback_approver_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); fallback_unlock_hours: Mapped[Optional[int]] = mapped_column(Integer)
+    review_frequency_days: Mapped[Optional[int]] = mapped_column(Integer)
+    created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at()
+
+
+class BusinessRoleItem(Base):
+    """One real entitlement mapped onto a Business Role — byte-for-byte the same resource-tuple shape as
+    AccessPackageItem, resolved through the same _resolve_target() every other resource reference in this app
+    uses. it_role_label is a purely cosmetic reference field (e.g. "Finance-L2-ReadWrite") documenting what IT
+    itself calls this specific technical access level; nothing reads it except the mapping display. The unique
+    constraint enforces the plan's many-to-one decision: one raw entitlement belongs to at most one Business Role
+    at a time, so "who holds Finance Analyst" always means the same set."""
+    __tablename__ = "business_role_items"
+    id: Mapped[UUID] = uuid_pk(); role_id: Mapped[UUID] = mapped_column(ForeignKey("business_roles.id"), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(50), nullable=False); resource_id: Mapped[UUID] = mapped_column(Uuid, nullable=False); app_role_external_id: Mapped[Optional[str]] = mapped_column(String(100))
+    it_role_label: Mapped[Optional[str]] = mapped_column(String(255))
+    created_at: Mapped[datetime] = created_at()
+    __table_args__ = (Index("ix_business_role_items_role", "role_id"), UniqueConstraint("resource_type", "resource_id", "app_role_external_id", name="uq_business_role_items_resource"))
+
+
+class BusinessRoleOwner(Base):
+    """An AccessPilot-side owner of a Business Role — mirrors GroupOwner/ApplicationOwner exactly, same
+    accountability-record-only convention (nothing pushed to any directory)."""
+    __tablename__ = "business_role_owners"
+    id: Mapped[UUID] = uuid_pk(); role_id: Mapped[UUID] = mapped_column(ForeignKey("business_roles.id"), nullable=False); user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    assigned_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); created_at: Mapped[datetime] = created_at()
+    __table_args__ = (UniqueConstraint("role_id", "user_id", name="uq_business_role_owners_role_user"),)
 
 
 class SodPolicy(Base):

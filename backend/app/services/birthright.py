@@ -7,7 +7,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AccessPilotError
-from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, AccessPackageItem, Application, BirthrightPolicy, Group, Role, User
+from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, AccessPackageItem, Application, BirthrightPolicy, BusinessRole, BusinessRoleItem, Group, Role, User
 from app.schemas.assignments import AssignmentCreate
 from app.schemas.policies import BirthrightActionJson, BirthrightPolicyCreate, BirthrightPolicyJson, BirthrightPolicyUpdate
 from app.services.assignments import _resolve_target, create_assignment, revoke_assignment
@@ -20,7 +20,7 @@ NON_FINAL_ASSIGNMENT_STATUSES = ("REJECTED", "REVOKED", "EXPIRED")
 # field), so an unrecognized field name is a clear 400 at save time, not a rule that silently never matches.
 CONDITION_FIELD_MAP = {"department": "department", "job_title": "job_title", "employmentStatus": "status", "status": "status", "email": "email"}
 CONDITION_OPERATORS = ("EQUALS", "NOT_EQUALS")
-ACTION_RESOURCE_TYPES = ("GROUP", "ROLE", "APPLICATION", "PACKAGE")
+ACTION_RESOURCE_TYPES = ("GROUP", "ROLE", "APPLICATION", "PACKAGE", "BUSINESS_ROLE")
 
 
 async def list_birthright_policies(session: AsyncSession) -> list[BirthrightPolicy]:
@@ -37,6 +37,9 @@ async def create_birthright_policy(session: AsyncSession, data: BirthrightPolicy
         # check, nothing shared touched" approach app.services.sod already uses for its own PACKAGE entities.
         if await session.get(AccessPackage, data.resource_id) is None:
             raise AccessPilotError("PACKAGE_NOT_FOUND", "The access package was not found.", 404)
+    elif data.resource_type == "BUSINESS_ROLE":
+        if await session.get(BusinessRole, data.resource_id) is None:
+            raise AccessPilotError("BUSINESS_ROLE_NOT_FOUND", "The business role was not found.", 404)
     else:
         await _resolve_target(session, data.resource_type, data.resource_id)  # 404s if the target doesn't exist
     row = BirthrightPolicy(name=data.name, match_field=data.match_field, match_value=data.match_value, resource_type=data.resource_type, resource_id=data.resource_id, app_role_external_id=data.app_role_external_id, assignment_type=data.assignment_type)
@@ -93,7 +96,7 @@ async def delete_birthright_policy(session: AsyncSession, policy_id: UUID, reque
     await session.commit()
 
 
-async def _grant_birthright_target(session: AsyncSession, user: User, policy: BirthrightPolicy, resource_type: str, resource_id: UUID, app_role_external_id: Optional[str], assignment_type: str, actor_subject: str, request_id: str, bypass_activation: bool) -> Optional[UUID]:
+async def _grant_birthright_target(session: AsyncSession, user: User, policy: BirthrightPolicy, resource_type: str, resource_id: UUID, app_role_external_id: Optional[str], assignment_type: str, actor_subject: str, request_id: str, bypass_activation: bool, *, business_role_id: Optional[UUID] = None, role_assignment_id: Optional[UUID] = None) -> Optional[UUID]:
     """One target grant, tagged birthright_policy_id — used for every single grant this module ever makes,
     whether it came from a legacy policy's own single resource_type/resource_id, one entry of an advanced
     (JSON) policy's actions list, or one item of a PACKAGE action's expansion. Returns None (no-op) if already
@@ -110,7 +113,7 @@ async def _grant_birthright_target(session: AsyncSession, user: User, policy: Bi
         return None
     data = AssignmentCreate(user_id=user.id, resource_type=resource_type, resource_id=resource_id, app_role_external_id=app_role_external_id, assignment_type=assignment_type, justification=f"Birthright policy: {policy.name}", bypass_activation=bypass_activation)
     try:
-        assignment, _ = await create_assignment(session, data, actor_subject, request_id, birthright_policy_id=policy.id)
+        assignment, _ = await create_assignment(session, data, actor_subject, request_id, birthright_policy_id=policy.id, business_role_id=business_role_id, role_assignment_id=role_assignment_id)
         return assignment.id
     except AccessPilotError:
         return None
@@ -196,6 +199,22 @@ async def evaluate_birthright_policies(session: AsyncSession, user_id: UUID, act
                         # reconciled (that stays birthright_policy_id-driven).
                         session.add(AccessPackageAssignment(package_id=resource_id, package_assignment_id=batch_id, assignment_id=granted_id, user_id=user.id))
                         await session.commit()
+                continue
+            if resource_type == "BUSINESS_ROLE":
+                # Mirrors the PACKAGE branch above, but simpler: business_role_id/role_assignment_id are direct
+                # columns on AccessAssignment (see app.services.business_roles.assign_business_role), so no second
+                # provenance table is needed — _grant_birthright_target tags each item straight through. A role
+                # that is no longer ACTIVE (or was deleted) grants nothing, the same safe "matches nothing" default
+                # PACKAGE and SoD's own BUSINESS_ROLE entities already use.
+                role = await session.get(BusinessRole, resource_id)
+                if role is None or role.status != "ACTIVE":
+                    continue
+                items = list((await session.scalars(select(BusinessRoleItem).where(BusinessRoleItem.role_id == resource_id))).all())
+                role_batch_id = uuid4()
+                for item in items:
+                    granted_id = await _grant_birthright_target(session, user, policy, item.resource_type, item.resource_id, item.app_role_external_id, assignment_type, actor_subject, request_id, bypass_activation, business_role_id=resource_id, role_assignment_id=role_batch_id)
+                    if granted_id:
+                        created_ids.append(granted_id)
                 continue
             granted_id = await _grant_birthright_target(session, user, policy, resource_type, resource_id, app_role_external_id, assignment_type, actor_subject, request_id, bypass_activation)
             if granted_id:
@@ -315,7 +334,8 @@ async def recheck_users_for_policy(session: AsyncSession, policy_id: UUID, actor
     return {"users_checked": len(candidates), "granted": granted, "revoked": revoked}
 
 
-_RESOURCE_MODELS = {"GROUP": Group, "ROLE": Role, "APPLICATION": Application, "PACKAGE": AccessPackage}
+_RESOURCE_MODELS = {"GROUP": Group, "ROLE": Role, "APPLICATION": Application, "PACKAGE": AccessPackage, "BUSINESS_ROLE": BusinessRole}
+_NAME_ONLY_RESOURCE_TYPES = ("PACKAGE", "BUSINESS_ROLE")  # no external_id column to also match against
 
 
 async def _resolve_resource_by_key(session: AsyncSession, resource_type: str, key: str) -> tuple[UUID, str]:
@@ -333,7 +353,7 @@ async def _resolve_resource_by_key(session: AsyncSession, resource_type: str, ke
     except (ValueError, TypeError):
         row = None
     if row is None:
-        condition = model.name == key if resource_type == "PACKAGE" else or_(model.external_id == key, model.name == key)
+        condition = model.name == key if resource_type in _NAME_ONLY_RESOURCE_TYPES else or_(model.external_id == key, model.name == key)
         row = (await session.execute(select(model).where(condition))).scalars().first()
     if row is None:
         raise AccessPilotError(f"{resource_type}_NOT_FOUND", f"No {resource_type.lower()} matches '{key}'.", 404)

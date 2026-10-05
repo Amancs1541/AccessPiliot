@@ -64,11 +64,24 @@ _BUILTIN_TITLES = {
     "breakglass_events_24h": "Break-glass events (24h)",
     "activity_timeline": "Platform activity (30 days)",
     "high_signal_events": "High-signal events",
+    "dormant_access": "Dormant access (90+ days)",
 }
 _BUILTIN_KINDS = {
     "active_sessions": "card", "pending_approvals": "card", "open_sod_violations": "card", "breakglass_events_24h": "card",
-    "activity_timeline": "timeseries", "high_signal_events": "list",
+    "activity_timeline": "timeseries", "high_signal_events": "list", "dormant_access": "card",
 }
+
+# "Light role mining" — no sign-in/usage telemetry exists to measure real usage (same honest limitation already
+# documented for INACTIVE_USERS review scope and the dashboard's own stat cards), so DORMANT_ACCESS_DAYS is the
+# best available proxy: real, granted access (status ACTIVE) that was activated this long ago and never touched
+# since. A fixed window baked into the builtin's own identity, matching breakglass_events_24h's convention,
+# rather than a configurable setting that would need its own UI.
+DORMANT_ACCESS_DAYS = 90
+
+
+def _dormant_access_conditions(session_now: Optional[datetime] = None) -> list:
+    cutoff = (session_now or datetime.now(timezone.utc)) - timedelta(days=DORMANT_ACCESS_DAYS)
+    return [AccessAssignment.status == "ACTIVE", AccessAssignment.activated_at.is_not(None), AccessAssignment.activated_at <= cutoff]
 
 
 def default_widgets() -> list[SocWidgetDefinition]:
@@ -134,6 +147,9 @@ async def _compute_builtin(session: AsyncSession, builtin_id: Optional[str]) -> 
     if builtin_id == "high_signal_events":
         rows = [_audit_row(entry, hydrated) for entry, hydrated in await list_audit_logs_by_action(session, SIGNAL_ACTIONS, limit=25)]
         return SocWidgetDataResult(rows=rows)
+    if builtin_id == "dormant_access":
+        value = (await session.execute(select(func.count()).select_from(AccessAssignment).where(*_dormant_access_conditions()))).scalar_one()
+        return SocWidgetDataResult(value=value)
     raise AccessPilotError("UNKNOWN_WIDGET", f"'{builtin_id}' is not a known built-in widget.", 422)
 
 
@@ -204,6 +220,8 @@ def _builtin_drilldown_source(builtin_id: Optional[str]):
         return AuditLog, AuditLog.timestamp, [AuditLog.action.in_(("BREAKGLASS_LOGIN", "BREAKGLASS_ELEVATED")), AuditLog.timestamp >= since]
     if builtin_id == "activity_timeline":
         return AuditLog, AuditLog.timestamp, []
+    if builtin_id == "dormant_access":
+        return AccessAssignment, AccessAssignment.activated_at, _dormant_access_conditions()
     return None
 
 
@@ -219,6 +237,7 @@ async def _format_drilldown_rows(session: AsyncSession, model, rows: list) -> li
             "id": str(row.id), "created_at": row.created_at.isoformat(), "status": row.status,
             "resource_type": row.resource_type, "assignment_type": row.assignment_type,
             "user_display_name": user.display_name if user else None,
+            "activated_at": row.activated_at.isoformat() if row.activated_at else None,
         })
     return result
 

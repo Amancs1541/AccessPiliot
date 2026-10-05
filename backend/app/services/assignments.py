@@ -26,7 +26,7 @@ def to_response(assignment: AccessAssignment, hydrated: dict) -> AssignmentRespo
         fallback_approver_id=assignment.fallback_approver_id, fallback_unlock_at=assignment.fallback_unlock_at,
         bypass_activation=assignment.bypass_activation,
         activated_at=assignment.activated_at, revoked_at=assignment.revoked_at, created_at=assignment.created_at,
-        package_name=hydrated.get("package_name"), sod_exception_expires_at=hydrated.get("sod_exception_expires_at"),
+        package_name=hydrated.get("package_name"), business_role_name=hydrated.get("business_role_name"), sod_exception_expires_at=hydrated.get("sod_exception_expires_at"),
     )
 
 
@@ -70,11 +70,16 @@ async def hydrate_display_fields(session: AsyncSession, assignment: AccessAssign
     package_name = (await session.execute(
         select(AccessPackage.name).join(AccessPackageAssignment, AccessPackageAssignment.package_id == AccessPackage.id).where(AccessPackageAssignment.assignment_id == assignment.id)
     )).scalar_one_or_none()
+    business_role_name = None
+    if assignment.business_role_id is not None:
+        from app.models import BusinessRole
+        business_role = await session.get(BusinessRole, assignment.business_role_id)
+        business_role_name = business_role.name if business_role else None
     # Local import to avoid a circular import at module level — sod.py itself imports from this module directly
     # (create_assignment, revoke_provider_access), so the reverse direction has to stay function-scoped.
     from app.services.sod import get_sod_exception_covering_assignment
     covering_exception = await get_sod_exception_covering_assignment(session, assignment)
-    return {"user_display_name": user.display_name if user else None, "resource_display_name": resource_name, "package_name": package_name, "sod_exception_expires_at": covering_exception.expires_at if covering_exception else None}
+    return {"user_display_name": user.display_name if user else None, "resource_display_name": resource_name, "package_name": package_name, "business_role_name": business_role_name, "sod_exception_expires_at": covering_exception.expires_at if covering_exception else None}
 
 
 async def _grant_provider_access(session: AsyncSession, provider_id: UUID, resource_type: str, target_external_id: str, user_external_id: str, app_role_external_id: Optional[str] = None) -> None:
@@ -191,7 +196,7 @@ async def _supersede_existing_assignment(session: AsyncSession, *, user_id: UUID
     await session.commit()
 
 
-async def create_assignment(session: AsyncSession, data, actor_subject: str, request_id: str, check_sod_at_creation: bool = False, birthright_policy_id: Optional[UUID] = None, group_role_mapping_id: Optional[UUID] = None) -> tuple[AccessAssignment, dict]:
+async def create_assignment(session: AsyncSession, data, actor_subject: str, request_id: str, check_sod_at_creation: bool = False, birthright_policy_id: Optional[UUID] = None, group_role_mapping_id: Optional[UUID] = None, business_role_id: Optional[UUID] = None, role_assignment_id: Optional[UUID] = None) -> tuple[AccessAssignment, dict]:
     target_user = await session.get(User, data.user_id)
     if not target_user:
         raise AccessPilotError("USER_NOT_FOUND", "The user was not found.", 404)
@@ -276,6 +281,8 @@ async def create_assignment(session: AsyncSession, data, actor_subject: str, req
         bypass_activation=bypass_activation,
         birthright_policy_id=birthright_policy_id,
         group_role_mapping_id=group_role_mapping_id,
+        business_role_id=business_role_id,
+        role_assignment_id=role_assignment_id,
         activated_at=now if status == "ACTIVE" else None,
     )
     session.add(assignment)

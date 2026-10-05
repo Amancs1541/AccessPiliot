@@ -49,11 +49,22 @@ async def _package_of(db: AsyncSession, assignment_id):
     return (row[0], row[1]) if row else (None, None)
 
 
+async def _business_role_of(db: AsyncSession, assignment_id):
+    """Unlike PACKAGE (which needs the AccessPackageAssignment join table), a Business Role's provenance is a
+    direct column on AccessAssignment — no join needed."""
+    from app.models import AccessAssignment, BusinessRole
+    assignment = await db.get(AccessAssignment, assignment_id)
+    if not assignment or not assignment.business_role_id:
+        return (None, None)
+    role = await db.get(BusinessRole, assignment.business_role_id)
+    return (assignment.business_role_id, role.name if role else None)
+
+
 async def _granted_via(db: AsyncSession, assignment_id) -> str:
-    """Where this entitlement actually came from: an access package, a birthright policy, a group-role mapping,
-    or (none of those) a direct/manual grant."""
+    """Where this entitlement actually came from: an access package, a business role, a birthright policy, a
+    group-role mapping, or (none of those) a direct/manual grant."""
     from sqlalchemy import select
-    from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, BirthrightPolicy, GroupRoleMapping
+    from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, BirthrightPolicy, BusinessRole, GroupRoleMapping
     package_name = (await db.execute(select(AccessPackage.name).join(AccessPackageAssignment, AccessPackageAssignment.package_id == AccessPackage.id).where(AccessPackageAssignment.assignment_id == assignment_id))).scalar_one_or_none()
     assignment = await db.get(AccessAssignment, assignment_id)
     if package_name:
@@ -61,6 +72,13 @@ async def _granted_via(db: AsyncSession, assignment_id) -> str:
             policy = await db.get(BirthrightPolicy, assignment.birthright_policy_id)
             return f"Package: {package_name} (via birthright{': ' + policy.name if policy else ''})"
         return f"Package: {package_name}"
+    if assignment and assignment.business_role_id:
+        role = await db.get(BusinessRole, assignment.business_role_id)
+        role_name = role.name if role else "Business Role"
+        if assignment.birthright_policy_id:
+            policy = await db.get(BirthrightPolicy, assignment.birthright_policy_id)
+            return f"Business Role: {role_name} (via birthright{': ' + policy.name if policy else ''})"
+        return f"Business Role: {role_name}"
     if assignment and assignment.birthright_policy_id:
         policy = await db.get(BirthrightPolicy, assignment.birthright_policy_id)
         return f"Birthright: {policy.name}" if policy else "Birthright policy"
@@ -76,9 +94,11 @@ async def _hydrate_item(db: AsyncSession, item) -> AccessReviewItemResponse:
     decider = await db.get(User, item.decided_by) if item.decided_by else None
     resource_name = await service._resolve_display_name(db, item.resource_type, item.resource_id, item.app_role_external_id)
     pkg_id, pkg_name = await _package_of(db, item.assignment_id)
+    role_id, role_name = await _business_role_of(db, item.assignment_id)
     return AccessReviewItemResponse(
         id=item.id, campaign_id=item.campaign_id, campaign_name=campaign.name if campaign else None,
         assignment_id=item.assignment_id, user_id=item.user_id, user_display_name=user.display_name if user else None, user_email=user.email if user else None, granted_via=await _granted_via(db, item.assignment_id), package_id=pkg_id, package_name=pkg_name,
+        business_role_id=role_id, business_role_name=role_name,
         resource_type=item.resource_type, resource_id=item.resource_id, resource_display_name=resource_name,
         app_role_external_id=item.app_role_external_id, assignment_status_at_snapshot=item.assignment_status_at_snapshot,
         decision=item.decision, decided_by=item.decided_by, decided_by_display_name=decider.display_name if decider else None,

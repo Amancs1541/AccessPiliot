@@ -9,7 +9,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AccessPilotError
-from app.models import AccessAssignment, AccessPackage, AccessPackageItem, Application, AuditLog, IdentityProvider, Role, SodException, SodExceptionRequest, SodNotification, SodNotificationSettings, SodPolicy, SodPolicyEntity, User, UserGroup
+from app.models import AccessAssignment, AccessPackage, AccessPackageItem, Application, AuditLog, BusinessRole, BusinessRoleItem, IdentityProvider, Role, SodException, SodExceptionRequest, SodNotification, SodNotificationSettings, SodPolicy, SodPolicyEntity, User, UserGroup
 from app.providers.entra import EntraProvider
 from app.providers.graph_client import GraphError
 from app.schemas.assignments import AssignmentCreate
@@ -41,11 +41,14 @@ def _dedupe_entities(entities: list) -> list:
 
 
 async def _expand_entity_to_resource_tuples(session: AsyncSession, entity: SodPolicyEntity) -> list[ResourceTuple]:
-    """PACKAGE entities are resolved live against AccessPackageItem, never cached — editing a package's items (or
-    deleting the package outright, in which case this returns []: "matches nothing", the safe default) is
-    automatically reflected the next time a check runs, no migration/backfill needed."""
+    """PACKAGE and BUSINESS_ROLE entities are resolved live against their own item table, never cached — editing
+    the items (or deleting the package/role outright, in which case this returns []: "matches nothing", the safe
+    default) is automatically reflected the next time a check runs, no migration/backfill needed."""
     if entity.entity_type == "PACKAGE":
         items = list((await session.scalars(select(AccessPackageItem).where(AccessPackageItem.package_id == entity.entity_id))).all())
+        return [(item.resource_type, item.resource_id, item.app_role_external_id) for item in items]
+    if entity.entity_type == "BUSINESS_ROLE":
+        items = list((await session.scalars(select(BusinessRoleItem).where(BusinessRoleItem.role_id == entity.entity_id))).all())
         return [(item.resource_type, item.resource_id, item.app_role_external_id) for item in items]
     return [(entity.entity_type, entity.entity_id, entity.app_role_external_id)]
 
@@ -54,6 +57,9 @@ async def _resolve_entity_display_name(session: AsyncSession, entity: SodPolicyE
     if entity.entity_type == "PACKAGE":
         package = await session.get(AccessPackage, entity.entity_id)
         return (package.name if package else None, package is not None)
+    if entity.entity_type == "BUSINESS_ROLE":
+        role = await session.get(BusinessRole, entity.entity_id)
+        return (role.name if role else None, role is not None)
     try:
         _, name, _ = await _resolve_target(session, entity.entity_type, entity.entity_id)
     except AccessPilotError:

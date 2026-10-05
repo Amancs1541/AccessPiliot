@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AccessPilotError
-from app.models import AccessAssignment, Application, Group, GroupRoleMapping, User, UserGroup
+from app.models import AccessAssignment, Application, BusinessRole, BusinessRoleItem, Group, GroupRoleMapping, User, UserGroup
 from app.schemas.assignments import AssignmentCreate
 from app.schemas.policies import GroupRoleMappingCreate, GroupRoleMappingUpdate
 from app.services.assignments import _app_role_name, _resolve_target, create_assignment, revoke_assignment
@@ -16,7 +16,9 @@ from app.services.birthright import NON_FINAL_ASSIGNMENT_STATUSES
 # Deliberately not GROUP — associating a group with another group would be nested-group membership, a materially
 # different (and more complex, cycle-prone) feature nobody asked for here. "APP ROLE" is APPLICATION with
 # app_role_external_id set; "APP" alone is APPLICATION with it left None (the app's own default-access grant).
-VALID_RESOURCE_TYPES = ("ROLE", "APPLICATION")
+# BUSINESS_ROLE fans out to every item mapped on that role (see evaluate_group_role_mappings_for_user), same as
+# app.services.birthright's own BUSINESS_ROLE action kind.
+VALID_RESOURCE_TYPES = ("ROLE", "APPLICATION", "BUSINESS_ROLE")
 
 
 async def _get_mapping(session: AsyncSession, mapping_id: UUID) -> GroupRoleMapping:
@@ -28,7 +30,11 @@ async def _get_mapping(session: AsyncSession, mapping_id: UUID) -> GroupRoleMapp
 
 async def _hydrate(session: AsyncSession, mapping: GroupRoleMapping) -> dict:
     group = await session.get(Group, mapping.source_group_id)
-    _, resource_name, _ = await _resolve_target(session, mapping.resource_type, mapping.resource_id)
+    if mapping.resource_type == "BUSINESS_ROLE":
+        role = await session.get(BusinessRole, mapping.resource_id)
+        resource_name = role.name if role else "Unknown business role"
+    else:
+        _, resource_name, _ = await _resolve_target(session, mapping.resource_type, mapping.resource_id)
     if mapping.resource_type == "APPLICATION" and mapping.app_role_external_id:
         application = await session.get(Application, mapping.resource_id)
         role_name = _app_role_name(application, mapping.app_role_external_id)
@@ -54,7 +60,12 @@ async def create_group_role_mapping(session: AsyncSession, data: GroupRoleMappin
     group = await session.get(Group, data.source_group_id)
     if group is None:
         raise AccessPilotError("GROUP_NOT_FOUND", "The group was not found.", 404)
-    await _resolve_target(session, data.resource_type, data.resource_id)  # 404s if the target doesn't exist
+    if data.resource_type == "BUSINESS_ROLE":
+        # _resolve_target doesn't know about BUSINESS_ROLE (see app.services.birthright's identical local check).
+        if await session.get(BusinessRole, data.resource_id) is None:
+            raise AccessPilotError("BUSINESS_ROLE_NOT_FOUND", "The business role was not found.", 404)
+    else:
+        await _resolve_target(session, data.resource_type, data.resource_id)  # 404s if the target doesn't exist
     mapping = GroupRoleMapping(source_group_id=data.source_group_id, resource_type=data.resource_type, resource_id=data.resource_id, app_role_external_id=data.app_role_external_id, assignment_type=data.assignment_type)
     session.add(mapping)
     await session.flush()
@@ -108,6 +119,34 @@ async def evaluate_group_role_mappings_for_user(session: AsyncSession, user_id: 
     active_mappings = (await session.execute(select(GroupRoleMapping).where(GroupRoleMapping.status == "ACTIVE", GroupRoleMapping.source_group_id.in_(member_group_ids)))).scalars().all()
     created_ids: list[UUID] = []
     for mapping in active_mappings:
+        if mapping.resource_type == "BUSINESS_ROLE":
+            # Mirrors app.services.birthright's own BUSINESS_ROLE action kind: fan out to every mapped item,
+            # tagging each grant with both group_role_mapping_id (so reconciliation below still works unchanged —
+            # it only ever looks at that column, never resource_type) and business_role_id/role_assignment_id (so
+            # the grant shows up correctly in Assignments, My Approvals, and the role's own Holders view). A role
+            # that's no longer ACTIVE (or was deleted) grants nothing, the safe "matches nothing" default.
+            role = await session.get(BusinessRole, mapping.resource_id)
+            if role is None or role.status != "ACTIVE":
+                continue
+            items = list((await session.scalars(select(BusinessRoleItem).where(BusinessRoleItem.role_id == mapping.resource_id))).all())
+            role_batch_id = uuid4()
+            for item in items:
+                already_held = (await session.execute(select(AccessAssignment.id).where(
+                    AccessAssignment.user_id == user.id,
+                    AccessAssignment.resource_type == item.resource_type,
+                    AccessAssignment.resource_id == item.resource_id,
+                    AccessAssignment.app_role_external_id == item.app_role_external_id,
+                    AccessAssignment.status.notin_(NON_FINAL_ASSIGNMENT_STATUSES),
+                ))).scalars().first()
+                if already_held:
+                    continue
+                data = AssignmentCreate(user_id=user.id, resource_type=item.resource_type, resource_id=item.resource_id, app_role_external_id=item.app_role_external_id, assignment_type=mapping.assignment_type, justification=f"Group mapping: Business Role {role.name}", bypass_activation=bypass_activation)
+                try:
+                    assignment, _ = await create_assignment(session, data, actor_subject, request_id, group_role_mapping_id=mapping.id, business_role_id=mapping.resource_id, role_assignment_id=role_batch_id)
+                    created_ids.append(assignment.id)
+                except AccessPilotError:
+                    continue
+            continue
         already_held = (await session.execute(select(AccessAssignment.id).where(
             AccessAssignment.user_id == user.id,
             AccessAssignment.resource_type == mapping.resource_type,

@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Bot, Box, Check, ChevronLeft, ChevronRight, Clock3, Cloud, Copy, Database, ExternalLink, FileCheck2, FolderKanban, Gauge, GitBranch, Image, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Lock, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldAlert, ShieldCheck, SlidersHorizontal, UploadCloud, UserRound, Users, UserX, X } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Bot, Box, Check, ChevronLeft, ChevronRight, Clock3, Cloud, Copy, Database, ExternalLink, FileCheck2, FolderKanban, Gauge, GitBranch, IdCard, Image, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Lock, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldAlert, ShieldCheck, SlidersHorizontal, UploadCloud, UserRound, Users, UserX, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { currentUser, policies, type RequestStatus, type Role } from './mock';
 import { mockService, useMockState } from './mockService';
@@ -26,6 +26,7 @@ interface ApiUserAccessItem { id: string | null; resource_type: string; resource
 interface ApiUserLicense { sku_id: string; name: string; }
 interface ApiUserAccessSummary { assignments: ApiUserAccessItem[]; licenses: ApiUserLicense[]; }
 interface ApiPackageBatch { package_assignment_id: string; package_id: string; package_name: string; user_id: string; assignment_ids: string[]; }
+interface ApiRoleBatch { role_assignment_id: string; role_id: string; role_name: string; user_id: string; assignment_ids: string[]; }
 interface DashboardAdmin { users: number; groups: number; roles: number; privilegedRoles: number; activeSessions: number; pendingRequests: number; expiringAccess: number; provider: { id: string; name: string; status: string; lastSyncAt: string | null } | null; lastSync: { id: string; status: string; startedAt: string; completedAt: string | null; usersProcessed: number; groupsProcessed: number; rolesProcessed: number; errorsCount: number } | null; }
 interface ApiActivationTimeline { days: number; series: { date: string; count: number }[]; }
 interface ApiUserAccessSegments { permanentActive: number; eligible: number; }
@@ -121,6 +122,7 @@ const nav = [
   { label: 'Approvals', icon: Check, to: '/approvals', roles: ['user','admin'] },
   { label: 'My Access Reviews', icon: FileCheck2, to: '/my-access-reviews', roles: ['user','admin'] },
   { label: 'My Packages', icon: Box, to: '/my-packages', roles: ['user','admin'] },
+  { label: 'My Business Roles', icon: IdCard, to: '/my-business-roles', roles: ['user','admin'] },
   { label: 'Profile', icon: UserRound, to: '/profile', roles: ['user','admin'] },
   { label: 'Users', icon: Users, to: '/admin/users', roles: ['admin'], section: 'ADMINISTRATION' },
   { label: 'Org Chart', icon: GitBranch, to: '/admin/org-chart', roles: ['admin'] },
@@ -129,6 +131,7 @@ const nav = [
   { label: 'Access Requests', icon: FolderKanban, to: '/admin/access-requests', roles: ['admin'], section: 'ACCESS MANAGEMENT' },
   { label: 'Assignments', icon: KeyRound, to: '/admin/assignments', roles: ['admin'] },
   { label: 'Access Packages', icon: Box, to: '/admin/access-packages', roles: ['admin'] },
+  { label: 'Business Roles', icon: IdCard, to: '/admin/business-roles', roles: ['admin'] },
   { label: 'Policies', icon: SlidersHorizontal, to: '/admin/policies', roles: ['admin'], section: 'GOVERNANCE' },
   { label: 'Privileged/Test Activity', icon: ShieldCheck, to: '/admin/privileged-accounts', roles: ['admin'] },
   { label: 'Audit Logs', icon: BookOpen, to: '/admin/audit', roles: ['admin'] },
@@ -168,7 +171,7 @@ function App() {
   if (auth.breakglassActive && !auth.breakglassElevated) return <BreakGlassDashboard />;
   const role = auth.authConfigured ? auth.role : mockRole;
   const changeRole = (nextRole: Role) => { localStorage.setItem('accesspilot.mockRole', nextRole); setMockRole(nextRole); };
-  return <IdleGuard><Shell role={role} setRole={changeRole}><Routes><Route path="/" element={<Navigate to="/dashboard" replace />} /><Route path="/dashboard" element={<Dashboard role={role} />} /><Route path="/my-access" element={<MyAccess />} /><Route path="/request-access" element={<RequestAccess />} /><Route path="/request-packages" element={<RequestPackagesPage />} /><Route path="/my-requests" element={<Requests mine />} /><Route path="/approvals" element={<MyApprovalsPage />} /><Route path="/profile" element={<Profile />} /><Route path="/admin/users" element={<AdminOnly role={role}><UsersPage /></AdminOnly>} /><Route path="/admin/users/:id" element={<AdminOnly role={role}><UserDetail /></AdminOnly>} /><Route path="/admin/org-chart" element={<AdminOnly role={role}><OrgChartPage /></AdminOnly>} /><Route path="/admin/groups" element={<AdminOnly role={role}><GroupsPage /></AdminOnly>} /><Route path="/admin/groups/:id" element={<AdminOnly role={role}><GroupDetail /></AdminOnly>} /><Route path="/admin/roles" element={<AdminOnly role={role}><RolesPage /></AdminOnly>} /><Route path="/admin/access-requests" element={<AdminOnly role={role}><Requests /></AdminOnly>} /><Route path="/admin/access-requests/:id" element={<AdminOnly role={role}><RequestDetailInteractive /></AdminOnly>} /><Route path="/admin/assignments" element={<AdminOnly role={role}><AssignmentsInteractive /></AdminOnly>} /><Route path="/admin/access-packages" element={<AdminOnly role={role}><AccessPackagesInteractive /></AdminOnly>} /><Route path="/admin/policies" element={<AdminOnly role={role}><PoliciesPage /></AdminOnly>} /><Route path="/admin/privileged-accounts" element={<AdminOnly role={role}><PrivilegedAccountActivityPage /></AdminOnly>} /><Route path="/admin/joiners" element={<AdminOnly role={role}><JoinersPage /></AdminOnly>} /><Route path="/admin/movers" element={<AdminOnly role={role}><MoversPage /></AdminOnly>} /><Route path="/admin/leavers" element={<AdminOnly role={role}><LeaversPage /></AdminOnly>} /><Route path="/admin/access-reviews" element={<AdminOnly role={role}><AccessReviewsPage /></AdminOnly>} /><Route path="/admin/access-reviews/:id" element={<AdminOnly role={role}><AccessReviewDetailPage /></AdminOnly>} /><Route path="/my-packages" element={<MyPackagesPage />} /><Route path="/my-access-reviews" element={<MyAccessReviewsPage />} /><Route path="/admin/audit" element={<AdminOnly role={role}><AuditPage /></AdminOnly>} /><Route path="/admin/providers" element={<AdminOnly role={role}><ProvidersPage /></AdminOnly>} /><Route path="/admin/sync" element={<AdminOnly role={role}><SyncPage /></AdminOnly>} /><Route path="/admin/onboarding" element={<AdminOnly role={role}><OnboardingPage /></AdminOnly>} /><Route path="/admin/security" element={<AdminOnly role={role}><SecurityPage /></AdminOnly>} /><Route path="/admin/branding" element={<AdminOnly role={role}><BrandingPage /></AdminOnly>} /><Route path="/admin/sod" element={auth.isSodAdmin ? <SodPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/sod/configuration" element={auth.isSodAdmin ? <SodConfigurationPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/soc" element={auth.isSocAdmin ? <SocDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health" element={auth.isServerAdmin ? <ServerHealthDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health/troubleshooting" element={auth.isServerAdmin ? <TroubleshootingDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi" element={auth.isNhiAdmin ? <NhiPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi/:id" element={auth.isNhiAdmin ? <NhiDetailPage /> : <Navigate to="/dashboard" replace />} /><Route path="*" element={<Navigate to="/dashboard" replace />} /></Routes></Shell></IdleGuard>;
+  return <IdleGuard><Shell role={role} setRole={changeRole}><Routes><Route path="/" element={<Navigate to="/dashboard" replace />} /><Route path="/dashboard" element={<Dashboard role={role} />} /><Route path="/my-access" element={<MyAccess />} /><Route path="/request-access" element={<RequestAccess />} /><Route path="/request-packages" element={<RequestPackagesPage />} /><Route path="/my-requests" element={<Requests mine />} /><Route path="/approvals" element={<MyApprovalsPage />} /><Route path="/profile" element={<Profile />} /><Route path="/admin/users" element={<AdminOnly role={role}><UsersPage /></AdminOnly>} /><Route path="/admin/users/:id" element={<AdminOnly role={role}><UserDetail /></AdminOnly>} /><Route path="/admin/org-chart" element={<AdminOnly role={role}><OrgChartPage /></AdminOnly>} /><Route path="/admin/groups" element={<AdminOnly role={role}><GroupsPage /></AdminOnly>} /><Route path="/admin/groups/:id" element={<AdminOnly role={role}><GroupDetail /></AdminOnly>} /><Route path="/admin/roles" element={<AdminOnly role={role}><RolesPage /></AdminOnly>} /><Route path="/admin/access-requests" element={<AdminOnly role={role}><Requests /></AdminOnly>} /><Route path="/admin/access-requests/:id" element={<AdminOnly role={role}><RequestDetailInteractive /></AdminOnly>} /><Route path="/admin/assignments" element={<AdminOnly role={role}><AssignmentsInteractive /></AdminOnly>} /><Route path="/admin/access-packages" element={<AdminOnly role={role}><AccessPackagesInteractive /></AdminOnly>} /><Route path="/admin/business-roles" element={<AdminOnly role={role}><BusinessRolesPage /></AdminOnly>} /><Route path="/admin/policies" element={<AdminOnly role={role}><PoliciesPage /></AdminOnly>} /><Route path="/admin/privileged-accounts" element={<AdminOnly role={role}><PrivilegedAccountActivityPage /></AdminOnly>} /><Route path="/admin/joiners" element={<AdminOnly role={role}><JoinersPage /></AdminOnly>} /><Route path="/admin/movers" element={<AdminOnly role={role}><MoversPage /></AdminOnly>} /><Route path="/admin/leavers" element={<AdminOnly role={role}><LeaversPage /></AdminOnly>} /><Route path="/admin/access-reviews" element={<AdminOnly role={role}><AccessReviewsPage /></AdminOnly>} /><Route path="/admin/access-reviews/:id" element={<AdminOnly role={role}><AccessReviewDetailPage /></AdminOnly>} /><Route path="/my-packages" element={<MyPackagesPage />} /><Route path="/my-business-roles" element={<MyBusinessRolesPage />} /><Route path="/my-access-reviews" element={<MyAccessReviewsPage />} /><Route path="/admin/audit" element={<AdminOnly role={role}><AuditPage /></AdminOnly>} /><Route path="/admin/providers" element={<AdminOnly role={role}><ProvidersPage /></AdminOnly>} /><Route path="/admin/sync" element={<AdminOnly role={role}><SyncPage /></AdminOnly>} /><Route path="/admin/onboarding" element={<AdminOnly role={role}><OnboardingPage /></AdminOnly>} /><Route path="/admin/security" element={<AdminOnly role={role}><SecurityPage /></AdminOnly>} /><Route path="/admin/branding" element={<AdminOnly role={role}><BrandingPage /></AdminOnly>} /><Route path="/admin/sod" element={auth.isSodAdmin ? <SodPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/sod/configuration" element={auth.isSodAdmin ? <SodConfigurationPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/soc" element={auth.isSocAdmin ? <SocDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health" element={auth.isServerAdmin ? <ServerHealthDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health/troubleshooting" element={auth.isServerAdmin ? <TroubleshootingDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi" element={auth.isNhiAdmin ? <NhiPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi/:id" element={auth.isNhiAdmin ? <NhiDetailPage /> : <Navigate to="/dashboard" replace />} /><Route path="*" element={<Navigate to="/dashboard" replace />} /></Routes></Shell></IdleGuard>;
 }
 function SignInScreen() {
   const auth = useAuth();
@@ -296,17 +299,17 @@ function BrandingPage() {
 }
 interface SodEntityRow { entity_type: string; entity_id: string; app_role_external_id: string }
 const emptySodEntity: SodEntityRow = { entity_type: 'GROUP', entity_id: '', app_role_external_id: '' };
-function SodEntityPicker({ rows, groups, roles, applications, packages, onAdd, onRemove, onUpdate }: {
-  rows: SodEntityRow[]; groups: ApiGroup[] | null; roles: ApiRole[] | null; applications: ApiApplication[] | null; packages: ApiPackage[] | null;
+function SodEntityPicker({ rows, groups, roles, applications, packages, businessRoles, onAdd, onRemove, onUpdate }: {
+  rows: SodEntityRow[]; groups: ApiGroup[] | null; roles: ApiRole[] | null; applications: ApiApplication[] | null; packages: ApiPackage[] | null; businessRoles: ApiBusinessRole[] | null;
   onAdd: () => void; onRemove: (index: number) => void; onUpdate: (index: number, patch: Partial<SodEntityRow>) => void;
 }) {
   return <div>
     {rows.map((row, index) => {
-      const options: { id: string; name: string }[] = row.entity_type === 'GROUP' ? (groups || []) : row.entity_type === 'ROLE' ? (roles || []) : row.entity_type === 'APPLICATION' ? (applications || []) : (packages || []);
+      const options: { id: string; name: string }[] = row.entity_type === 'GROUP' ? (groups || []) : row.entity_type === 'ROLE' ? (roles || []) : row.entity_type === 'APPLICATION' ? (applications || []) : row.entity_type === 'BUSINESS_ROLE' ? (businessRoles || []) : (packages || []);
       const selectedApplication = row.entity_type === 'APPLICATION' ? (applications || []).find(a => a.id === row.entity_id) : null;
       return <div key={index} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
         <select className="select" value={row.entity_type} onChange={event => onUpdate(index, { entity_type: event.target.value, entity_id: '', app_role_external_id: '' })}>
-          <option value="GROUP">Group</option><option value="ROLE">Role</option><option value="APPLICATION">Application</option><option value="PACKAGE">Access Package</option>
+          <option value="GROUP">Group</option><option value="ROLE">Role</option><option value="APPLICATION">Application</option><option value="PACKAGE">Access Package</option><option value="BUSINESS_ROLE">Business Role</option>
         </select>
         <select className="select" value={row.entity_id} onChange={event => onUpdate(index, { entity_id: event.target.value })}>
           <option value="">Select...</option>
@@ -333,6 +336,7 @@ function SodPage() {
   const { data: roles } = useApiResource<ApiRole[]>('/api/v1/roles');
   const { data: applications } = useApiResource<ApiApplication[]>('/api/v1/applications');
   const { data: packages } = useApiResource<ApiPackage[]>('/api/v1/packages');
+  const { data: businessRoles } = useApiResource<ApiBusinessRole[]>('/api/v1/business-roles');
   const { data: activity } = useApiResource<ApiSodActivityEntry[]>('/api/v1/sod/activity');
   const { data: exceptions, reload: reloadExceptions } = useApiResource<ApiSodException[]>('/api/v1/sod/exceptions');
   const { data: exceptionRequests, reload: reloadExceptionRequests } = useApiResource<ApiSodExceptionRequest[]>('/api/v1/sod/exception-requests');
@@ -447,9 +451,9 @@ function SodPage() {
       <label className="key" style={{ display: 'block', marginBottom: 14, maxWidth: 420 }}><span>Description</span><input className="select" style={{ width: '100%' }} value={form.description} onChange={event => setForm({ ...form, description: event.target.value })} /></label>
       <label className="key" style={{ display: 'block', marginBottom: 20, maxWidth: 220 }}><span>Severity</span><select className="select" style={{ width: '100%' }} value={form.severity} onChange={event => setForm({ ...form, severity: event.target.value })}><option value="LOW">Low</option><option value="MEDIUM">Medium</option><option value="HIGH">High</option><option value="CRITICAL">Critical</option></select></label>
       <div className="key" style={{ marginBottom: 8 }}><span>Side A — holding anything here...</span></div>
-      <SodEntityPicker rows={form.sideA} groups={groups} roles={roles} applications={applications} packages={packages} onAdd={() => addEntity('sideA')} onRemove={i => removeEntity('sideA', i)} onUpdate={(i, patch) => updateEntity('sideA', i, patch)} />
+      <SodEntityPicker rows={form.sideA} groups={groups} roles={roles} applications={applications} packages={packages} businessRoles={businessRoles} onAdd={() => addEntity('sideA')} onRemove={i => removeEntity('sideA', i)} onUpdate={(i, patch) => updateEntity('sideA', i, patch)} />
       <div className="key" style={{ margin: '18px 0 8px' }}><span>...conflicts with holding anything here (Side B)</span></div>
-      <SodEntityPicker rows={form.sideB} groups={groups} roles={roles} applications={applications} packages={packages} onAdd={() => addEntity('sideB')} onRemove={i => removeEntity('sideB', i)} onUpdate={(i, patch) => updateEntity('sideB', i, patch)} />
+      <SodEntityPicker rows={form.sideB} groups={groups} roles={roles} applications={applications} packages={packages} businessRoles={businessRoles} onAdd={() => addEntity('sideB')} onRemove={i => removeEntity('sideB', i)} onUpdate={(i, patch) => updateEntity('sideB', i, patch)} />
       {message && <div className="notice" style={{ margin: '14px 0' }}>{message}</div>}
       <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
         <button className="btn btn-primary" disabled={saving} onClick={submit}>{saving ? 'Saving...' : 'Save policy'}</button>
@@ -807,7 +811,7 @@ function SocDashboard() {
               <div className="soc-event-time" style={{ marginTop: 4 }}>Holds: {(row.side_a as string[]).join(', ')} + {(row.side_b as string[]).join(', ')}{row.exception_active && row.exception_expires_at ? ` — exception expires ${formatDate(row.exception_expires_at, timezone)}` : ''}</div>
             </div> : row.action
               ? <div className="soc-event-main"><strong>{row.action.replace(/_/g, ' ')}</strong> — {row.actor_display_name || 'System'}{row.target_user_display_name ? ` → ${row.target_user_display_name}` : ''}</div>
-              : <div className="soc-event-main"><strong>{row.status}</strong> — {row.resource_type}{row.user_display_name ? ` · ${row.user_display_name}` : ''}</div>}
+              : <div className="soc-event-main"><strong>{row.status}</strong> — {row.resource_type}{row.user_display_name ? ` · ${row.user_display_name}` : ''}{row.activated_at ? ` · activated ${formatDate(row.activated_at, timezone)}` : ''}</div>}
             {!row.policy_name && <div className="soc-event-time">{formatDateTime(row.timestamp || row.created_at, timezone)}</div>}
           </div>)}
         </div>
@@ -2184,7 +2188,7 @@ function RequestPackagesPage() {
     <TablePanel toolbar={undefined}>{loading ? <div className="empty">Loading packages...</div> : error ? <div className="empty">{error}</div> : !packages || packages.length === 0 ? <div className="empty">No access packages are available for you to request.</div> : <table><thead><tr><th>Name</th><th>Description</th><th>Includes</th><th></th></tr></thead><tbody>{packages.map(p => <tr key={p.id}><td className="user-name">{p.name}</td><td>{p.description || '—'}</td><td>{p.items.map(i => i.resource_display_name || i.resource_id).join(', ')}</td><td><button className="btn btn-primary" onClick={() => openRequest(p)}>Request</button></td></tr>)}</tbody></table>}</TablePanel>
   </Page>;
 }
-interface ApiAssignment { id: string; user_id: string; user_display_name: string | null; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; assignment_type: string; status: string; start_time: string | null; expiration_time: string | null; justification: string | null; requested_by: string | null; approved_by: string | null; bypass_activation: boolean; activated_at: string | null; created_at: string; package_name: string | null; sod_exception_expires_at: string | null; }
+interface ApiAssignment { id: string; user_id: string; user_display_name: string | null; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; assignment_type: string; status: string; start_time: string | null; expiration_time: string | null; justification: string | null; requested_by: string | null; approved_by: string | null; bypass_activation: boolean; activated_at: string | null; created_at: string; package_name: string | null; business_role_name: string | null; sod_exception_expires_at: string | null; }
 interface ApiActivationPolicy { max_self_activation_hours: number; }
 function todayDateValue(date: Date) { const pad = (n: number) => String(n).padStart(2, '0'); return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`; }
 const emptyAssignmentForm = { user_id: '', resource_type: 'GROUP', resource_id: '', app_role_external_id: '', assignment_type: 'PERMANENT', start_date: '', start_clock: '', end_date: '', end_clock: '', approver_id: '', bypass_activation: false, justification: '' };
@@ -2198,6 +2202,7 @@ function AssignmentsInteractive() {
   const { data: applications, reload: reloadApplications } = useApiResource<ApiApplication[]>('/api/v1/applications');
   const { data: packages, reload: reloadPackages } = useApiResource<ApiPackage[]>('/api/v1/packages');
   const { data: batches } = useApiResource<ApiPackageBatch[]>('/api/v1/packages/assignment-batches');
+  const { data: roleBatches } = useApiResource<ApiRoleBatch[]>('/api/v1/business-roles/assignment-batches');
   const [searchParams, setSearchParams] = useSearchParams();
   const search = searchParams.get('q') || '';
   const statusFilter = searchParams.get('status') || '';
@@ -2219,6 +2224,7 @@ function AssignmentsInteractive() {
   const selectedApplication = form.resource_type === 'APPLICATION' ? (applications || []).find(a => a.id === form.resource_id) : undefined;
   const today = todayDateValue(new Date());
   const batchByAssignmentId = useMemo(() => { const map = new Map<string, ApiPackageBatch>(); (batches || []).forEach(b => b.assignment_ids.forEach(id => map.set(id, b))); return map; }, [batches]);
+  const roleBatchByAssignmentId = useMemo(() => { const map = new Map<string, ApiRoleBatch>(); (roleBatches || []).forEach(b => b.assignment_ids.forEach(id => map.set(id, b))); return map; }, [roleBatches]);
   const filteredAssignments = useMemo(() => {
     const now = Date.now();
     return (assignmentList || []).filter(a => {
@@ -2236,18 +2242,30 @@ function AssignmentsInteractive() {
     });
   }, [assignmentList, statusFilter, expiringFilter, search]);
   const groupedRows = useMemo(() => {
-    const rows: Array<{ kind: 'single'; assignment: ApiAssignment } | { kind: 'batch'; batch: ApiPackageBatch; assignments: ApiAssignment[] }> = [];
+    const rows: Array<{ kind: 'single'; assignment: ApiAssignment } | { kind: 'batch'; batch: ApiPackageBatch; assignments: ApiAssignment[] } | { kind: 'roleBatch'; batch: ApiRoleBatch; assignments: ApiAssignment[] }> = [];
     const seenBatches = new Set<string>();
+    const seenRoleBatches = new Set<string>();
     filteredAssignments.forEach(a => {
       const batch = batchByAssignmentId.get(a.id);
-      if (!batch) { rows.push({ kind: 'single', assignment: a }); return; }
-      if (seenBatches.has(batch.package_assignment_id)) return;
-      seenBatches.add(batch.package_assignment_id);
-      const assignments = filteredAssignments.filter(x => batchByAssignmentId.get(x.id)?.package_assignment_id === batch.package_assignment_id);
-      rows.push({ kind: 'batch', batch, assignments });
+      if (batch) {
+        if (seenBatches.has(batch.package_assignment_id)) return;
+        seenBatches.add(batch.package_assignment_id);
+        const assignments = filteredAssignments.filter(x => batchByAssignmentId.get(x.id)?.package_assignment_id === batch.package_assignment_id);
+        rows.push({ kind: 'batch', batch, assignments });
+        return;
+      }
+      const roleBatch = roleBatchByAssignmentId.get(a.id);
+      if (roleBatch) {
+        if (seenRoleBatches.has(roleBatch.role_assignment_id)) return;
+        seenRoleBatches.add(roleBatch.role_assignment_id);
+        const assignments = filteredAssignments.filter(x => roleBatchByAssignmentId.get(x.id)?.role_assignment_id === roleBatch.role_assignment_id);
+        rows.push({ kind: 'roleBatch', batch: roleBatch, assignments });
+        return;
+      }
+      rows.push({ kind: 'single', assignment: a });
     });
     return rows;
-  }, [filteredAssignments, batchByAssignmentId]);
+  }, [filteredAssignments, batchByAssignmentId, roleBatchByAssignmentId]);
   const toggleBatch = (id: string) => setExpandedBatches(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
   const isRevocable = (status: string) => !['REJECTED', 'REVOKED', 'EXPIRED'].includes(status);
 
@@ -2328,6 +2346,21 @@ function AssignmentsInteractive() {
     } finally { setActioningId(null); }
   };
 
+  const decideRoleBatch = async (batch: ApiRoleBatch, decision: 'approve' | 'reject') => {
+    if (decision === 'reject' && !window.confirm(`Reject all ${batch.assignment_ids.length} items in "${batch.role_name}"?`)) return;
+    let justification: string | null = null;
+    if (decision === 'approve') {
+      justification = window.prompt(`Justification for approving all ${batch.assignment_ids.length} items in "${batch.role_name}" (required):`);
+      if (justification === null) return;
+      if (justification.trim().length < 3) { window.alert('A justification (at least 3 characters) is required to approve.'); return; }
+    }
+    setActioningId(batch.role_assignment_id);
+    try {
+      await Promise.all(batch.assignment_ids.map(id => auth.apiRequest(`/api/v1/assignments/${id}/${decision}`, { method: 'POST', body: decision === 'approve' ? JSON.stringify({ justification: justification!.trim() }) : undefined })));
+      reload();
+    } finally { setActioningId(null); }
+  };
+
   const revoke = async (assignmentId: string, label: string) => {
     const justification = window.prompt(`Revoke "${label}"? This works no matter its current status. Justification (required):`);
     if (justification === null) return;
@@ -2337,6 +2370,17 @@ function AssignmentsInteractive() {
       const response = await auth.apiRequest(`/api/v1/assignments/${assignmentId}/revoke`, { method: 'POST', body: JSON.stringify({ justification: justification.trim() }) });
       if (response.ok) reload();
       else { const body = await response.json().catch(() => null); window.alert(body?.error?.message || 'Unable to revoke this assignment.'); }
+    } finally { setActioningId(null); }
+  };
+
+  const revokeRoleBatch = async (batch: ApiRoleBatch) => {
+    const justification = window.prompt(`Revoke all ${batch.assignment_ids.length} items in "${batch.role_name}"? Justification (required):`);
+    if (justification === null) return;
+    if (justification.trim().length < 3) { window.alert('A justification (at least 3 characters) is required to revoke.'); return; }
+    setActioningId(batch.role_assignment_id);
+    try {
+      await Promise.all(batch.assignment_ids.map(id => auth.apiRequest(`/api/v1/assignments/${id}/revoke`, { method: 'POST', body: JSON.stringify({ justification: justification.trim() }) })));
+      reload();
     } finally { setActioningId(null); }
   };
 
@@ -2385,7 +2429,7 @@ function AssignmentsInteractive() {
       <div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setOpen(false)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Creating...' : 'Create assignment'}</button></div>
     </form>}
     <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12}}><label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:'#52656d',cursor:'pointer'}}><input type="checkbox" checked={expiringFilter === '24h'} onChange={event => setExpiringFilter(event.target.checked)}/> Expiring within 24 hours</label></div>
-    <TablePanel toolbar={<Toolbar placeholder="Search assignments" searchValue={search} onSearchChange={setSearch} filterLabel="All statuses" filterValue={statusFilter} onFilterChange={setStatusFilter} filterOptions={statusOptions}/>}>{loading ? <div className="empty">Loading assignments...</div> : error ? <div className="empty">{error}</div> : !assignmentList || assignmentList.length === 0 ? <div className="empty">No assignments found.</div> : groupedRows.length === 0 ? <div className="empty">No assignments match this filter.</div> : <table><thead><tr><th>User</th><th>Resource</th><th>Type</th><th>Duration</th><th>Status</th><th>Start</th><th>Expiration</th><th></th></tr></thead><tbody>{groupedRows.map(row => row.kind === 'single' ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.user_display_name || row.assignment.user_id}</td><td>{row.assignment.resource_display_name || row.assignment.resource_id}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.assignment_type}</td><td><StatusBadge status={row.assignment.status}/></td><td>{row.assignment.start_time ? formatDateTime(row.assignment.start_time, timezone) : '—'}</td><td>{row.assignment.expiration_time ? formatDateTime(row.assignment.expiration_time, timezone) : '—'}</td><td>{isRevocable(row.assignment.status) ? <span style={{display:'flex',gap:5}}>{row.assignment.status === 'PENDING_APPROVAL' && <><button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'approve')} aria-label="Approve"><Check size={14}/></button><button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'reject')} aria-label="Reject"><X size={14}/></button></>}<button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void revoke(row.assignment.id, row.assignment.resource_display_name || 'this assignment')} aria-label="Revoke">Revoke</button></span> : <span className="footer-note">No actions</span>}</td></tr> : <>
+    <TablePanel toolbar={<Toolbar placeholder="Search assignments" searchValue={search} onSearchChange={setSearch} filterLabel="All statuses" filterValue={statusFilter} onFilterChange={setStatusFilter} filterOptions={statusOptions}/>}>{loading ? <div className="empty">Loading assignments...</div> : error ? <div className="empty">{error}</div> : !assignmentList || assignmentList.length === 0 ? <div className="empty">No assignments found.</div> : groupedRows.length === 0 ? <div className="empty">No assignments match this filter.</div> : <table><thead><tr><th>User</th><th>Resource</th><th>Type</th><th>Duration</th><th>Status</th><th>Start</th><th>Expiration</th><th></th></tr></thead><tbody>{groupedRows.map(row => row.kind === 'single' ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.user_display_name || row.assignment.user_id}</td><td>{row.assignment.resource_display_name || row.assignment.resource_id}{row.assignment.business_role_name && <div className="user-email">🏷 {row.assignment.business_role_name}</div>}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.assignment_type}</td><td><StatusBadge status={row.assignment.status}/></td><td>{row.assignment.start_time ? formatDateTime(row.assignment.start_time, timezone) : '—'}</td><td>{row.assignment.expiration_time ? formatDateTime(row.assignment.expiration_time, timezone) : '—'}</td><td>{isRevocable(row.assignment.status) ? <span style={{display:'flex',gap:5}}>{row.assignment.status === 'PENDING_APPROVAL' && <><button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'approve')} aria-label="Approve"><Check size={14}/></button><button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'reject')} aria-label="Reject"><X size={14}/></button></>}<button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void revoke(row.assignment.id, row.assignment.resource_display_name || 'this assignment')} aria-label="Revoke">Revoke</button></span> : <span className="footer-note">No actions</span>}</td></tr> : row.kind === 'batch' ? <>
       <tr key={row.batch.package_assignment_id} style={{cursor:'pointer'}} onClick={() => toggleBatch(row.batch.package_assignment_id)}>
         <td className="user-name">{row.assignments[0]?.user_display_name || row.batch.user_id}</td>
         <td>📦 {row.batch.package_name} <span className="footer-note">({row.assignments.length} items)</span></td>
@@ -2397,6 +2441,18 @@ function AssignmentsInteractive() {
         <td>{row.assignments.some(a => isRevocable(a.status)) ? <span style={{display:'flex',gap:5}} onClick={event => event.stopPropagation()}>{row.assignments.some(a => a.status === 'PENDING_APPROVAL') && <><button className="btn" disabled={actioningId === row.batch.package_assignment_id} onClick={() => void decideBatch(row.batch, 'approve')} aria-label="Approve all"><Check size={14}/></button><button className="btn" disabled={actioningId === row.batch.package_assignment_id} onClick={() => void decideBatch(row.batch, 'reject')} aria-label="Reject all"><X size={14}/></button></>}<button className="btn" disabled={actioningId === row.batch.package_assignment_id} onClick={() => void revokeBatch(row.batch)} aria-label="Revoke all">Revoke all</button></span> : <span className="footer-note">No actions</span>}</td>
       </tr>
       {expandedBatches.has(row.batch.package_assignment_id) && row.assignments.map(a => <tr key={a.id} style={{opacity:0.8}}><td className="user-name">↳</td><td>{a.resource_display_name || a.resource_id}</td><td>{a.resource_type}</td><td>{a.assignment_type}</td><td><StatusBadge status={a.status}/></td><td>{a.start_time ? formatDateTime(a.start_time, timezone) : '—'}</td><td>{a.expiration_time ? formatDateTime(a.expiration_time, timezone) : '—'}</td><td>{isRevocable(a.status) ? <span style={{display:'flex',gap:5}}>{a.status === 'PENDING_APPROVAL' && <><button className="btn" disabled={actioningId === a.id} onClick={() => void decide(a.id, 'approve')} aria-label="Approve"><Check size={14}/></button><button className="btn" disabled={actioningId === a.id} onClick={() => void decide(a.id, 'reject')} aria-label="Reject"><X size={14}/></button></>}<button className="btn" disabled={actioningId === a.id} onClick={() => void revoke(a.id, a.resource_display_name || 'this assignment')} aria-label="Revoke">Revoke</button></span> : <span className="footer-note">No actions</span>}</td></tr>)}
+    </> : <>
+      <tr key={row.batch.role_assignment_id} style={{cursor:'pointer'}} onClick={() => toggleBatch(row.batch.role_assignment_id)}>
+        <td className="user-name">{row.assignments[0]?.user_display_name || row.batch.user_id}</td>
+        <td>🏷 {row.batch.role_name} <span className="footer-note">({row.assignments.length} items)</span></td>
+        <td>BUSINESS ROLE</td>
+        <td>{row.assignments[0]?.assignment_type}</td>
+        <td><StatusBadge status={new Set(row.assignments.map(a => a.status)).size === 1 ? row.assignments[0].status : 'MIXED'}/></td>
+        <td>{row.assignments[0]?.start_time ? formatDateTime(row.assignments[0].start_time!, timezone) : '—'}</td>
+        <td>{row.assignments[0]?.expiration_time ? formatDateTime(row.assignments[0].expiration_time!, timezone) : '—'}</td>
+        <td>{row.assignments.some(a => isRevocable(a.status)) ? <span style={{display:'flex',gap:5}} onClick={event => event.stopPropagation()}>{row.assignments.some(a => a.status === 'PENDING_APPROVAL') && <><button className="btn" disabled={actioningId === row.batch.role_assignment_id} onClick={() => void decideRoleBatch(row.batch, 'approve')} aria-label="Approve all"><Check size={14}/></button><button className="btn" disabled={actioningId === row.batch.role_assignment_id} onClick={() => void decideRoleBatch(row.batch, 'reject')} aria-label="Reject all"><X size={14}/></button></>}<button className="btn" disabled={actioningId === row.batch.role_assignment_id} onClick={() => void revokeRoleBatch(row.batch)} aria-label="Revoke all">Revoke all</button></span> : <span className="footer-note">No actions</span>}</td>
+      </tr>
+      {expandedBatches.has(row.batch.role_assignment_id) && row.assignments.map(a => <tr key={a.id} style={{opacity:0.8}}><td className="user-name">↳</td><td>{a.resource_display_name || a.resource_id}</td><td>{a.resource_type}</td><td>{a.assignment_type}</td><td><StatusBadge status={a.status}/></td><td>{a.start_time ? formatDateTime(a.start_time, timezone) : '—'}</td><td>{a.expiration_time ? formatDateTime(a.expiration_time, timezone) : '—'}</td><td>{isRevocable(a.status) ? <span style={{display:'flex',gap:5}}>{a.status === 'PENDING_APPROVAL' && <><button className="btn" disabled={actioningId === a.id} onClick={() => void decide(a.id, 'approve')} aria-label="Approve"><Check size={14}/></button><button className="btn" disabled={actioningId === a.id} onClick={() => void decide(a.id, 'reject')} aria-label="Reject"><X size={14}/></button></>}<button className="btn" disabled={actioningId === a.id} onClick={() => void revoke(a.id, a.resource_display_name || 'this assignment')} aria-label="Revoke">Revoke</button></span> : <span className="footer-note">No actions</span>}</td></tr>)}
     </>)}</tbody></table>}</TablePanel>
   </Page>;
 }
@@ -2547,6 +2603,7 @@ function AccessPackagesInteractive() {
           <div className="key"><span>Owners — can rename this package and remove items from it in their own portal (My Packages), nothing else</span></div>
           <select className="select" value="" onChange={event => { const id = event.target.value; if (id && !form.owner_ids.includes(id)) setForm({...form, owner_ids: [...form.owner_ids, id]}); }}><option value="">Add an owner…</option>{(users || []).filter(u => !form.owner_ids.includes(u.id)).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select>
           {form.owner_ids.length > 0 && <div style={{display:'flex',flexWrap:'wrap',gap:8,marginTop:8}}>{form.owner_ids.map(id => <span key={id} className="badge neutral" style={{display:'inline-flex',alignItems:'center',gap:6}}>{(users || []).find(u => u.id === id)?.display_name || id}<button type="button" className="btn" aria-label="Remove owner" onClick={() => setForm({...form, owner_ids: form.owner_ids.filter(x => x !== id)})} style={{padding:'0 6px',minWidth:0}}><X size={11}/></button></span>)}</div>}
+          <div className="key" style={{marginTop:8}}><span>Owners — can rename this Business Role and remove mapped items from it in their own portal (My Business Roles), nothing else</span></div>
         </div>
         {!editingPackageId && <>
           <div className="key" style={{marginTop:18,marginBottom:8}}><span>1. Approval flow — set this up before adding items</span></div>
@@ -2664,6 +2721,7 @@ function MyApprovalsPage() {
   // Self-scoped: returns only batches where the caller is the designated approver, so it works for any
   // authenticated user (not just Admins) — same access model as /assignments/pending-approval above.
   const { data: batches } = useApiResource<ApiPackageBatch[]>('/api/v1/packages/my-assignment-batches');
+  const { data: roleBatches } = useApiResource<ApiRoleBatch[]>('/api/v1/business-roles/my-assignment-batches');
   const [actioningId, setActioningId] = useState<string | null>(null);
   const [message, setMessage] = useState('');
   const [expandedBatches, setExpandedBatches] = useState<Set<string>>(new Set());
@@ -2697,17 +2755,44 @@ function MyApprovalsPage() {
       else setMessage('Some items in this package could not be processed.');
     } catch { setMessage('Unable to complete this action.'); } finally { setActioningId(null); }
   };
+  const decideRoleBatch = async (batch: ApiRoleBatch, decision: 'approve' | 'reject') => {
+    if (decision === 'reject' && !window.confirm(`Reject all ${batch.assignment_ids.length} items in "${batch.role_name}"?`)) return;
+    let justification: string | null = null;
+    if (decision === 'approve') {
+      justification = window.prompt(`Justification for approving all ${batch.assignment_ids.length} items in "${batch.role_name}" (required):`);
+      if (justification === null) return;
+      if (justification.trim().length < 3) { setMessage('A justification (at least 3 characters) is required to approve.'); return; }
+    }
+    setActioningId(batch.role_assignment_id); setMessage('');
+    try {
+      const responses = await Promise.all(batch.assignment_ids.map(id => auth.apiRequest(`/api/v1/assignments/${id}/${decision}`, { method: 'POST', body: decision === 'approve' ? JSON.stringify({ justification: justification!.trim() }) : undefined })));
+      if (responses.every(r => r.ok)) reload();
+      else setMessage('Some items in this Business Role could not be processed.');
+    } catch { setMessage('Unable to complete this action.'); } finally { setActioningId(null); }
+  };
   const toggleBatch = (id: string) => setExpandedBatches(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
   const batchByAssignmentId = useMemo(() => { const map = new Map<string, ApiPackageBatch>(); (batches || []).forEach(b => b.assignment_ids.forEach(id => map.set(id, b))); return map; }, [batches]);
+  const roleBatchByAssignmentId = useMemo(() => { const map = new Map<string, ApiRoleBatch>(); (roleBatches || []).forEach(b => b.assignment_ids.forEach(id => map.set(id, b))); return map; }, [roleBatches]);
   const groupRows = (list: ApiAssignment[]) => {
-    const rows: Array<{ kind: 'single'; assignment: ApiAssignment } | { kind: 'batch'; batch: ApiPackageBatch; assignments: ApiAssignment[] }> = [];
+    const rows: Array<{ kind: 'single'; assignment: ApiAssignment } | { kind: 'batch'; batch: ApiPackageBatch; assignments: ApiAssignment[] } | { kind: 'roleBatch'; batch: ApiRoleBatch; assignments: ApiAssignment[] }> = [];
     const seen = new Set<string>();
+    const seenRoles = new Set<string>();
     list.forEach(a => {
       const batch = batchByAssignmentId.get(a.id);
-      if (!batch) { rows.push({ kind: 'single', assignment: a }); return; }
-      if (seen.has(batch.package_assignment_id)) return;
-      seen.add(batch.package_assignment_id);
-      rows.push({ kind: 'batch', batch, assignments: list.filter(x => batchByAssignmentId.get(x.id)?.package_assignment_id === batch.package_assignment_id) });
+      if (batch) {
+        if (seen.has(batch.package_assignment_id)) return;
+        seen.add(batch.package_assignment_id);
+        rows.push({ kind: 'batch', batch, assignments: list.filter(x => batchByAssignmentId.get(x.id)?.package_assignment_id === batch.package_assignment_id) });
+        return;
+      }
+      const roleBatch = roleBatchByAssignmentId.get(a.id);
+      if (roleBatch) {
+        if (seenRoles.has(roleBatch.role_assignment_id)) return;
+        seenRoles.add(roleBatch.role_assignment_id);
+        rows.push({ kind: 'roleBatch', batch: roleBatch, assignments: list.filter(x => roleBatchByAssignmentId.get(x.id)?.role_assignment_id === roleBatch.role_assignment_id) });
+        return;
+      }
+      rows.push({ kind: 'single', assignment: a });
     });
     return rows;
   };
@@ -2718,7 +2803,7 @@ function MyApprovalsPage() {
   return <Page eyebrow="ACCESS MANAGEMENT" title="Approvals" subtitle="Access assignments where you are the designated approver." action={<button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button>}>
     {message && <div className="detail-section" style={{marginBottom:14}}><div className="notice">{message}</div></div>}
     <TablePanel toolbar={undefined}>{loading ? <div className="empty">Loading approvals...</div> : error ? <div className="empty">{error}</div> : !items || items.length === 0 ? <div className="empty">No assignments are waiting on your approval.</div> : <table><thead><tr><th>User</th><th>Resource</th><th>Type</th><th>Duration</th><th>Status</th><th>Requested</th><th></th></tr></thead><tbody>
-      {pendingRows.map(row => row.kind === 'single' ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.user_display_name || row.assignment.user_id}</td><td>{row.assignment.resource_display_name || row.assignment.resource_id}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.assignment_type}</td><td><StatusBadge status={row.assignment.status}/></td><td>{formatDateTime(row.assignment.created_at, timezone)}</td><td><span style={{display:'flex',gap:5}}><button className="btn btn-primary" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'approve')} aria-label="Approve"><Check size={14}/> Approve</button><button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'reject')} aria-label="Reject"><X size={14}/> Reject</button></span></td></tr> : <>
+      {pendingRows.map(row => row.kind === 'single' ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.user_display_name || row.assignment.user_id}</td><td>{row.assignment.resource_display_name || row.assignment.resource_id}{row.assignment.business_role_name && <div className="user-email">🏷 {row.assignment.business_role_name}</div>}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.assignment_type}</td><td><StatusBadge status={row.assignment.status}/></td><td>{formatDateTime(row.assignment.created_at, timezone)}</td><td><span style={{display:'flex',gap:5}}><button className="btn btn-primary" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'approve')} aria-label="Approve"><Check size={14}/> Approve</button><button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'reject')} aria-label="Reject"><X size={14}/> Reject</button></span></td></tr> : row.kind === 'batch' ? <>
         <tr key={row.batch.package_assignment_id} style={{cursor:'pointer'}} onClick={() => toggleBatch(row.batch.package_assignment_id)}>
           <td className="user-name">{row.assignments[0]?.user_display_name || row.batch.user_id}</td>
           <td>📦 {row.batch.package_name} <span className="footer-note">({row.assignments.length} items)</span></td>
@@ -2729,8 +2814,19 @@ function MyApprovalsPage() {
           <td><span style={{display:'flex',gap:5}} onClick={event => event.stopPropagation()}><button className="btn btn-primary" disabled={actioningId === row.batch.package_assignment_id} onClick={() => void decideBatch(row.batch, 'approve')} aria-label="Approve all"><Check size={14}/> Approve all</button><button className="btn" disabled={actioningId === row.batch.package_assignment_id} onClick={() => void decideBatch(row.batch, 'reject')} aria-label="Reject all"><X size={14}/> Reject all</button></span></td>
         </tr>
         {expandedBatches.has(row.batch.package_assignment_id) && row.assignments.map(a => <tr key={a.id} style={{opacity:0.8}}><td className="user-name">↳</td><td>{a.resource_display_name || a.resource_id}</td><td>{a.resource_type}</td><td>{a.assignment_type}</td><td><StatusBadge status={a.status}/></td><td>{formatDateTime(a.created_at, timezone)}</td><td></td></tr>)}
+      </> : <>
+        <tr key={row.batch.role_assignment_id} style={{cursor:'pointer'}} onClick={() => toggleBatch(row.batch.role_assignment_id)}>
+          <td className="user-name">{row.assignments[0]?.user_display_name || row.batch.user_id}</td>
+          <td>🏷 {row.batch.role_name} <span className="footer-note">({row.assignments.length} items)</span></td>
+          <td>BUSINESS ROLE</td>
+          <td>{row.assignments[0]?.assignment_type}</td>
+          <td><StatusBadge status="PENDING_APPROVAL"/></td>
+          <td>{formatDateTime(row.assignments[0].created_at, timezone)}</td>
+          <td><span style={{display:'flex',gap:5}} onClick={event => event.stopPropagation()}><button className="btn btn-primary" disabled={actioningId === row.batch.role_assignment_id} onClick={() => void decideRoleBatch(row.batch, 'approve')} aria-label="Approve all"><Check size={14}/> Approve all</button><button className="btn" disabled={actioningId === row.batch.role_assignment_id} onClick={() => void decideRoleBatch(row.batch, 'reject')} aria-label="Reject all"><X size={14}/> Reject all</button></span></td>
+        </tr>
+        {expandedBatches.has(row.batch.role_assignment_id) && row.assignments.map(a => <tr key={a.id} style={{opacity:0.8}}><td className="user-name">↳</td><td>{a.resource_display_name || a.resource_id}</td><td>{a.resource_type}</td><td>{a.assignment_type}</td><td><StatusBadge status={a.status}/></td><td>{formatDateTime(a.created_at, timezone)}</td><td></td></tr>)}
       </>)}
-      {decidedRows.map(row => row.kind === 'single' ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.user_display_name || row.assignment.user_id}</td><td>{row.assignment.resource_display_name || row.assignment.resource_id}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.assignment_type}</td><td><StatusBadge status={row.assignment.status}/></td><td>{formatDateTime(row.assignment.created_at, timezone)}</td><td><span className="footer-note">Decided</span></td></tr> : <>
+      {decidedRows.map(row => row.kind === 'single' ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.user_display_name || row.assignment.user_id}</td><td>{row.assignment.resource_display_name || row.assignment.resource_id}{row.assignment.business_role_name && <div className="user-email">🏷 {row.assignment.business_role_name}</div>}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.assignment_type}</td><td><StatusBadge status={row.assignment.status}/></td><td>{formatDateTime(row.assignment.created_at, timezone)}</td><td><span className="footer-note">Decided</span></td></tr> : row.kind === 'batch' ? <>
         <tr key={row.batch.package_assignment_id} style={{cursor:'pointer'}} onClick={() => toggleBatch(row.batch.package_assignment_id)}>
           <td className="user-name">{row.assignments[0]?.user_display_name || row.batch.user_id}</td>
           <td>📦 {row.batch.package_name} <span className="footer-note">({row.assignments.length} items)</span></td>
@@ -2741,8 +2837,269 @@ function MyApprovalsPage() {
           <td><span className="footer-note">Decided</span></td>
         </tr>
         {expandedBatches.has(row.batch.package_assignment_id) && row.assignments.map(a => <tr key={a.id} style={{opacity:0.8}}><td className="user-name">↳</td><td>{a.resource_display_name || a.resource_id}</td><td>{a.resource_type}</td><td>{a.assignment_type}</td><td><StatusBadge status={a.status}/></td><td>{formatDateTime(a.created_at, timezone)}</td><td></td></tr>)}
+      </> : <>
+        <tr key={row.batch.role_assignment_id} style={{cursor:'pointer'}} onClick={() => toggleBatch(row.batch.role_assignment_id)}>
+          <td className="user-name">{row.assignments[0]?.user_display_name || row.batch.user_id}</td>
+          <td>🏷 {row.batch.role_name} <span className="footer-note">({row.assignments.length} items)</span></td>
+          <td>BUSINESS ROLE</td>
+          <td>{row.assignments[0]?.assignment_type}</td>
+          <td><StatusBadge status={new Set(row.assignments.map(a => a.status)).size === 1 ? row.assignments[0].status : 'MIXED'}/></td>
+          <td>{formatDateTime(row.assignments[0].created_at, timezone)}</td>
+          <td><span className="footer-note">Decided</span></td>
+        </tr>
+        {expandedBatches.has(row.batch.role_assignment_id) && row.assignments.map(a => <tr key={a.id} style={{opacity:0.8}}><td className="user-name">↳</td><td>{a.resource_display_name || a.resource_id}</td><td>{a.resource_type}</td><td>{a.assignment_type}</td><td><StatusBadge status={a.status}/></td><td>{formatDateTime(a.created_at, timezone)}</td><td></td></tr>)}
       </>)}
     </tbody></table>}</TablePanel>
+  </Page>;
+}
+interface ApiBusinessRoleItem { id: string; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; it_role_label: string | null; provider_id: string | null; provider_name: string | null; resource_code: string | null; naming_convention: string | null; }
+interface ApiBusinessRoleOwner { user_id: string; display_name: string | null; email: string | null; }
+interface ApiBusinessRole { id: string; name: string; description: string | null; role_type: string; department: string | null; status: string; risk_level: string; is_privileged: boolean; items: ApiBusinessRoleItem[]; owners: ApiBusinessRoleOwner[]; default_approver_id: string | null; default_fallback_approver_id: string | null; fallback_unlock_hours: number | null; review_frequency_days: number | null; assigned_user_count: number; created_at: string; updated_at: string; }
+interface ApiBusinessRoleTally { name: string; count: number; }
+interface ApiBusinessRoleAnalytics { total_roles: number; active_roles: number; draft_roles: number; disabled_roles: number; archived_roles: number; privileged_roles: number; roles_with_no_owner: number; roles_with_open_sod_conflicts: number; unmapped_entitlements: number; total_assigned_users: number; top_roles_by_holders: ApiBusinessRoleTally[]; }
+function BusinessRoleAnalyticsPanel({ analytics }: { analytics: ApiBusinessRoleAnalytics | null }) {
+  const na = '—';
+  const tiles: Array<[string, string, string?]> = [
+    ['Total roles', analytics ? String(analytics.total_roles) : na],
+    ['Active', analytics ? String(analytics.active_roles) : na],
+    ['Draft', analytics ? String(analytics.draft_roles) : na],
+    ['Disabled', analytics ? String(analytics.disabled_roles) : na],
+    ['Archived', analytics ? String(analytics.archived_roles) : na],
+    ['Privileged', analytics ? String(analytics.privileged_roles) : na],
+    ['People with a role', analytics ? String(analytics.total_assigned_users) : na],
+    ['Unmapped entitlements', analytics ? String(analytics.unmapped_entitlements) : na, analytics && analytics.unmapped_entitlements > 0 ? 'warning' : undefined],
+    ['Roles with no owner', analytics ? String(analytics.roles_with_no_owner) : na, analytics && analytics.roles_with_no_owner > 0 ? 'warning' : undefined],
+    ['Roles with open SoD conflicts', analytics ? String(analytics.roles_with_open_sod_conflicts) : na, analytics && analytics.roles_with_open_sod_conflicts > 0 ? 'danger' : undefined],
+  ];
+  return <section className="panel" style={{marginBottom:18}}>
+    <div className="panel-head"><h2>Business Role Analytics</h2></div>
+    <div className="detail-section">
+      <div className="stats">{tiles.map(([label, value, tone]) => <div className="stat" key={label} style={tone === 'danger' ? {borderColor:'#c0392b'} : tone === 'warning' ? {borderColor:'#c98a12'} : undefined}><div className="stat-top"><span>{label}</span></div><div className="stat-value" style={tone === 'danger' ? {color:'#c0392b'} : tone === 'warning' ? {color:'#c98a12'} : undefined}>{value}</div></div>)}</div>
+      {analytics && analytics.top_roles_by_holders.length > 0 && <div style={{marginTop:18}}>
+        <div className="key" style={{marginBottom:6}}><span>Most-held roles</span></div>
+        {analytics.top_roles_by_holders.map(t => <div key={t.name} className="user-cell" style={{padding:'4px 0'}}><span>{t.name}</span><span className="badge neutral" style={{marginLeft:'auto'}}>{t.count}</span></div>)}
+      </div>}
+    </div>
+  </section>;
+}
+const emptyBusinessRoleForm = { name: '', description: '', role_type: 'BUSINESS', department: '', risk_level: 'LOW', is_privileged: false, owner_ids: [] as string[], items: [] as { resource_type: string; resource_id: string; app_role_external_id: string; it_role_label: string }[] };
+const ROLE_TYPE_LABELS: Record<string, string> = { BUSINESS: 'Business', IT: 'IT', APPLICATION: 'Application', DIRECTORY: 'Directory', PRIVILEGED: 'Privileged', COMPOSITE: 'Composite' };
+interface ApiBusinessRoleAssignItemResult { item_id: string; resource_type: string; resource_id: string; status: string; error_message: string | null; }
+interface ApiBusinessRoleHolder { user_id: string; user_display_name: string | null; user_email: string | null; role_assignment_id: string; assigned_at: string; items: ApiBusinessRoleAssignItemResult[]; }
+const emptyAssignForm = { user_id: '', assignment_type: 'PERMANENT', expiration_time: '', approver_id: '', justification: '' };
+// Business Roles: a named, owned bundle of real entitlements (groups/directory roles/application roles) that raw
+// IdP-side access maps onto — Step 1 of the Role Management & Entitlement Mapping plan. See AccessPackages'
+// own create/edit pattern above, which this deliberately mirrors.
+function BusinessRolesPage() {
+  const auth = useAuth();
+  const timezone = useAppTimezone();
+  const { data: roleList, error, loading, reload } = useApiResource<ApiBusinessRole[]>('/api/v1/business-roles');
+  const { data: analytics, reload: reloadAnalytics } = useApiResource<ApiBusinessRoleAnalytics>('/api/v1/business-roles/analytics');
+  const { data: unmapped, reload: reloadUnmapped } = useApiResource<ApiBusinessRoleItem[]>('/api/v1/business-roles/unmapped-entitlements');
+  const { data: users } = useApiResource<ApiUser[]>('/api/v1/users');
+  const { data: groups } = useApiResource<ApiGroup[]>('/api/v1/groups');
+  const { data: roles } = useApiResource<ApiRole[]>('/api/v1/roles');
+  const { data: applications } = useApiResource<ApiApplication[]>('/api/v1/applications');
+  const [open, setOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState(emptyBusinessRoleForm);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  const [refTarget, setRefTarget] = useState<{ type: string; id: string; code: string; convention: string } | null>(null);
+  const [refSaving, setRefSaving] = useState(false);
+  const [refMessage, setRefMessage] = useState('');
+  const [assigningRole, setAssigningRole] = useState<ApiBusinessRole | null>(null);
+  const [assignForm, setAssignForm] = useState(emptyAssignForm);
+  const [assignSaving, setAssignSaving] = useState(false);
+  const [assignMessage, setAssignMessage] = useState('');
+  const [holdersRoleId, setHoldersRoleId] = useState<string | null>(null);
+  const { data: holders, reload: reloadHolders } = useApiResource<ApiBusinessRoleHolder[]>(holdersRoleId ? `/api/v1/business-roles/${holdersRoleId}/holders` : '', !!holdersRoleId);
+
+  const targetsFor = (resourceType: string) => resourceType === 'GROUP' ? (groups || []) : resourceType === 'ROLE' ? (roles || []) : (applications || []);
+  const addItem = () => setForm({ ...form, items: [...form.items, { resource_type: 'GROUP', resource_id: '', app_role_external_id: '', it_role_label: '' }] });
+  const removeItem = (index: number) => setForm({ ...form, items: form.items.filter((_, i) => i !== index) });
+  const updateItem = (index: number, patch: Partial<{ resource_type: string; resource_id: string; app_role_external_id: string; it_role_label: string }>) => setForm({ ...form, items: form.items.map((item, i) => i === index ? { ...item, ...patch } : item) });
+
+  const openCreate = () => { setEditingId(null); setForm(emptyBusinessRoleForm); setMessage(''); setOpen(true); };
+  const openEdit = (role: ApiBusinessRole) => {
+    setEditingId(role.id);
+    setForm({ name: role.name, description: role.description || '', role_type: role.role_type, department: role.department || '', risk_level: role.risk_level, is_privileged: role.is_privileged, owner_ids: role.owners.map(o => o.user_id), items: role.items.map(item => ({ resource_type: item.resource_type, resource_id: item.resource_id, app_role_external_id: item.app_role_external_id || '', it_role_label: item.it_role_label || '' })) });
+    setMessage(''); setOpen(true);
+  };
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!form.name.trim()) { setMessage('Enter a Business Role name.'); return; }
+    if (form.items.some(item => !item.resource_id || (item.resource_type === 'APPLICATION' && !item.app_role_external_id))) { setMessage('Complete every item (select a target, and an application role where needed).'); return; }
+    setSaving(true); setMessage('');
+    try {
+      const payload: Record<string, unknown> = {
+        name: form.name.trim(), description: form.description.trim() || undefined, role_type: form.role_type, department: form.department.trim() || undefined,
+        risk_level: form.risk_level, is_privileged: form.is_privileged, owner_ids: form.owner_ids,
+        items: form.items.map(item => ({ resource_type: item.resource_type, resource_id: item.resource_id, app_role_external_id: item.resource_type === 'APPLICATION' ? item.app_role_external_id : undefined, it_role_label: item.it_role_label.trim() || undefined })),
+      };
+      const response = editingId
+        ? await auth.apiRequest(`/api/v1/business-roles/${editingId}`, { method: 'PATCH', body: JSON.stringify(payload) })
+        : await auth.apiRequest('/api/v1/business-roles', { method: 'POST', body: JSON.stringify(payload) });
+      if (response.ok) { setOpen(false); reload(); reloadUnmapped(); reloadAnalytics(); }
+      else { const body = await response.json().catch(() => null); setMessage(body?.error?.message || 'Unable to save this Business Role.'); }
+    } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
+  };
+
+  const setStatus = async (role: ApiBusinessRole, status: string) => {
+    if (status === 'ARCHIVED' && !window.confirm(`Archive "${role.name}"? It will no longer be assignable.`)) return;
+    await auth.apiRequest(`/api/v1/business-roles/${role.id}`, { method: 'PATCH', body: JSON.stringify({ status }) });
+    reload(); reloadAnalytics();
+  };
+  const remove = async (role: ApiBusinessRole) => {
+    if (!window.confirm(`Delete "${role.name}"? This cannot be undone.`)) return;
+    await auth.apiRequest(`/api/v1/business-roles/${role.id}`, { method: 'DELETE' });
+    reload(); reloadUnmapped(); reloadAnalytics();
+  };
+
+  const openRef = (item: ApiBusinessRoleItem) => { setRefTarget({ type: item.resource_type, id: item.resource_id, code: item.resource_code || '', convention: item.naming_convention || '' }); setRefMessage(''); };
+  const saveRef = async () => {
+    if (!refTarget) return;
+    setRefSaving(true); setRefMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/business-roles/resources/${refTarget.type.toLowerCase()}/${refTarget.id}/reference`, { method: 'PATCH', body: JSON.stringify({ resource_code: refTarget.code.trim() || null, naming_convention: refTarget.convention.trim() || null }) });
+      if (response.ok) { setRefTarget(null); reload(); reloadUnmapped(); reloadAnalytics(); }
+      else { const body = await response.json().catch(() => null); setRefMessage(body?.error?.message || 'Unable to save this.'); }
+    } catch { setRefMessage('Unable to reach the backend.'); } finally { setRefSaving(false); }
+  };
+
+  const openAssign = (role: ApiBusinessRole) => { setAssigningRole(role); setAssignForm(emptyAssignForm); setAssignMessage(''); };
+  const submitAssign = async () => {
+    if (!assigningRole) return;
+    if (!assignForm.user_id) { setAssignMessage('Select a person to assign this role to.'); return; }
+    if (!assignForm.justification.trim()) { setAssignMessage('Enter a justification.'); return; }
+    if (assignForm.assignment_type === 'TEMPORARY' && !assignForm.expiration_time) { setAssignMessage('Set an expiration for a temporary assignment.'); return; }
+    setAssignSaving(true); setAssignMessage('');
+    try {
+      const payload: Record<string, unknown> = { user_id: assignForm.user_id, assignment_type: assignForm.assignment_type, justification: assignForm.justification.trim() };
+      if (assignForm.assignment_type === 'TEMPORARY') payload.expiration_time = new Date(assignForm.expiration_time).toISOString();
+      if (assignForm.approver_id) payload.approver_id = assignForm.approver_id;
+      const response = await auth.apiRequest(`/api/v1/business-roles/${assigningRole.id}/assign`, { method: 'POST', body: JSON.stringify(payload) });
+      const body = await response.json().catch(() => null);
+      if (response.ok) {
+        const failed = (body.results || []).filter((r: ApiBusinessRoleAssignItemResult) => r.status !== 'CREATED');
+        setAssignMessage(failed.length === 0 ? `Assigned — every item created for ${body.user_display_name || 'this person'}.` : `Assigned with ${failed.length} item(s) failed: ${failed.map((r: ApiBusinessRoleAssignItemResult) => r.error_message).join('; ')}`);
+        reload(); reloadAnalytics(); if (holdersRoleId === assigningRole.id) reloadHolders();
+      } else { setAssignMessage(body?.error?.message || 'Unable to assign this Business Role.'); }
+    } catch { setAssignMessage('Unable to reach the backend.'); } finally { setAssignSaving(false); }
+  };
+  const toggleHolders = (role: ApiBusinessRole) => setHoldersRoleId(holdersRoleId === role.id ? null : role.id);
+
+  return <Page eyebrow="ENTITLEMENT MANAGEMENT" title="Business Roles" subtitle="A named, owned bundle of real entitlements — map IdP-side groups, directory roles and application roles onto one business-facing role, with a reference code and naming convention for each." action={<button className="btn btn-primary" onClick={openCreate}><Plus size={14}/> New Business Role</button>}>
+    {open && <div className="panel" style={{marginTop:18}}><div className="detail-section">
+      <div className="detail-title"><h2>{editingId ? 'Edit Business Role' : 'New Business Role'}</h2></div>
+      <form onSubmit={submit}>
+        <div className="key-grid" style={{marginBottom:12}}>
+          <label className="key"><span>Name</span><input className="select" value={form.name} onChange={event => setForm({...form, name: event.target.value})} placeholder="e.g. Finance Analyst"/></label>
+          <label className="key"><span>Role type</span><select className="select" value={form.role_type} onChange={event => setForm({...form, role_type: event.target.value})}>{Object.entries(ROLE_TYPE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+          <label className="key"><span>Department</span><input className="select" value={form.department} onChange={event => setForm({...form, department: event.target.value})}/></label>
+          <label className="key"><span>Risk level</span><select className="select" value={form.risk_level} onChange={event => setForm({...form, risk_level: event.target.value})}><option value="LOW">Low</option><option value="MEDIUM">Medium</option><option value="HIGH">High</option><option value="CRITICAL">Critical</option></select></label>
+        </div>
+        <label className="key" style={{display:'block',marginBottom:12}}><span>Description</span><textarea className="select" style={{width:'100%',minHeight:50}} value={form.description} onChange={event => setForm({...form, description: event.target.value})}/></label>
+        <label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,marginBottom:14}}><input type="checkbox" checked={form.is_privileged} onChange={event => setForm({...form, is_privileged: event.target.checked})}/> Privileged role</label>
+        <label className="key" style={{display:'block',marginBottom:14}}><span>Owners</span>
+          <select className="select" value="" onChange={event => { const id = event.target.value; if (id && !form.owner_ids.includes(id)) setForm({...form, owner_ids: [...form.owner_ids, id]}); }}><option value="">Add an owner…</option>{(users || []).filter(u => !form.owner_ids.includes(u.id)).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select>
+          {form.owner_ids.length > 0 && <div style={{display:'flex',flexWrap:'wrap',gap:8,marginTop:8}}>{form.owner_ids.map(id => <span key={id} className="badge neutral" style={{display:'inline-flex',alignItems:'center',gap:6}}>{(users || []).find(u => u.id === id)?.display_name || id}<button type="button" className="btn" aria-label="Remove owner" onClick={() => setForm({...form, owner_ids: form.owner_ids.filter(x => x !== id)})} style={{padding:'0 6px',minWidth:0}}><X size={11}/></button></span>)}</div>}
+          <div className="key" style={{marginTop:8}}><span>Owners — can rename this Business Role and remove mapped items from it in their own portal (My Business Roles), nothing else</span></div>
+        </label>
+        <div className="key" style={{marginBottom:8}}><span>IT Role mapping — the real entitlements this Business Role grants</span></div>
+        {form.items.map((item, index) => {
+          const itemTargets = targetsFor(item.resource_type);
+          const selectedApp = item.resource_type === 'APPLICATION' ? (applications || []).find(a => a.id === item.resource_id) : undefined;
+          return <div key={index} style={{display:'flex',gap:10,alignItems:'flex-end',marginBottom:10,flexWrap:'wrap'}}>
+            <label className="key" style={{flex:'1 1 140px'}}><span>IT Role label</span><input className="select" style={{width:'100%'}} value={item.it_role_label} onChange={event => updateItem(index, { it_role_label: event.target.value })} placeholder="e.g. Finance-L2-ReadWrite"/></label>
+            <label className="key" style={{flex:'1 1 110px'}}><span>Type</span><select className="select" style={{width:'100%'}} value={item.resource_type} onChange={event => updateItem(index, { resource_type: event.target.value, resource_id: '', app_role_external_id: '' })}><option value="GROUP">Group</option><option value="ROLE">Role</option><option value="APPLICATION">Application</option></select></label>
+            <label className="key" style={{flex:'1 1 160px'}}><span>{item.resource_type === 'GROUP' ? 'Group' : item.resource_type === 'ROLE' ? 'Role' : 'Application'} (available IdP entitlement)</span><select className="select" style={{width:'100%'}} value={item.resource_id} onChange={event => updateItem(index, { resource_id: event.target.value, app_role_external_id: '' })}><option value="">Select...</option>{itemTargets.map((t: ApiGroup | ApiRole | ApiApplication) => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
+            {item.resource_type === 'APPLICATION' && <label className="key" style={{flex:'1 1 140px'}}><span>Application role</span><select className="select" style={{width:'100%'}} value={item.app_role_external_id} onChange={event => updateItem(index, { app_role_external_id: event.target.value })} disabled={!selectedApp}><option value="">Select a role</option>{(selectedApp?.app_roles || []).map(r => <option key={r.id} value={r.id}>{r.name}</option>)}</select></label>}
+            <button type="button" className="btn" aria-label="Remove item" onClick={() => removeItem(index)}><X size={14}/></button>
+          </div>;
+        })}
+        <button type="button" className="btn" onClick={addItem}><Plus size={14}/> Add entitlement</button>
+        {message && <div className="notice" style={{marginTop:14}}>{message}</div>}
+        <div style={{display:'flex',gap:8,marginTop:18}}><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Saving...' : 'Save'}</button><button type="button" className="btn" onClick={() => setOpen(false)}>Cancel</button></div>
+      </form>
+    </div></div>}
+    <BusinessRoleAnalyticsPanel analytics={analytics}/>
+    <TablePanel toolbar={undefined}>
+      {loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : !roleList || roleList.length === 0 ? <div className="empty">No Business Roles yet.</div> : <table><thead><tr><th>Name</th><th>Type</th><th>Department</th><th>Items</th><th>Owners</th><th>Risk</th><th>Status</th><th>Holders</th><th></th></tr></thead><tbody>
+        {roleList.map(role => <Fragment key={role.id}>
+        <tr>
+          <td className="user-name">{role.name}{role.is_privileged && <span className="badge warning" style={{marginLeft:6}}>Privileged</span>}<div className="user-email">{role.description}</div></td>
+          <td>{ROLE_TYPE_LABELS[role.role_type] || role.role_type}</td>
+          <td>{role.department || '—'}</td>
+          <td style={{whiteSpace:'normal',maxWidth:280}}>{role.items.length === 0 ? '—' : role.items.map(item => <div key={item.id} className="user-email" style={{margin:'2px 0'}}>{item.it_role_label ? `${item.it_role_label} · ` : ''}{item.resource_display_name}{item.resource_code && <span className="footer-note"> ({item.resource_code})</span>} <button type="button" className="btn" style={{padding:'0 6px',minWidth:0,fontSize:11}} onClick={() => openRef(item)}>Code/Naming</button></div>)}</td>
+          <td>{role.owners.map(o => o.display_name).join(', ') || '—'}</td>
+          <td><span className={`badge ${role.risk_level === 'CRITICAL' || role.risk_level === 'HIGH' ? 'danger' : role.risk_level === 'MEDIUM' ? 'warning' : 'neutral'}`}>{role.risk_level}</span></td>
+          <td><StatusBadge status={role.status === 'ACTIVE' ? 'Active' : role.status === 'DRAFT' ? 'SCHEDULED' : role.status === 'ARCHIVED' ? 'Disabled' : 'FAILED'}/></td>
+          <td>{role.assigned_user_count > 0 ? <button className="btn" style={{padding:'2px 10px',fontSize:12}} onClick={() => toggleHolders(role)}>{role.assigned_user_count} {holdersRoleId === role.id ? '▲' : '▼'}</button> : '0'}</td>
+          <td><span style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+            <button className="btn" onClick={() => openEdit(role)}>Edit</button>
+            {role.status === 'ACTIVE' && <button className="btn btn-primary" onClick={() => openAssign(role)}>Assign</button>}
+            {role.status === 'DRAFT' && <button className="btn" onClick={() => void setStatus(role, 'ACTIVE')}>Activate</button>}
+            {role.status === 'ACTIVE' && <button className="btn" onClick={() => void setStatus(role, 'DISABLED')}>Disable</button>}
+            {role.status === 'DISABLED' && <button className="btn" onClick={() => void setStatus(role, 'ACTIVE')}>Re-enable</button>}
+            {role.status !== 'ARCHIVED' && role.assigned_user_count === 0 && <button className="btn" onClick={() => void remove(role)}>Delete</button>}
+            {role.status !== 'ARCHIVED' && role.assigned_user_count > 0 && <button className="btn" onClick={() => void setStatus(role, 'ARCHIVED')}>Archive</button>}
+          </span></td>
+        </tr>
+        {holdersRoleId === role.id && <tr><td colSpan={9} style={{padding:0,background:'#fafbfb'}}>
+          <div style={{padding:12}}>
+            {!holders ? <p className="subtitle" style={{margin:0}}>Loading holders...</p> : holders.length === 0 ? <p className="subtitle" style={{margin:0}}>Nobody currently holds this role.</p> : holders.map(holder => <div key={holder.role_assignment_id} style={{marginBottom:10}}>
+              <strong style={{fontSize:13}}>{holder.user_display_name}</strong>{holder.user_email && <span className="user-email" style={{marginLeft:6}}>{holder.user_email}</span>}
+              <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:4}}>{holder.items.map(item => <span key={item.item_id} className="badge neutral">{item.resource_type}: <StatusBadge status={item.status === 'ACTIVE' ? 'Active' : item.status}/></span>)}</div>
+            </div>)}
+          </div>
+        </td></tr>}
+        </Fragment>)}
+      </tbody></table>}
+    </TablePanel>
+
+    {assigningRole && <div className="panel" style={{marginTop:18}}><div className="detail-section">
+      <div className="detail-title"><h2>Assign "{assigningRole.name}"</h2></div>
+      <p className="subtitle" style={{marginTop:0}}>Grants every mapped entitlement to this person — through the same approval/activation flow as any other access. Leave the approver blank to land directly ELIGIBLE, ready to activate.</p>
+      <div className="key-grid" style={{marginBottom:12}}>
+        <label className="key"><span>Person</span><select className="select" value={assignForm.user_id} onChange={event => setAssignForm({...assignForm, user_id: event.target.value})}><option value="">Select a person</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+        <label className="key"><span>Duration</span><select className="select" value={assignForm.assignment_type} onChange={event => setAssignForm({...assignForm, assignment_type: event.target.value})}><option value="PERMANENT">Permanent (eligible indefinitely)</option><option value="TEMPORARY">Temporary</option></select></label>
+        {assignForm.assignment_type === 'TEMPORARY' && <label className="key"><span>Expires</span><input className="select" type="datetime-local" value={assignForm.expiration_time} onChange={event => setAssignForm({...assignForm, expiration_time: event.target.value})}/></label>}
+        <label className="key"><span>Approver (optional)</span><select className="select" value={assignForm.approver_id} onChange={event => setAssignForm({...assignForm, approver_id: event.target.value})}><option value="">No approval needed</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+      </div>
+      <label className="key" style={{display:'block',marginBottom:12}}><span>Justification</span><input className="select" style={{width:'100%'}} value={assignForm.justification} onChange={event => setAssignForm({...assignForm, justification: event.target.value})} placeholder="Why does this person need this role?"/></label>
+      {assignMessage && <div className="notice" style={{marginBottom:12}}>{assignMessage}</div>}
+      <div style={{display:'flex',gap:8}}><button className="btn btn-primary" disabled={assignSaving} onClick={() => void submitAssign()}>{assignSaving ? 'Assigning...' : 'Assign'}</button><button className="btn" onClick={() => setAssigningRole(null)}>Close</button></div>
+    </div></div>}
+
+    <section className="panel" style={{marginTop:18}}>
+      <div className="panel-head"><h2>Unmapped entitlements</h2></div>
+      <div className="detail-section">
+        <p className="subtitle" style={{marginTop:0,marginBottom:12}}>Every Group, Role, and Application not currently mapped to any Business Role — a live view, not a stored list.</p>
+        {!unmapped || unmapped.length === 0 ? <p className="subtitle" style={{margin:0}}>Everything is mapped to a Business Role.</p> : <div className="table-wrap"><table><thead><tr><th>Entitlement</th><th>Type</th><th>Provider</th><th>Resource Code</th><th>Naming Convention</th><th></th></tr></thead><tbody>
+          {unmapped.map(item => <tr key={`${item.resource_type}-${item.resource_id}`}>
+            <td className="user-name">{item.resource_display_name}</td>
+            <td>{item.resource_type}</td>
+            <td>{item.provider_name || '—'}</td>
+            <td>{item.resource_code || '—'}</td>
+            <td>{item.naming_convention || '—'}</td>
+            <td><button className="btn" onClick={() => openRef(item)}>Edit reference</button></td>
+          </tr>)}
+        </tbody></table></div>}
+      </div>
+    </section>
+
+    {refTarget && <div className="panel" style={{marginTop:18}}><div className="detail-section">
+      <div className="detail-title"><h2>Resource reference</h2></div>
+      <p className="subtitle" style={{marginTop:0}}>Purely for reference — never used to look anything up internally, and never enforced.</p>
+      <div className="key-grid" style={{marginBottom:10}}>
+        <label className="key"><span>Resource Code</span><input className="select" value={refTarget.code} onChange={event => setRefTarget({...refTarget, code: event.target.value})} placeholder="e.g. RES-GRP-014"/></label>
+        <label className="key"><span>Naming Convention</span><input className="select" value={refTarget.convention} onChange={event => setRefTarget({...refTarget, convention: event.target.value})} placeholder="e.g. SG-{DEPT}-{LEVEL}"/></label>
+      </div>
+      {refMessage && <div className="notice" style={{marginBottom:10}}>{refMessage}</div>}
+      <div style={{display:'flex',gap:8}}><button className="btn btn-primary" disabled={refSaving} onClick={() => void saveRef()}>{refSaving ? 'Saving...' : 'Save'}</button><button className="btn" onClick={() => setRefTarget(null)}>Cancel</button></div>
+    </div></div>}
   </Page>;
 }
 interface ApiNamedPolicyRef { id: string; name: string; }
@@ -2816,11 +3173,12 @@ function GroupDetail() {
   const { data: mappings, error: mappingsError, loading: mappingsLoading, reload: reloadMappings } = useApiResource<ApiGroupRoleMapping[]>(`/api/v1/policies/group-role-mappings?group_id=${id}`);
   const { data: roles } = useApiResource<ApiRole[]>('/api/v1/roles');
   const { data: applications } = useApiResource<ApiApplication[]>('/api/v1/applications');
+  const { data: businessRoles } = useApiResource<ApiBusinessRole[]>('/api/v1/business-roles');
   const [mappingOpen, setMappingOpen] = useState(false);
   const [mappingSaving, setMappingSaving] = useState(false);
   const [mappingMessage, setMappingMessage] = useState('');
   const [mappingForm, setMappingForm] = useState(emptyGroupRoleMappingForm);
-  const mappingTargets: Array<ApiRole | ApiApplication> = mappingForm.resource_type === 'ROLE' ? (roles || []) : (applications || []);
+  const mappingTargets: Array<ApiRole | ApiApplication | ApiBusinessRole> = mappingForm.resource_type === 'ROLE' ? (roles || []) : mappingForm.resource_type === 'BUSINESS_ROLE' ? (businessRoles || []) : (applications || []);
   const selectedApplication = mappingForm.resource_type === 'APPLICATION' ? (applications || []).find(a => a.id === mappingForm.resource_id) : undefined;
 
   const createMapping = async () => {
@@ -2891,7 +3249,7 @@ function GroupDetail() {
         <p className="subtitle" style={{ marginTop: 0, marginBottom: 14 }}>Membership-driven auto-assignment: everyone currently in <strong>{group.name}</strong> becomes <strong>eligible</strong> for the linked Role or Application(+app role) — the same real, audited grant a birthright policy makes, just triggered by group membership instead of a department/job-title match. Re-evaluated automatically whenever someone joins or leaves this group, and immediately whenever a mapping here is added, disabled, or removed.</p>
         {mappingOpen && <div className="notice" style={{ marginBottom: 14 }}>
           <div className="key-grid" style={{ marginBottom: 10 }}>
-            <label className="key"><span>Grant</span><select className="select" value={mappingForm.resource_type} onChange={event => setMappingForm({ ...mappingForm, resource_type: event.target.value, resource_id: '', app_role_external_id: '' })}><option value="ROLE">Directory role</option><option value="APPLICATION">Application</option></select></label>
+            <label className="key"><span>Grant</span><select className="select" value={mappingForm.resource_type} onChange={event => setMappingForm({ ...mappingForm, resource_type: event.target.value, resource_id: '', app_role_external_id: '' })}><option value="ROLE">Directory role</option><option value="APPLICATION">Application</option><option value="BUSINESS_ROLE">Business Role</option></select></label>
             <label className="key"><span>Target</span><select className="select" value={mappingForm.resource_id} onChange={event => setMappingForm({ ...mappingForm, resource_id: event.target.value, app_role_external_id: '' })}><option value="">Select a target</option>{mappingTargets.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
             {mappingForm.resource_type === 'APPLICATION' && selectedApplication && selectedApplication.app_roles && selectedApplication.app_roles.length > 0 && <label className="key"><span>App role</span><select className="select" value={mappingForm.app_role_external_id} onChange={event => setMappingForm({ ...mappingForm, app_role_external_id: event.target.value })}><option value="">Default access</option>{selectedApplication.app_roles.map(role => <option key={role.id} value={role.id}>{role.name}</option>)}</select></label>}
             <label className="key"><span>Assignment type</span><select className="select" value={mappingForm.assignment_type} onChange={event => setMappingForm({ ...mappingForm, assignment_type: event.target.value })}><option value="PERMANENT">Permanent</option><option value="TEMPORARY">Temporary</option></select></label>
@@ -2900,7 +3258,7 @@ function GroupDetail() {
         </div>}
         {mappingMessage && <div className="notice" style={{ marginBottom: 14 }}>{mappingMessage}</div>}
         <div className="table-wrap">{mappingsLoading ? <div className="empty">Loading...</div> : mappingsError ? <div className="empty">{mappingsError}</div> : !mappings || mappings.length === 0 ? <div className="empty">No role or app mappings for this group yet.</div> : <table><thead><tr><th>Grants</th><th>Type</th><th>Status</th><th></th></tr></thead><tbody>
-          {mappings.map(mapping => <tr key={mapping.id}><td className="user-name">{mapping.resource_type === 'ROLE' ? 'Role' : 'Application'}: {mapping.resource_display_name}</td><td>{mapping.assignment_type}</td><td><StatusBadge status={mapping.status}/></td><td style={{ display: 'flex', gap: 6 }}><button className="btn" onClick={() => void toggleMappingStatus(mapping)}>{mapping.status === 'ACTIVE' ? 'Disable' : 'Enable'}</button><button className="btn" onClick={() => void removeMapping(mapping)}>Delete</button></td></tr>)}
+          {mappings.map(mapping => <tr key={mapping.id}><td className="user-name">{mapping.resource_type === 'ROLE' ? 'Role' : mapping.resource_type === 'BUSINESS_ROLE' ? 'Business Role' : 'Application'}: {mapping.resource_display_name}</td><td>{mapping.assignment_type}</td><td><StatusBadge status={mapping.status}/></td><td style={{ display: 'flex', gap: 6 }}><button className="btn" onClick={() => void toggleMappingStatus(mapping)}>{mapping.status === 'ACTIVE' ? 'Disable' : 'Enable'}</button><button className="btn" onClick={() => void removeMapping(mapping)}>Delete</button></td></tr>)}
         </tbody></table>}</div>
       </div>
     </section>
@@ -2944,6 +3302,7 @@ function BirthrightPoliciesPanel() {
   const { data: roles } = useApiResource<ApiRole[]>('/api/v1/roles');
   const { data: applications } = useApiResource<ApiApplication[]>('/api/v1/applications');
   const { data: packages } = useApiResource<ApiPackage[]>('/api/v1/packages');
+  const { data: businessRoles } = useApiResource<ApiBusinessRole[]>('/api/v1/business-roles');
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
@@ -2953,8 +3312,8 @@ function BirthrightPoliciesPanel() {
   const [editingPolicyId, setEditingPolicyId] = useState<string | null>(null);
   const recheckText = (r: { users_checked: number; granted: number; revoked: number } | null | undefined) => r ? `Saved. Re-checked ${r.users_checked} ${r.users_checked === 1 ? 'person' : 'people'}: ${r.granted} newly eligible, ${r.revoked} access removed.` : 'Saved.';
   const openPolicyEdit = (policy: ApiBirthrightPolicy) => { setEditingPolicyId(policy.id); setForm({ ...emptyForm, name: policy.name, match_field: policy.match_field || 'department', match_value: policy.match_value || '' }); setOpen(true); setMessage(''); };
-  const targets: Array<ApiGroup | ApiRole | ApiApplication | ApiPackage> = form.resource_type === 'GROUP' ? (groups || []) : form.resource_type === 'ROLE' ? (roles || []) : form.resource_type === 'APPLICATION' ? (applications || []) : (packages || []);
-  const resourceLabel = (p: ApiBirthrightPolicy) => (p.resource_type === 'GROUP' ? groups : p.resource_type === 'ROLE' ? roles : p.resource_type === 'APPLICATION' ? applications : packages)?.find(t => t.id === p.resource_id)?.name || p.resource_id;
+  const targets: Array<ApiGroup | ApiRole | ApiApplication | ApiPackage | ApiBusinessRole> = form.resource_type === 'GROUP' ? (groups || []) : form.resource_type === 'ROLE' ? (roles || []) : form.resource_type === 'APPLICATION' ? (applications || []) : form.resource_type === 'BUSINESS_ROLE' ? (businessRoles || []) : (packages || []);
+  const resourceLabel = (p: ApiBirthrightPolicy) => (p.resource_type === 'GROUP' ? groups : p.resource_type === 'ROLE' ? roles : p.resource_type === 'APPLICATION' ? applications : p.resource_type === 'BUSINESS_ROLE' ? businessRoles : packages)?.find(t => t.id === p.resource_id)?.name || p.resource_id;
 
   // JSON create/view/edit — a separate, additive path alongside the simple form above. `jsonPolicyId === 'new'`
   // means creating (POST .../json); any other id means viewing/editing that existing policy (GET then PUT
@@ -3056,7 +3415,7 @@ function BirthrightPoliciesPanel() {
             ? <select className="select" value={form.match_value} onChange={event => setForm({...form, match_value: event.target.value})}><option value="">Select a department</option>{form.match_value && !(departmentList || []).some(d => d.name === form.match_value) && <option value={form.match_value}>{form.match_value} (not in the department list)</option>}{(departmentList || []).map(d => <option key={d.id} value={d.name}>{d.name}</option>)}</select>
             : <input className="select" value={form.match_value} onChange={event => setForm({...form, match_value: event.target.value})} placeholder="e.g. Senior Analyst"/>}</label>
           {!editingPolicyId && <>
-          <label className="key"><span>Grant</span><select className="select" value={form.resource_type} onChange={event => setForm({...form, resource_type: event.target.value, resource_id: ''})}><option value="GROUP">Group</option><option value="ROLE">Role</option><option value="APPLICATION">Application</option><option value="PACKAGE">Access Package</option></select></label>
+          <label className="key"><span>Grant</span><select className="select" value={form.resource_type} onChange={event => setForm({...form, resource_type: event.target.value, resource_id: ''})}><option value="GROUP">Group</option><option value="ROLE">Role</option><option value="APPLICATION">Application</option><option value="PACKAGE">Access Package</option><option value="BUSINESS_ROLE">Business Role</option></select></label>
           <label className="key"><span>Target</span><select className="select" value={form.resource_id} onChange={event => setForm({...form, resource_id: event.target.value})}><option value="">Select a target</option>{targets.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
           <label className="key"><span>Assignment type</span><select className="select" value={form.assignment_type} onChange={event => setForm({...form, assignment_type: event.target.value})}><option value="PERMANENT">Permanent</option><option value="TEMPORARY">Temporary</option></select></label>
           </>}
@@ -3237,7 +3596,7 @@ function PrivilegedAccountActivityPage() {
 }
 interface ApiScopeTargetResolved { resource_type: string; resource_id: string; resource_display_name: string | null; }
 interface ApiAccessReviewCampaign { id: string; name: string; description: string | null; scope_type: string; scope_resource_type: string | null; scope_resource_id: string | null; scope_targets: ApiScopeTargetResolved[] | null; scope_user_id: string | null; scope_account_type: string | null; scope_inactive_days: number | null; reviewer_id: string; reviewer_display_name: string | null; fallback_reviewer_id: string | null; fallback_reviewer_display_name: string | null; fallback_unlock_hours: number | null; status: string; due_at: string; on_no_response?: string; frequency_days: number | null; schedule_day_of_month: number | null; schedule_time: string | null; schedule_every_months: number | null; schedule_due_days: number | null; next_run_at: string | null; parent_campaign_id: string | null; created_by: string | null; created_at: string; completed_at: string | null; item_count: number; decided_count: number; approved_count: number; revoked_count: number; auto_revoked_count: number; }
-interface ApiAccessReviewItem { id: string; campaign_id: string; campaign_name: string | null; assignment_id: string; user_id: string; user_display_name: string | null; user_email: string | null; granted_via: string | null; package_id: string | null; package_name: string | null; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; assignment_status_at_snapshot: string; decision: string; decided_by: string | null; decided_by_display_name: string | null; decided_at: string | null; justification: string | null; created_at: string; }
+interface ApiAccessReviewItem { id: string; campaign_id: string; campaign_name: string | null; assignment_id: string; user_id: string; user_display_name: string | null; user_email: string | null; granted_via: string | null; package_id: string | null; package_name: string | null; business_role_id: string | null; business_role_name: string | null; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; assignment_status_at_snapshot: string; decision: string; decided_by: string | null; decided_by_display_name: string | null; decided_at: string | null; justification: string | null; created_at: string; }
 interface ApiResourceTally { name: string; count: number; }
 interface ApiAccessReviewDashboard { total_campaigns: number; active_campaigns: number; completed_campaigns: number; recurring_campaigns: number; total_items: number; pending_items: number; approved_items: number; revoked_items: number; auto_revoked_items: number; top_groups: ApiResourceTally[]; top_applications: ApiResourceTally[]; }
 const emptyCampaignForm = { name: '', description: '', scope_type: 'ALL', scope_resource_type: 'GROUP', scope_resource_id: '', scope_targets: [] as { resource_type: string; resource_id: string; name: string }[], scope_user_id: '', scope_account_type: 'PU', scope_inactive_days: '90', reviewer_id: '', fallback_reviewer_id: '', fallback_unlock_hours: '', due_days: '30', on_no_response: 'REVOKE', frequency_days: '30', recurrence: 'none', schedule_day: '15', schedule_time: '09:00', schedule_every_months: '1' };
@@ -3272,16 +3631,16 @@ function RecurrenceFields({ value, onChange, timezone }: { value: RecurrenceStat
     </div>}
   </div>;
 }
-function scopeSummary(c: ApiAccessReviewCampaign, groups?: ApiGroup[] | null, roles?: ApiRole[] | null, applications?: ApiApplication[] | null, packages?: ApiPackage[] | null, users?: ApiUser[] | null): string {
+function scopeSummary(c: ApiAccessReviewCampaign, groups?: ApiGroup[] | null, roles?: ApiRole[] | null, applications?: ApiApplication[] | null, packages?: ApiPackage[] | null, users?: ApiUser[] | null, businessRoles?: ApiBusinessRole[] | null): string {
   if (c.scope_type === 'ALL') return 'Every current grant';
   if (c.scope_type === 'ACCOUNT_TYPE') return `${c.scope_account_type} accounts`;
   if (c.scope_type === 'INACTIVE_USERS') return `No sign-in in ${c.scope_inactive_days}+ days`;
   if (c.scope_type === 'MOVER') return `Mover review: ${users?.find(u => u.id === c.scope_user_id)?.display_name || 'one user'} — access no policy granted`;
   if (c.scope_type === 'USER') return users?.find(u => u.id === c.scope_user_id)?.display_name || 'One user';
   if (c.scope_type === 'MULTIPLE_RESOURCES') return (c.scope_targets || []).map(t => t.resource_display_name || t.resource_id).join(', ') || '—';
-  const list = c.scope_resource_type === 'GROUP' ? groups : c.scope_resource_type === 'ROLE' ? roles : c.scope_resource_type === 'APPLICATION' ? applications : packages;
+  const list = c.scope_resource_type === 'GROUP' ? groups : c.scope_resource_type === 'ROLE' ? roles : c.scope_resource_type === 'APPLICATION' ? applications : c.scope_resource_type === 'BUSINESS_ROLE' ? businessRoles : packages;
   const name = list?.find(t => t.id === c.scope_resource_id)?.name;
-  return c.scope_type === 'RESOURCE_TYPE' ? `Every ${(c.scope_resource_type || '').toLowerCase()}` : (name || c.scope_resource_type || '—');
+  return c.scope_type === 'RESOURCE_TYPE' ? `Every ${(c.scope_resource_type || '').toLowerCase().replace('_', ' ')}` : (name || c.scope_resource_type || '—');
 }
 const FREQUENCY_PRESETS: Array<{ value: string; label: string }> = [
   { value: '30', label: 'Monthly' },
@@ -3356,6 +3715,7 @@ function AccessReviewsPage() {
   const { data: roles } = useApiResource<ApiRole[]>('/api/v1/roles');
   const { data: applications } = useApiResource<ApiApplication[]>('/api/v1/applications');
   const { data: packages } = useApiResource<ApiPackage[]>('/api/v1/packages');
+  const { data: businessRoles } = useApiResource<ApiBusinessRole[]>('/api/v1/business-roles');
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(emptyCampaignForm);
   const [saving, setSaving] = useState(false);
@@ -3365,7 +3725,7 @@ function AccessReviewsPage() {
   const [editSaving, setEditSaving] = useState(false);
   const [editMessage, setEditMessage] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const resourceTargets: Array<ApiGroup | ApiRole | ApiApplication | ApiPackage> = form.scope_resource_type === 'GROUP' ? (groups || []) : form.scope_resource_type === 'ROLE' ? (roles || []) : form.scope_resource_type === 'APPLICATION' ? (applications || []) : (packages || []);
+  const resourceTargets: Array<ApiGroup | ApiRole | ApiApplication | ApiPackage | ApiBusinessRole> = form.scope_resource_type === 'GROUP' ? (groups || []) : form.scope_resource_type === 'ROLE' ? (roles || []) : form.scope_resource_type === 'APPLICATION' ? (applications || []) : form.scope_resource_type === 'BUSINESS_ROLE' ? (businessRoles || []) : (packages || []);
 
   // "ASAP" live updates: nobody has to manually refresh to see a decision someone else just made land in the
   // list/progress counts or the dashboard tiles — same 20-30s polling convention every other live page here uses.
@@ -3405,7 +3765,7 @@ function AccessReviewsPage() {
   const [ownerSuggestions, setOwnerSuggestions] = useState<{ id: string; label: string }[]>([]);
   useEffect(() => {
     setOwnerSuggestions([]);
-    if (!open || form.scope_type !== 'SPECIFIC_RESOURCE' || !form.scope_resource_id || !['PACKAGE', 'APPLICATION', 'GROUP'].includes(form.scope_resource_type)) return;
+    if (!open || form.scope_type !== 'SPECIFIC_RESOURCE' || !form.scope_resource_id || !['PACKAGE', 'APPLICATION', 'GROUP', 'BUSINESS_ROLE'].includes(form.scope_resource_type)) return;
     let cancelled = false;
     (async () => {
       try {
@@ -3525,8 +3885,8 @@ function AccessReviewsPage() {
       <div className="key-grid" style={{marginBottom:10}}>
         <label className="key"><span>Name</span><input className="select" value={form.name} onChange={event => setForm({...form, name: event.target.value})} placeholder="e.g. Finance Team Q1 Review"/></label>
         <label className="key"><span>Description (optional)</span><input className="select" value={form.description} onChange={event => setForm({...form, description: event.target.value})}/></label>
-        <label className="key"><span>Scope</span><select className="select" value={form.scope_type} onChange={event => setForm({...form, scope_type: event.target.value, scope_targets: []})}><option value="ALL">Every current grant</option><option value="RESOURCE_TYPE">Every Group / Role / Application / Package grant</option><option value="SPECIFIC_RESOURCE">One specific Group / Role / Application / Package</option><option value="MULTIPLE_RESOURCES">Several specific Groups / Roles / Applications / Packages, mixed</option><option value="USER">One user's entire access</option><option value="ACCOUNT_TYPE">Every Privileged (PU) or Test (TU) account</option><option value="INACTIVE_USERS">Users inactive for N+ days</option></select></label>
-        {(form.scope_type === 'RESOURCE_TYPE' || form.scope_type === 'SPECIFIC_RESOURCE' || form.scope_type === 'MULTIPLE_RESOURCES') && <label className="key"><span>Resource type</span><select className="select" value={form.scope_resource_type} onChange={event => setForm({...form, scope_resource_type: event.target.value, scope_resource_id: ''})}><option value="GROUP">Group</option><option value="ROLE">Role</option><option value="APPLICATION">Application</option><option value="PACKAGE">Access Package</option></select></label>}
+        <label className="key"><span>Scope</span><select className="select" value={form.scope_type} onChange={event => setForm({...form, scope_type: event.target.value, scope_targets: []})}><option value="ALL">Every current grant</option><option value="RESOURCE_TYPE">Every Group / Role / Application / Package / Business Role grant</option><option value="SPECIFIC_RESOURCE">One specific Group / Role / Application / Package / Business Role</option><option value="MULTIPLE_RESOURCES">Several specific Groups / Roles / Applications / Packages / Business Roles, mixed</option><option value="USER">One user's entire access</option><option value="ACCOUNT_TYPE">Every Privileged (PU) or Test (TU) account</option><option value="INACTIVE_USERS">Users inactive for N+ days</option></select></label>
+        {(form.scope_type === 'RESOURCE_TYPE' || form.scope_type === 'SPECIFIC_RESOURCE' || form.scope_type === 'MULTIPLE_RESOURCES') && <label className="key"><span>Resource type</span><select className="select" value={form.scope_resource_type} onChange={event => setForm({...form, scope_resource_type: event.target.value, scope_resource_id: ''})}><option value="GROUP">Group</option><option value="ROLE">Role</option><option value="APPLICATION">Application</option><option value="PACKAGE">Access Package</option><option value="BUSINESS_ROLE">Business Role</option></select></label>}
         {form.scope_type === 'SPECIFIC_RESOURCE' && <label className="key"><span>Target</span><select className="select" value={form.scope_resource_id} onChange={event => setForm({...form, scope_resource_id: event.target.value})}><option value="">Select a target</option>{resourceTargets.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>}
         {form.scope_type === 'MULTIPLE_RESOURCES' && <label className="key"><span>Add a target</span><div style={{display:'flex',gap:8}}><select className="select" style={{flex:1}} value={form.scope_resource_id} onChange={event => setForm({...form, scope_resource_id: event.target.value})}><option value="">Select a target</option>{resourceTargets.filter(t => !form.scope_targets.some(existing => existing.resource_type === form.scope_resource_type && existing.resource_id === t.id)).map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select><button type="button" className="btn" disabled={!form.scope_resource_id} onClick={() => { const target = resourceTargets.find(t => t.id === form.scope_resource_id); if (!target) return; setForm(prev => ({...prev, scope_resource_id: '', scope_targets: [...prev.scope_targets, { resource_type: prev.scope_resource_type, resource_id: target.id, name: target.name }]})); }}>Add</button></div></label>}
         {form.scope_type === 'USER' && <label className="key"><span>User</span><select className="select" value={form.scope_user_id} onChange={event => setForm({...form, scope_user_id: event.target.value})}><option value="">Select a user</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>}
@@ -3568,7 +3928,7 @@ function AccessReviewsPage() {
         {campaigns.map(c => <Fragment key={c.id}>
         <tr>
           <td className="user-name"><button type="button" className="btn" style={{border:'none',background:'none',padding:0,display:'inline-flex',alignItems:'center',gap:6,fontWeight:600,color:'inherit'}} onClick={() => setExpandedId(expandedId === c.id ? null : c.id)}><ChevronRight size={14} style={{transform: expandedId === c.id ? 'rotate(90deg)' : 'none', transition:'transform 0.1s'}}/> {c.name}</button></td>
-          <td style={{whiteSpace:'normal',maxWidth:260}}>{scopeSummary(c, groups, roles, applications, packages, users)}</td>
+          <td style={{whiteSpace:'normal',maxWidth:260}}>{scopeSummary(c, groups, roles, applications, packages, users, businessRoles)}</td>
           <td>{c.reviewer_display_name || c.reviewer_id}</td>
           <td style={{minWidth:190}}>
             <div style={{fontSize:12,marginBottom:5}}>{c.decided_count} / {c.item_count} decided</div>
@@ -3593,18 +3953,29 @@ function AccessReviewsPage() {
 }
 type ReviewRow =
   | { kind: 'single'; item: ApiAccessReviewItem }
-  | { kind: 'package'; key: string; packageName: string; items: ApiAccessReviewItem[] };
-// Items granted through the same access package to the same user collapse into ONE package row (approve/revoke
-// the whole package for that user in one action, or expand it and decide each item individually).
+  | { kind: 'package'; key: string; packageName: string; items: ApiAccessReviewItem[] }
+  | { kind: 'businessRole'; key: string; roleName: string; items: ApiAccessReviewItem[] };
+// Items granted through the same access package (or Business Role) to the same user collapse into ONE row
+// (approve/revoke the whole batch for that user in one action, or expand it and decide each item individually).
 function groupReviewItems(items: ApiAccessReviewItem[]): ReviewRow[] {
   const rows: ReviewRow[] = [];
   const index = new Map<string, number>();
   for (const item of items) {
-    if (!item.package_id) { rows.push({ kind: 'single', item }); continue; }
-    const key = `${item.user_id}:${item.package_id}`;
-    const at = index.get(key);
-    if (at === undefined) { index.set(key, rows.length); rows.push({ kind: 'package', key, packageName: item.package_name || 'Package', items: [item] }); }
-    else (rows[at] as Extract<ReviewRow, { kind: 'package' }>).items.push(item);
+    if (item.package_id) {
+      const key = `pkg:${item.user_id}:${item.package_id}`;
+      const at = index.get(key);
+      if (at === undefined) { index.set(key, rows.length); rows.push({ kind: 'package', key, packageName: item.package_name || 'Package', items: [item] }); }
+      else (rows[at] as Extract<ReviewRow, { kind: 'package' }>).items.push(item);
+      continue;
+    }
+    if (item.business_role_id) {
+      const key = `br:${item.user_id}:${item.business_role_id}`;
+      const at = index.get(key);
+      if (at === undefined) { index.set(key, rows.length); rows.push({ kind: 'businessRole', key, roleName: item.business_role_name || 'Business Role', items: [item] }); }
+      else (rows[at] as Extract<ReviewRow, { kind: 'businessRole' }>).items.push(item);
+      continue;
+    }
+    rows.push({ kind: 'single', item });
   }
   return rows;
 }
@@ -3657,13 +4028,17 @@ function ReviewItemsTable({ items, variant, onChanged }: { items: ApiAccessRevie
       const first = row.items[0];
       const pending = row.items.filter(i => i.decision === 'PENDING').length;
       const open = expanded.includes(row.key);
+      const icon = row.kind === 'package' ? '📦' : '🏷';
+      const label = row.kind === 'package' ? row.packageName : row.roleName;
+      const grantedViaLabel = row.kind === 'package' ? `Package: ${label}` : `Business Role: ${label}`;
+      const kindNoun = row.kind === 'package' ? 'package' : 'Business Role';
       return <Fragment key={row.key}>
         <tr>
           <td>{userCell(first)}</td>
-          <td><button type="button" onClick={() => setExpanded(prev => open ? prev.filter(k => k !== row.key) : [...prev, row.key])} style={{border:'none',background:'none',padding:0,display:'inline-flex',alignItems:'center',gap:6,fontWeight:700,color:'inherit',cursor:'pointer',font:'inherit'}}><ChevronRight size={14} style={{transform: open ? 'rotate(90deg)' : 'none', transition:'transform 0.1s'}}/>📦 {row.packageName} · {row.items.length} item{row.items.length === 1 ? '' : 's'}</button></td>
-          <td style={{whiteSpace:'normal',maxWidth:240}}>Package: {row.packageName}</td>
+          <td><button type="button" onClick={() => setExpanded(prev => open ? prev.filter(k => k !== row.key) : [...prev, row.key])} style={{border:'none',background:'none',padding:0,display:'inline-flex',alignItems:'center',gap:6,fontWeight:700,color:'inherit',cursor:'pointer',font:'inherit'}}><ChevronRight size={14} style={{transform: open ? 'rotate(90deg)' : 'none', transition:'transform 0.1s'}}/>{icon} {label} · {row.items.length} item{row.items.length === 1 ? '' : 's'}</button></td>
+          <td style={{whiteSpace:'normal',maxWidth:240}}>{grantedViaLabel}</td>
           {admin && <><td>—</td><td>{pending > 0 ? <span className="badge warning">{pending} PENDING</span> : <span className="badge success">ALL DECIDED</span>}</td><td>—</td></>}
-          <td>{buttons(row.items, `${first.user_display_name || 'this user'}'s access to package "${row.packageName}" (${row.items.length} items)`, row.key)}</td>
+          <td>{buttons(row.items, `${first.user_display_name || 'this user'}'s access to ${kindNoun} "${label}" (${row.items.length} items)`, row.key)}</td>
         </tr>
         {open && row.items.map(item => itemRow(item, true))}
       </Fragment>;
@@ -3764,6 +4139,43 @@ function MyPackagesPage() {
       </div>
       <div className="detail-section">
         {pkg.items.map(item => <div key={item.id} className="activity-row" style={{gridTemplateColumns:'1fr auto'}}><div className="activity-copy"><strong>{item.resource_display_name || item.resource_id}</strong><small>{item.resource_type}</small></div><button className="btn" disabled={pkg.items.length <= 1} title={pkg.items.length <= 1 ? 'A package must keep at least one item' : undefined} onClick={() => void removeItem(pkg, item)}>Remove</button></div>)}
+      </div>
+    </section>)}
+  </Page>;
+}
+function MyBusinessRolesPage() {
+  const auth = useAuth();
+  const { data: roles, loading, error, reload } = useApiResource<ApiBusinessRole[]>('/api/v1/business-roles/owned');
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [newName, setNewName] = useState('');
+  const [message, setMessage] = useState('');
+  const call = async (path: string, init: RequestInit, failure: string): Promise<boolean> => {
+    setMessage('');
+    try {
+      const response = await auth.apiRequest(path, init);
+      if (response.ok) { reload(); return true; }
+      setMessage((await response.json().catch(() => null))?.error?.message || failure);
+    } catch { setMessage(failure); }
+    return false;
+  };
+  const rename = async (role: ApiBusinessRole) => {
+    if (!newName.trim()) { setMessage('Enter a role name.'); return; }
+    if (await call(`/api/v1/business-roles/${role.id}/owner-rename`, { method: 'PATCH', body: JSON.stringify({ name: newName.trim() }) }, 'Unable to rename this Business Role.')) setRenamingId(null);
+  };
+  const removeItem = async (role: ApiBusinessRole, item: ApiBusinessRoleItem) => {
+    if (!window.confirm(`Remove "${item.resource_display_name || item.resource_id}" from "${role.name}"? Access already granted from this role is not affected — only future assignments.`)) return;
+    await call(`/api/v1/business-roles/${role.id}/items/${item.id}`, { method: 'DELETE' }, 'Unable to remove this item.');
+  };
+  return <Page eyebrow="SELF-SERVICE" title="My Business Roles" subtitle="Business Roles you own. You can rename them or remove mapped items — nothing else; ask an administrator for anything more." action={<button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button>}>
+    {message && <div className="notice" style={{marginBottom:14}}>{message}</div>}
+    {loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : !roles || roles.length === 0 ? <div className="panel"><div className="empty">You don't own any Business Roles.</div></div> : roles.map(role => <section key={role.id} className="panel" style={{marginBottom:18}}>
+      <div className="panel-head">
+        {renamingId === role.id
+          ? <div style={{display:'flex',gap:8,alignItems:'center'}}><input className="select" value={newName} onChange={event => setNewName(event.target.value)} aria-label="New Business Role name"/><button className="btn btn-primary" onClick={() => void rename(role)}>Save</button><button className="btn" onClick={() => setRenamingId(null)}>Cancel</button></div>
+          : <><h2>🏷 {role.name}</h2><button className="btn" onClick={() => { setRenamingId(role.id); setNewName(role.name); setMessage(''); }}>Rename</button></>}
+      </div>
+      <div className="detail-section">
+        {role.items.map(item => <div key={item.id} className="activity-row" style={{gridTemplateColumns:'1fr auto'}}><div className="activity-copy"><strong>{item.resource_display_name || item.resource_id}</strong><small>{item.resource_type}{item.it_role_label ? ` · ${item.it_role_label}` : ''}</small></div><button className="btn" disabled={role.items.length <= 1} title={role.items.length <= 1 ? 'A Business Role must keep at least one mapped item' : undefined} onClick={() => void removeItem(role, item)}>Remove</button></div>)}
       </div>
     </section>)}
   </Page>;

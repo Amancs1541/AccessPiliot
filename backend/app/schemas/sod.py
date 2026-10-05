@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 class SodPolicyEntityCreate(BaseModel):
     conflict_side: str = Field(pattern="^(A|B)$")
-    entity_type: str = Field(pattern="^(GROUP|ROLE|APPLICATION|PACKAGE)$")
+    entity_type: str = Field(pattern="^(GROUP|ROLE|APPLICATION|PACKAGE|BUSINESS_ROLE)$")
     entity_id: UUID
     app_role_external_id: Optional[str] = Field(default=None, max_length=100)
 

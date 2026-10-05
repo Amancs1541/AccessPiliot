@@ -12,7 +12,7 @@ SCOPE_TYPES = ("ALL", "RESOURCE_TYPE", "SPECIFIC_RESOURCE", "MULTIPLE_RESOURCES"
 class ScopeTargetItem(BaseModel):
     """One entry in a MULTIPLE_RESOURCES campaign's target list — e.g. {GROUP, <id>} and {PACKAGE, <id>} can sit
     side by side in the same campaign, mixing resource types freely."""
-    resource_type: str = Field(pattern="^(GROUP|ROLE|APPLICATION|PACKAGE)$")
+    resource_type: str = Field(pattern="^(GROUP|ROLE|APPLICATION|PACKAGE|BUSINESS_ROLE)$")
     resource_id: UUID
 
 
@@ -20,7 +20,7 @@ class AccessReviewCampaignCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     description: Optional[str] = None
     scope_type: str = Field(pattern="^(ALL|RESOURCE_TYPE|SPECIFIC_RESOURCE|MULTIPLE_RESOURCES|USER|ACCOUNT_TYPE|INACTIVE_USERS|MOVER)$")
-    scope_resource_type: Optional[str] = Field(default=None, pattern="^(GROUP|ROLE|APPLICATION|PACKAGE)$")
+    scope_resource_type: Optional[str] = Field(default=None, pattern="^(GROUP|ROLE|APPLICATION|PACKAGE|BUSINESS_ROLE)$")
     scope_resource_id: Optional[UUID] = None
     scope_targets: Optional[list[ScopeTargetItem]] = None
     scope_user_id: Optional[UUID] = None
@@ -149,6 +149,8 @@ class AccessReviewItemResponse(BaseModel):
     granted_via: Optional[str] = None
     package_id: Optional[UUID] = None
     package_name: Optional[str] = None
+    business_role_id: Optional[UUID] = None
+    business_role_name: Optional[str] = None
     resource_type: str
     resource_id: UUID
     resource_display_name: Optional[str] = None

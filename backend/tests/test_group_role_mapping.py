@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
-from app.models import AccessAssignment, Group, IdentityProvider, Role, User, UserGroup
+from app.models import AccessAssignment, BusinessRole, BusinessRoleItem, Group, IdentityProvider, Role, User, UserGroup
 from app.security.auth import AuthenticatedUser, require_authenticated_user
 
 
@@ -112,6 +112,88 @@ async def test_deleting_a_mapping_instantly_revokes_current_holders(db_override)
     async with db_override.factory() as session:
         assignment = (await session.execute(select(AccessAssignment).where(AccessAssignment.user_id == seeded["member_id"]))).scalars().one()
     assert assignment.status == "REVOKED"
+
+
+async def _seed_with_business_role(factory, *, status: str = "ACTIVE"):
+    """Same shape as _seed, plus a Business Role with two mapped items (a Group and a Role, distinct from the
+    source group) — proves GROUP_ROLE_MAPPING's BUSINESS_ROLE action kind mirrors birthright's own fan-out."""
+    async with factory() as session:
+        provider = IdentityProvider(name="Directory", type="MOCK", status="CONNECTED", tenant_id="t")
+        session.add(provider)
+        await session.flush()
+        source_group = Group(provider_id=provider.id, external_id="g-src", name="IT Department (GRM)", status="ACTIVE", is_privileged=False)
+        item_group = Group(provider_id=provider.id, external_id="g-item", name="Finance Group (GRM item)", status="ACTIVE", is_privileged=False)
+        item_role = Role(provider_id=provider.id, external_id="r-item", name="Finance Role (GRM item)", role_type="DIRECTORY_ROLE", status="ACTIVE")
+        member = User(provider_id=provider.id, external_id="u-grm", email="grm-member@x.com", display_name="GRM Member", status="ACTIVE")
+        session.add_all([source_group, item_group, item_role, member])
+        await session.flush()
+        session.add(UserGroup(user_id=member.id, group_id=source_group.id, source="SYNC"))
+        business_role = BusinessRole(name="Finance Analyst (GRM test)", status=status)
+        session.add(business_role)
+        await session.flush()
+        session.add_all([
+            BusinessRoleItem(role_id=business_role.id, resource_type="GROUP", resource_id=item_group.id),
+            BusinessRoleItem(role_id=business_role.id, resource_type="ROLE", resource_id=item_role.id),
+        ])
+        await session.commit()
+        return {"provider_id": provider.id, "source_group_id": source_group.id, "item_group_id": item_group.id, "item_role_id": item_role.id, "member_id": member.id, "business_role_id": business_role.id}
+
+
+@pytest.mark.asyncio
+async def test_creating_a_mapping_to_a_business_role_instantly_grants_every_item(db_override):
+    seeded = await _seed_with_business_role(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/policies/group-role-mappings", json={"source_group_id": str(seeded["source_group_id"]), "resource_type": "BUSINESS_ROLE", "resource_id": str(seeded["business_role_id"])})
+    assert created.status_code == 201
+    assert created.json()["resource_type"] == "BUSINESS_ROLE"
+    assert created.json()["resource_display_name"] == "Finance Analyst (GRM test)"
+
+    async with db_override.factory() as session:
+        assignments = (await session.execute(select(AccessAssignment).where(AccessAssignment.user_id == seeded["member_id"]))).scalars().all()
+    assert len(assignments) == 2
+    assert sorted(a.resource_type for a in assignments) == ["GROUP", "ROLE"]
+    assert all(a.status == "ELIGIBLE" for a in assignments)
+    assert all(a.group_role_mapping_id is not None for a in assignments)
+    assert all(a.business_role_id == seeded["business_role_id"] for a in assignments)
+    assert assignments[0].role_assignment_id == assignments[1].role_assignment_id
+
+
+@pytest.mark.asyncio
+async def test_disabling_a_business_role_mapping_instantly_revokes_every_item(db_override):
+    seeded = await _seed_with_business_role(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/policies/group-role-mappings", json={"source_group_id": str(seeded["source_group_id"]), "resource_type": "BUSINESS_ROLE", "resource_id": str(seeded["business_role_id"])})
+        mapping_id = created.json()["id"]
+        disabled = await client.patch(f"/api/v1/policies/group-role-mappings/{mapping_id}", json={"status": "DISABLED"})
+    assert disabled.json()["status"] == "DISABLED"
+
+    async with db_override.factory() as session:
+        assignments = (await session.execute(select(AccessAssignment).where(AccessAssignment.user_id == seeded["member_id"]))).scalars().all()
+    assert len(assignments) == 2
+    assert all(a.status == "REVOKED" for a in assignments)
+
+
+@pytest.mark.asyncio
+async def test_a_business_role_mapping_rejects_an_unknown_role(db_override):
+    seeded = await _seed_with_business_role(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/policies/group-role-mappings", json={"source_group_id": str(seeded["source_group_id"]), "resource_type": "BUSINESS_ROLE", "resource_id": "00000000-0000-0000-0000-000000000000"})
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_a_non_active_business_role_mapping_grants_nothing(db_override):
+    seeded = await _seed_with_business_role(db_override.factory, status="DRAFT")
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/policies/group-role-mappings", json={"source_group_id": str(seeded["source_group_id"]), "resource_type": "BUSINESS_ROLE", "resource_id": str(seeded["business_role_id"])})
+
+    async with db_override.factory() as session:
+        assignments = (await session.execute(select(AccessAssignment).where(AccessAssignment.user_id == seeded["member_id"]))).scalars().all()
+    assert assignments == []
 
 
 @pytest.mark.asyncio

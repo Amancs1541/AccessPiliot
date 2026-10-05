@@ -13,7 +13,7 @@ class BirthrightPolicyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     match_field: str = Field(pattern="^(department|job_title)$")
     match_value: str = Field(min_length=1, max_length=255)
-    resource_type: str = Field(pattern="^(GROUP|ROLE|APPLICATION|PACKAGE)$")
+    resource_type: str = Field(pattern="^(GROUP|ROLE|APPLICATION|PACKAGE|BUSINESS_ROLE)$")
     resource_id: UUID
     app_role_external_id: Optional[str] = Field(default=None, max_length=100)
     assignment_type: str = Field(default="PERMANENT", pattern="^(PERMANENT|TEMPORARY)$")
@@ -138,7 +138,7 @@ class BirthrightPolicyJson(BaseModel):
 
 class GroupRoleMappingCreate(BaseModel):
     source_group_id: UUID
-    resource_type: str = Field(pattern="^(ROLE|APPLICATION)$")
+    resource_type: str = Field(pattern="^(ROLE|APPLICATION|BUSINESS_ROLE)$")
     resource_id: UUID
     app_role_external_id: Optional[str] = Field(default=None, max_length=100)
     assignment_type: str = Field(default="PERMANENT", pattern="^(PERMANENT|TEMPORARY)$")

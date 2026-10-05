@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
-from app.models import AccessAssignment, AccessPackage, AccessPackageItem, Application, Group, IdentityProvider, Role, SodException, User, UserGroup
+from app.models import AccessAssignment, AccessPackage, AccessPackageItem, Application, BusinessRole, BusinessRoleItem, Group, IdentityProvider, Role, SodException, User, UserGroup
 from app.security.auth import AuthenticatedUser, require_authenticated_user
 from app.services.sod import revoke_lapsed_sod_exceptions
 from app.workers.activation import activate_due_assignments
@@ -785,6 +785,71 @@ async def test_package_type_entity_expands_to_its_items(db_override):
         assert first.status_code == 201
         blocked = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_b_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Held via the package's own item."})
     assert blocked.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_business_role_type_entity_expands_to_its_items(db_override):
+    """Completing the loop from this session's Business Role work: a BUSINESS_ROLE SoD entity resolves live
+    against business_role_items, exactly mirroring the existing PACKAGE entity above."""
+    ids = await _seed_directory(db_override.factory)
+    async with db_override.factory() as session:
+        role = BusinessRole(name="Finance Analyst", status="ACTIVE")
+        session.add(role)
+        await session.flush()
+        session.add(BusinessRoleItem(role_id=role.id, resource_type="GROUP", resource_id=ids["group_b_id"]))
+        await session.commit()
+        role_id = role.id
+
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/sod/policies", json={
+            "name": "Business-role-based conflict",
+            "severity": "MEDIUM",
+            "entities": [
+                {"conflict_side": "A", "entity_type": "GROUP", "entity_id": str(ids["group_a_id"])},
+                {"conflict_side": "B", "entity_type": "BUSINESS_ROLE", "entity_id": str(role_id)},
+            ],
+        })
+        assert created.status_code == 201
+
+        authenticate_as("AccessPilot.Admin")
+        first = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Side A."})
+        assert first.status_code == 201
+        blocked = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_b_id"]), "assignment_type": "PERMANENT", "bypass_activation": True, "justification": "Held via the business role's own item."})
+    assert blocked.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_dangling_business_role_reference_resolves_as_unresolved_not_an_error(db_override):
+    ids = await _seed_directory(db_override.factory)
+    async with db_override.factory() as session:
+        role = BusinessRole(name="Temporary Role", status="ACTIVE")
+        session.add(role)
+        await session.flush()
+        role_id = role.id
+        await session.commit()
+
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/sod/policies", json={
+            "name": "Dangling business role rule",
+            "entities": [
+                {"conflict_side": "A", "entity_type": "GROUP", "entity_id": str(ids["group_a_id"])},
+                {"conflict_side": "B", "entity_type": "BUSINESS_ROLE", "entity_id": str(role_id)},
+            ],
+        })
+        assert created.status_code == 201
+
+    async with db_override.factory() as session:
+        await session.delete(await session.get(BusinessRole, role_id))
+        await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        listed = await client.get("/api/v1/sod/policies")
+    assert listed.status_code == 200
+    entities = listed.json()[0]["entities"]
+    role_entity = next(e for e in entities if e["entity_type"] == "BUSINESS_ROLE")
+    assert role_entity["entity_resolved"] is False
 
 
 @pytest.mark.asyncio

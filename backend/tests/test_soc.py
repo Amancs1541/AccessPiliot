@@ -70,18 +70,18 @@ async def test_fields_lists_every_source_and_builtin_widget(db_override):
     assert source_names == {"audit_logs", "assignments"}
     assignments_fields = next(s["fields"] for s in body["sources"] if s["source"] == "assignments")
     assert {"status", "resource_type", "assignment_type"} <= {f["field"] for f in assignments_fields}
-    assert len(body["builtin_widgets"]) == 6
+    assert len(body["builtin_widgets"]) == 7
 
 
 @pytest.mark.asyncio
-async def test_a_never_customized_layout_returns_the_six_default_builtin_widgets(db_override):
+async def test_a_never_customized_layout_returns_the_seven_default_builtin_widgets(db_override):
     await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.SoCAdmin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/soc/layout")
     assert response.status_code == 200
     widgets = response.json()["widgets"]
-    assert len(widgets) == 6
+    assert len(widgets) == 7
     assert all(w["source"] == "builtin" and w["visible"] for w in widgets)
 
 
@@ -100,7 +100,7 @@ async def test_a_layout_saved_under_the_old_pre_builder_shape_falls_back_to_the_
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/soc/layout")
     assert response.status_code == 200
-    assert len(response.json()["widgets"]) == 6
+    assert len(response.json()["widgets"]) == 7
 
 
 @pytest.mark.asyncio
@@ -149,6 +149,32 @@ async def test_builtin_card_widget_computes_a_real_count(db_override):
         response = await client.post("/api/v1/soc/widget-data", json={"widgets": [{"id": "w1", "title": "Active sessions", "kind": "card", "source": "builtin", "builtin_id": "active_sessions", "order": 0}]})
     assert response.status_code == 200
     assert response.json()["results"]["w1"]["value"] == 1
+
+
+@pytest.mark.asyncio
+async def test_dormant_access_counts_only_long_active_assignments(db_override):
+    """Light role mining: 'dormant access' is the best honest proxy available with no real usage telemetry —
+    ACTIVE access activated 90+ days ago. A recently-activated one, and anything not yet ACTIVE, must not count."""
+    from datetime import timedelta
+    ids = await _seed_directory(db_override.factory)
+    now = datetime.now(timezone.utc)
+    async with db_override.factory() as session:
+        session.add(AccessAssignment(provider_id=ids["provider_id"], user_id=ids["target_user_id"], resource_type="GROUP", resource_id=ids["target_user_id"], assignment_type="PERMANENT", status="ACTIVE", activated_at=now - timedelta(days=120)))
+        session.add(AccessAssignment(provider_id=ids["provider_id"], user_id=ids["target_user_id"], resource_type="ROLE", resource_id=ids["target_user_id"], assignment_type="PERMANENT", status="ACTIVE", activated_at=now - timedelta(days=10)))
+        session.add(AccessAssignment(provider_id=ids["provider_id"], user_id=ids["target_user_id"], resource_type="APPLICATION", resource_id=ids["target_user_id"], assignment_type="PERMANENT", status="ELIGIBLE"))
+        await session.commit()
+
+    authenticate_as("AccessPilot.SoCAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        widget = {"id": "w1", "title": "Dormant access", "kind": "card", "source": "builtin", "builtin_id": "dormant_access", "order": 0}
+        data = await client.post("/api/v1/soc/widget-data", json={"widgets": [widget]})
+        assert data.json()["results"]["w1"]["value"] == 1
+
+        drilldown = await client.post("/api/v1/soc/widget-drilldown", json={"widget": widget})
+    rows = drilldown.json()["rows"]
+    assert len(rows) == 1
+    assert rows[0]["resource_type"] == "GROUP"
+    assert rows[0]["activated_at"] is not None
 
 
 @pytest.mark.asyncio
