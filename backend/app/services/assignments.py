@@ -26,7 +26,7 @@ def to_response(assignment: AccessAssignment, hydrated: dict) -> AssignmentRespo
         fallback_approver_id=assignment.fallback_approver_id, fallback_unlock_at=assignment.fallback_unlock_at,
         bypass_activation=assignment.bypass_activation,
         activated_at=assignment.activated_at, revoked_at=assignment.revoked_at, created_at=assignment.created_at,
-        package_name=hydrated.get("package_name"), business_role_name=hydrated.get("business_role_name"), sod_exception_expires_at=hydrated.get("sod_exception_expires_at"),
+        package_name=hydrated.get("package_name"), business_role_name=hydrated.get("business_role_name"), workflow_definition_name=hydrated.get("workflow_definition_name"), sod_exception_expires_at=hydrated.get("sod_exception_expires_at"),
     )
 
 
@@ -75,11 +75,18 @@ async def hydrate_display_fields(session: AsyncSession, assignment: AccessAssign
         from app.models import BusinessRole
         business_role = await session.get(BusinessRole, assignment.business_role_id)
         business_role_name = business_role.name if business_role else None
+    workflow_definition_name = None
+    if assignment.workflow_instance_id is not None:
+        from app.models import WorkflowDefinition, WorkflowInstance
+        instance = await session.get(WorkflowInstance, assignment.workflow_instance_id)
+        if instance is not None:
+            definition = await session.get(WorkflowDefinition, instance.workflow_definition_id)
+            workflow_definition_name = definition.name if definition else None
     # Local import to avoid a circular import at module level — sod.py itself imports from this module directly
     # (create_assignment, revoke_provider_access), so the reverse direction has to stay function-scoped.
     from app.services.sod import get_sod_exception_covering_assignment
     covering_exception = await get_sod_exception_covering_assignment(session, assignment)
-    return {"user_display_name": user.display_name if user else None, "resource_display_name": resource_name, "package_name": package_name, "business_role_name": business_role_name, "sod_exception_expires_at": covering_exception.expires_at if covering_exception else None}
+    return {"user_display_name": user.display_name if user else None, "resource_display_name": resource_name, "package_name": package_name, "business_role_name": business_role_name, "workflow_definition_name": workflow_definition_name, "sod_exception_expires_at": covering_exception.expires_at if covering_exception else None}
 
 
 async def _grant_provider_access(session: AsyncSession, provider_id: UUID, resource_type: str, target_external_id: str, user_external_id: str, app_role_external_id: Optional[str] = None) -> None:
@@ -224,9 +231,21 @@ async def create_assignment(session: AsyncSession, data, actor_subject: str, req
         if not fallback_approver:
             raise AccessPilotError("USER_NOT_FOUND", "The selected fallback approver was not found.", 404)
 
+    workflow_definition = None
+    if getattr(data, "workflow_definition_id", None) is not None:
+        from app.models import WorkflowDefinition
+        workflow_definition = await session.get(WorkflowDefinition, data.workflow_definition_id)
+        if workflow_definition is None:
+            raise AccessPilotError("WORKFLOW_DEFINITION_NOT_FOUND", "The selected workflow was not found.", 404)
+        if workflow_definition.status != "ACTIVE":
+            raise AccessPilotError("WORKFLOW_DEFINITION_NOT_ACTIVE", "This workflow is not currently accepting requests.", 409)
+
     requested_by = await _resolve_internal_user_id(session, actor_subject)
     now = datetime.now(timezone.utc)
-    approval_required = data.approver_id is not None
+    # A workflow is "the approval" exactly as much as a single approver is — it lands PENDING_APPROVAL the same
+    # way, just with approved_by/fallback_approver_id left unset (there is no single approver; the workflow's own
+    # stages decide it — see the workflow_definition branch right after this row is created, below).
+    approval_required = data.approver_id is not None or workflow_definition is not None
     effective_start = data.start_time or now
     bypass_activation = bool(getattr(data, "bypass_activation", False))
 
@@ -288,6 +307,15 @@ async def create_assignment(session: AsyncSession, data, actor_subject: str, req
     session.add(assignment)
     await session.flush()
 
+    if workflow_definition is not None:
+        # Local import to dodge a circular import — workflows.py itself imports _resolve_internal_user_id from
+        # this module, so the reverse direction has to stay function-scoped, same convention as the sod.py import
+        # in hydrate_display_fields above.
+        from app.services.workflows import build_user_condition_payload, start_workflow_instance
+        instance = await start_workflow_instance(session, workflow_definition, requested_by or data.user_id, build_user_condition_payload(target_user), "ASSIGNMENT", f"Access to {resource_name}", subject_id=assignment.id)
+        assignment.workflow_instance_id = instance.id
+        await session.flush()
+
     if status == "ACTIVE":
         # Bypassing straight to real access — this is the moment it becomes real, so supersede any existing
         # real/eligible access to the exact same target now, exactly like activate_assignment/approve_assignment do.
@@ -302,7 +330,7 @@ async def create_assignment(session: AsyncSession, data, actor_subject: str, req
             await _record_local_group_membership(session, data.user_id, data.resource_id)
         await record_audit(session, action="ASSIGNMENT_ACTIVATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=provider_id, actor_user_id=requested_by, request_id=request_id, metadata={"decision": "ADMIN_BYPASS", "justification": data.justification, "sod_override": bool(sod_conflicts)})
 
-    await record_audit(session, action="ASSIGNMENT_CREATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=provider_id, actor_user_id=requested_by, request_id=request_id, metadata={"status": status, "resource_type": data.resource_type, "bypass_activation": bypass_activation, "sod_override": bool(sod_conflicts) if status != "ACTIVE" else False})
+    await record_audit(session, action="ASSIGNMENT_CREATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=provider_id, actor_user_id=requested_by, request_id=request_id, metadata={"status": status, "resource_type": data.resource_type, "bypass_activation": bypass_activation, "sod_override": bool(sod_conflicts) if status != "ACTIVE" else False, "workflow_definition_id": str(workflow_definition.id) if workflow_definition else None})
     # General notification (see services/notifications.py) — deliberately distinct from a self-service request,
     # which the requester already knows about since they just did it themselves.
     if approval_required:

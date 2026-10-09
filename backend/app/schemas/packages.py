@@ -56,11 +56,21 @@ class PackageCreate(BaseModel):
     default_approver_id: Optional[UUID] = None
     default_fallback_approver_id: Optional[UUID] = None
     fallback_unlock_hours: Optional[int] = Field(default=None, gt=0)
+    # The default approval method for a self-service request (POST /packages/{id}/request) — mutually exclusive
+    # with default_approver_id/default_fallback_approver_id. An admin's own direct /assign call is unaffected,
+    # since it picks its own approver/workflow per call via PackageAssignCreate.
+    workflow_definition_id: Optional[UUID] = None
 
     @model_validator(mode="after")
     def _validate_fallback_unlock(self) -> "PackageCreate":
         if self.fallback_unlock_hours is not None and self.default_fallback_approver_id is None:
             raise ValueError("fallback_unlock_hours requires default_fallback_approver_id to be set")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_workflow_exclusive(self) -> "PackageCreate":
+        if self.workflow_definition_id is not None and (self.default_approver_id is not None or self.default_fallback_approver_id is not None):
+            raise ValueError("workflow_definition_id cannot be combined with default_approver_id/default_fallback_approver_id — the workflow's own stages are the approval")
         return self
 
 
@@ -79,6 +89,8 @@ class PackageResponse(BaseModel):
     default_approver_id: Optional[UUID] = None
     default_fallback_approver_id: Optional[UUID] = None
     fallback_unlock_hours: Optional[int] = None
+    workflow_definition_id: Optional[UUID] = None
+    workflow_definition_name: Optional[str] = None
     eligible_principals: list[PackageEligibilityPrincipal] = []
     owners: list[PackageOwnerInfo] = []
     created_at: datetime
@@ -96,11 +108,18 @@ class PackageEligibilityUpdate(BaseModel):
     default_approver_id: Optional[UUID] = None
     default_fallback_approver_id: Optional[UUID] = None
     fallback_unlock_hours: Optional[int] = Field(default=None, gt=0)
+    workflow_definition_id: Optional[UUID] = None
 
     @model_validator(mode="after")
     def _validate_fallback_unlock(self) -> "PackageEligibilityUpdate":
         if self.fallback_unlock_hours is not None and self.default_fallback_approver_id is None:
             raise ValueError("fallback_unlock_hours requires default_fallback_approver_id to be set")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_workflow_exclusive(self) -> "PackageEligibilityUpdate":
+        if self.workflow_definition_id is not None and (self.default_approver_id is not None or self.default_fallback_approver_id is not None):
+            raise ValueError("workflow_definition_id cannot be combined with default_approver_id/default_fallback_approver_id — the workflow's own stages are the approval")
         return self
 
 
@@ -134,12 +153,22 @@ class PackageAssignCreate(BaseModel):
     start_time: Optional[datetime] = None
     expiration_time: Optional[datetime] = None
     approver_id: Optional[UUID] = None
+    # Mutually exclusive with approver_id. Supported for group_id's fan-out too — each fanned-out member gets
+    # their own independent WorkflowInstance, exactly the same as each already gets their own independent
+    # AccessAssignment/PENDING_APPROVAL today when approver_id is used instead. See app.services.workflows.
+    workflow_definition_id: Optional[UUID] = None
     justification: str = Field(min_length=3, max_length=2000)
 
     @field_validator("justification")
     @classmethod
     def _validate_justification(cls, value: str) -> str:
         return require_justification(value)
+
+    @model_validator(mode="after")
+    def _validate_workflow_exclusive(self) -> "PackageAssignCreate":
+        if self.workflow_definition_id is not None and self.approver_id is not None:
+            raise ValueError("workflow_definition_id cannot be combined with approver_id — the workflow's own stages are the approval")
+        return self
 
     @model_validator(mode="after")
     def _validate_duration(self) -> "PackageAssignCreate":

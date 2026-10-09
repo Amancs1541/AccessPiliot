@@ -29,27 +29,18 @@ class UserResponse(BaseModel):
     leaver_date: Optional[date] = None
     employment_type: Optional[str] = None
     last_synced_at: Optional[datetime]
-
-
-class UserCreate(BaseModel):
-    display_name: str = Field(min_length=1, max_length=255)
-    user_principal_name: str = Field(min_length=3, max_length=320)
-    mail_nickname: Optional[str] = Field(default=None, max_length=64)
-    department: Optional[str] = None
-    job_title: Optional[str] = None
-
-
-class UserCreateResponse(BaseModel):
-    user: UserResponse
-    temporary_password: Optional[str] = None
+    pending_attribute_change: bool = False
 
 
 class UserAttributeUpdate(BaseModel):
     """Only department/job_title are editable here — the two fields birthright policies match on. Editing
     either triggers a real write to the identity's own provider (Entra/Okta) AND a birthright mover
-    reconciliation (see app.services.birthright.reconcile_birthright_policies_for_user)."""
+    reconciliation (see app.services.birthright.reconcile_birthright_policies_for_user) — unless
+    workflow_definition_id is set, in which case both are deferred until that workflow approves the change
+    (see app.services.identity_attributes.apply_user_attribute_change)."""
     department: Optional[str] = Field(default=None, max_length=200)
     job_title: Optional[str] = Field(default=None, max_length=200)
+    workflow_definition_id: Optional[UUID] = None
 
 
 class GroupResponse(BaseModel):
@@ -60,6 +51,7 @@ class GroupResponse(BaseModel):
     description: Optional[str]
     is_privileged: bool
     status: str
+    group_label: Optional[str] = None
     last_synced_at: Optional[datetime]
 
 
@@ -67,6 +59,11 @@ class GroupCreate(BaseModel):
     display_name: str = Field(min_length=1, max_length=255)
     description: Optional[str] = None
     mail_nickname: Optional[str] = Field(default=None, max_length=64)
+    # STANDARD / PRIVILEGED (built-in), or a custom name from the GroupLabel admin list (see
+    # app.services.group_labels) — a free string, never validated against that list (same "doesn't block an
+    # out-of-list value" philosophy as User.department/Department). Set once at creation only; there is no
+    # existing edit path for a group's other cosmetic fields (resource_code/naming_convention) to extend.
+    group_label: Optional[str] = Field(default=None, max_length=100)
 
 
 class RoleResponse(BaseModel):

@@ -1996,3 +1996,30 @@ async def test_a_plain_assignment_with_no_covering_exception_has_a_null_sod_fiel
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         created = await client.post("/api/v1/assignments", json={"user_id": str(ids["user_id"]), "resource_type": "GROUP", "resource_id": str(ids["group_a_id"]), "assignment_type": "PERMANENT", "justification": "Plain, unrelated grant."})
     assert created.json()["sod_exception_expires_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_sod_admin_can_list_rule_templates(db_override):
+    authenticate_as("AccessPilot.SoDAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/v1/sod/rule-templates")
+    assert response.status_code == 200
+    templates = response.json()
+    assert len(templates) >= 10
+    names = {t["name"] for t in templates}
+    assert "Payroll processing vs. payroll approval" in names
+    ids = [t["id"] for t in templates]
+    assert len(ids) == len(set(ids))  # every template id is unique
+    for t in templates:
+        assert t["side_a_label"] and t["side_b_label"]
+        assert t["default_severity"] in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
+
+
+@pytest.mark.asyncio
+async def test_a_plain_admin_cannot_list_sod_rule_templates(db_override):
+    """SOD_READ is deliberately excluded from plain Admin (see app/security/auth.py) — templates are read through
+    the same permission as everything else SoD, so they inherit that exclusion automatically."""
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/v1/sod/rule-templates")
+    assert response.status_code == 403

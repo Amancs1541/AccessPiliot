@@ -12,6 +12,7 @@ from app.schemas.packages import PackageAssignCreate, PackageAssignItemResult, P
 from app.services.assignments import _app_role_name, _resolve_internal_user_id, _resolve_target, create_assignment, to_response
 from app.services.audit import record_audit
 from app.services.directory_read import list_group_members
+from app.services.entitlement_catalog import require_workflow_for_high_risk_items
 
 
 async def _hydrate_item(session: AsyncSession, item: AccessPackageItem) -> PackageItemResponse:
@@ -117,7 +118,12 @@ async def _to_package_response(session: AsyncSession, package: AccessPackage) ->
     items = list((await session.scalars(select(AccessPackageItem).where(AccessPackageItem.package_id == package.id))).all())
     eligible_principals = await _hydrate_eligibility(session, package.id)
     owners = await _hydrate_owners(session, package.id)
-    return PackageResponse(id=package.id, name=package.name, description=package.description, status=package.status, items=[await _hydrate_item(session, item) for item in items], default_approver_id=package.default_approver_id, default_fallback_approver_id=package.default_fallback_approver_id, fallback_unlock_hours=package.fallback_unlock_hours, eligible_principals=eligible_principals, owners=owners, created_at=package.created_at)
+    workflow_definition_name = None
+    if package.workflow_definition_id:
+        from app.models import WorkflowDefinition
+        workflow_definition = await session.get(WorkflowDefinition, package.workflow_definition_id)
+        workflow_definition_name = workflow_definition.name if workflow_definition else None
+    return PackageResponse(id=package.id, name=package.name, description=package.description, status=package.status, items=[await _hydrate_item(session, item) for item in items], default_approver_id=package.default_approver_id, default_fallback_approver_id=package.default_fallback_approver_id, fallback_unlock_hours=package.fallback_unlock_hours, workflow_definition_id=package.workflow_definition_id, workflow_definition_name=workflow_definition_name, eligible_principals=eligible_principals, owners=owners, created_at=package.created_at)
 
 
 async def _validate_items(session: AsyncSession, items: list[PackageItemCreate]) -> None:
@@ -134,7 +140,7 @@ async def _validate_items(session: AsyncSession, items: list[PackageItemCreate])
                 raise AccessPilotError("APPLICATION_ROLE_NOT_FOUND", "The selected application role was not found.", 404)
 
 
-async def _apply_package_eligibility(session: AsyncSession, package: AccessPackage, *, principals, default_approver_id: UUID | None, default_fallback_approver_id: UUID | None, fallback_unlock_hours: int | None) -> None:
+async def _apply_package_eligibility(session: AsyncSession, package: AccessPackage, *, principals, default_approver_id: UUID | None, default_fallback_approver_id: UUID | None, fallback_unlock_hours: int | None, workflow_definition_id: UUID | None = None) -> None:
     """Shared by create_package() and set_package_eligibility(): validates and writes who may self-request the
     package plus its approver/fallback-approver/escalation-window setup. Setup can happen either during creation
     (one combined flow) or afterward via the dedicated eligibility endpoint — both paths behave identically."""
@@ -163,6 +169,13 @@ async def _apply_package_eligibility(session: AsyncSession, package: AccessPacka
         raise AccessPilotError("USER_NOT_FOUND", "The selected default approver was not found.", 404)
     if default_fallback_approver_id is not None and not await session.get(User, default_fallback_approver_id):
         raise AccessPilotError("USER_NOT_FOUND", "The selected fallback approver was not found.", 404)
+    if workflow_definition_id is not None:
+        from app.models import WorkflowDefinition
+        workflow_definition = await session.get(WorkflowDefinition, workflow_definition_id)
+        if workflow_definition is None:
+            raise AccessPilotError("WORKFLOW_DEFINITION_NOT_FOUND", "The selected workflow was not found.", 404)
+        if workflow_definition.status != "ACTIVE":
+            raise AccessPilotError("WORKFLOW_DEFINITION_NOT_ACTIVE", "This workflow is not currently accepting requests.", 409)
 
     for existing_row in list((await session.scalars(select(AccessPackageEligibility).where(AccessPackageEligibility.package_id == package.id))).all()):
         await session.delete(existing_row)
@@ -172,6 +185,7 @@ async def _apply_package_eligibility(session: AsyncSession, package: AccessPacka
     package.default_approver_id = default_approver_id
     package.default_fallback_approver_id = default_fallback_approver_id
     package.fallback_unlock_hours = fallback_unlock_hours
+    package.workflow_definition_id = workflow_definition_id
 
 
 async def create_package(session: AsyncSession, data: PackageCreate, actor_subject: str, request_id: str) -> PackageResponse:
@@ -185,7 +199,7 @@ async def create_package(session: AsyncSession, data: PackageCreate, actor_subje
     package = AccessPackage(name=data.name, description=data.description, status="ACTIVE")
     session.add(package)
     await session.flush()
-    await _apply_package_eligibility(session, package, principals=data.principals, default_approver_id=data.default_approver_id, default_fallback_approver_id=data.default_fallback_approver_id, fallback_unlock_hours=data.fallback_unlock_hours)
+    await _apply_package_eligibility(session, package, principals=data.principals, default_approver_id=data.default_approver_id, default_fallback_approver_id=data.default_fallback_approver_id, fallback_unlock_hours=data.fallback_unlock_hours, workflow_definition_id=data.workflow_definition_id)
     for item in data.items:
         session.add(AccessPackageItem(package_id=package.id, resource_type=item.resource_type, resource_id=item.resource_id, app_role_external_id=item.app_role_external_id))
     await session.flush()
@@ -292,7 +306,8 @@ async def _assign_package_to_user(session: AsyncSession, package_id: UUID, items
             user_id=user_id, resource_type=item.resource_type, resource_id=item.resource_id,
             app_role_external_id=item.app_role_external_id, assignment_type=data.assignment_type,
             start_time=data.start_time, expiration_time=data.expiration_time,
-            approver_id=data.approver_id, fallback_approver_id=fallback_approver_id, fallback_unlock_hours=fallback_unlock_hours, justification=data.justification,
+            approver_id=data.approver_id, fallback_approver_id=fallback_approver_id, fallback_unlock_hours=fallback_unlock_hours,
+            workflow_definition_id=data.workflow_definition_id, justification=data.justification,
         )
         try:
             assignment, hydrated = await create_assignment(session, payload, actor_subject, request_id, check_sod_at_creation=check_sod_at_creation)
@@ -316,6 +331,7 @@ async def assign_package(session: AsyncSession, package_id: UUID, data: PackageA
     items = list((await session.scalars(select(AccessPackageItem).where(AccessPackageItem.package_id == package_id))).all())
     if not items:
         raise AccessPilotError("PACKAGE_EMPTY", "This package has no items.", 409)
+    await require_workflow_for_high_risk_items(session, [(item.resource_type, item.resource_id, item.app_role_external_id) for item in items], data.workflow_definition_id)
 
     if data.group_id is not None:
         member_ids = [member.id for member in await list_group_members(session, data.group_id)]
@@ -408,7 +424,7 @@ async def set_package_eligibility(session: AsyncSession, package_id: UUID, data:
     (immediately, or after fallback_unlock_hours has elapsed with no primary response if that's configured); it
     applies to every assignment made from this package, whether via self-request or an admin's direct assign."""
     package = await get_package(session, package_id)
-    await _apply_package_eligibility(session, package, principals=data.principals, default_approver_id=data.default_approver_id, default_fallback_approver_id=data.default_fallback_approver_id, fallback_unlock_hours=data.fallback_unlock_hours)
+    await _apply_package_eligibility(session, package, principals=data.principals, default_approver_id=data.default_approver_id, default_fallback_approver_id=data.default_fallback_approver_id, fallback_unlock_hours=data.fallback_unlock_hours, workflow_definition_id=data.workflow_definition_id)
 
     actor_id = await _resolve_internal_user_id(session, actor_subject)
     await record_audit(session, action="PACKAGE_ELIGIBILITY_UPDATED", target_type="PACKAGE", target_id=package_id, actor_user_id=actor_id, request_id=request_id, metadata={"principal_count": len(data.principals)})
@@ -452,10 +468,13 @@ async def request_package(session: AsyncSession, package_id: UUID, data: Package
     items = list((await session.scalars(select(AccessPackageItem).where(AccessPackageItem.package_id == package_id))).all())
     if not items:
         raise AccessPilotError("PACKAGE_EMPTY", "This package has no items.", 409)
+    await require_workflow_for_high_risk_items(session, [(item.resource_type, item.resource_id, item.app_role_external_id) for item in items], package.workflow_definition_id)
 
     assign_data = PackageAssignCreate(
         user_id=requester_id, assignment_type=data.assignment_type, start_time=data.start_time,
-        expiration_time=data.expiration_time, approver_id=package.default_approver_id, justification=data.justification,
+        expiration_time=data.expiration_time,
+        approver_id=package.default_approver_id if package.workflow_definition_id is None else None,
+        workflow_definition_id=package.workflow_definition_id, justification=data.justification,
     )
     member_result, created_count = await _assign_package_to_user(session, package_id, items, requester_id, assign_data, actor_subject, request_id)
 

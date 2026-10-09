@@ -163,6 +163,31 @@ async def test_a_joiner_starting_now_is_enabled_immediately_with_eligible_access
 
 
 @pytest.mark.asyncio
+async def test_a_joiner_without_a_manager_is_rejected(db_override):
+    async with db_override.factory() as session:
+        ids = await _seed(session)
+    authenticate_as("AccessPilot.Admin")
+    payload = body(ids, start=future())
+    del payload["manager_id"]
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/lifecycle/joiners", json=payload)
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_submitting_a_joiner_notifies_the_manager_for_audit(db_override):
+    async with db_override.factory() as session:
+        ids = await _seed(session)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/lifecycle/joiners", json=body(ids, start=future()))
+    assert response.status_code == 201
+    async with db_override.factory() as session:
+        notes = (await session.scalars(select(Notification).where(Notification.notification_type == "JOINER_SUBMITTED"))).all()
+    assert len(notes) == 1 and notes[0].user_id == ids["boss"]
+
+
+@pytest.mark.asyncio
 async def test_the_worker_activates_due_joiners_only(db_override):
     async with db_override.factory() as session:
         ids = await _seed(session)

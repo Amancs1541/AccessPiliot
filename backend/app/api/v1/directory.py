@@ -7,23 +7,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AccessPilotError
 from app.db.session import get_db
-from app.models import IdentityProvider
-from app.providers.base import NewGroupRequest, NewUserRequest, ProviderConflictError
+from app.providers.base import NewGroupRequest, ProviderConflictError
 from app.providers.graph_client import GraphError
-from app.schemas.directory import ApplicationResponse, GroupAccessSummary, GroupCreate, GroupResponse, RoleResponse, UserAccessSummary, UserAttributeUpdate, UserCreate, UserCreateResponse, UserResponse
+from app.schemas.directory import ApplicationResponse, GroupAccessSummary, GroupCreate, GroupResponse, RoleResponse, UserAccessSummary, UserAttributeUpdate, UserResponse
 from app.schemas.privileged_accounts import LinkedAccountResponse, SetEnabledRequest
 from app.schemas.user_hierarchy import UserHierarchyNode, UserHierarchyUpdate
-from app.security.auth import AuthenticatedUser, require_permission
+from app.security.auth import AuthenticatedUser, require_authenticated_user, require_permission
 from app.services import directory_read
 from app.services import privileged_accounts as privileged_accounts_service
 from app.services import user_hierarchy as user_hierarchy_service
 from app.services.audit import record_audit
-from app.services.birthright import reconcile_birthright_policies_for_user
 from app.services.dashboard import admin_dashboard, get_privileged_role_activation_timeline, get_user_access_segment_members, get_user_access_segments
-from app.services.directory_sync import upsert_group, upsert_user
+from app.services.directory_sync import upsert_group
 from app.services.provider_configuration import _connector, list_providers
 
-from app.schemas.group_owners import GroupOwnerInfo, GroupOwnersUpdate
+from app.schemas.group_owners import GroupOwnerInfo, GroupOwnerSelfServiceUpdate, GroupOwnersUpdate
 from app.services import group_owners as group_owner_service
 
 router = APIRouter(tags=["directory"])
@@ -81,29 +79,46 @@ async def update_user_attributes(user_id: UUID, data: UserAttributeUpdate, reque
     """The AccessPilot -> Entra/Okta direction of attribute editing: pushes a real write to the identity's own
     provider first (so Entra/Okta stays the source of truth, never just a local-only edit), then updates the
     local row to match, then runs the same birthright mover reconciliation a directory sync would trigger for
-    the same change arriving from the other direction — see app.services.birthright."""
+    the same change arriving from the other direction — see app.services.identity_attributes. If
+    workflow_definition_id is set, none of that happens yet: a UserAttributeChangeRequest is created and a
+    workflow instance started instead, and the real write/reconcile only happen once it's approved — see
+    app.services.workflows's USER_ATTRIBUTES completion branch."""
+    from app.services.assignments import _resolve_internal_user_id
+
     user = await directory_read.get_user(db, user_id)
-    provider = await db.get(IdentityProvider, user.provider_id)
-    if provider is None:
-        raise AccessPilotError("PROVIDER_NOT_FOUND", "The provider for this user was not found.", 404)
-    connector = _connector(provider)
-    try:
-        updated = await connector.update_user(user.external_id, department=data.department, job_title=data.job_title)
-    except GraphError as exc:
-        raise AccessPilotError(exc.code, exc.message, exc.status_code) from exc
-    attributes_changed = user.department != updated.department or user.job_title != updated.job_title
-    previous_attributes = {"department": user.department, "job_title": user.job_title}
-    user.department, user.job_title = updated.department, updated.job_title
-    await record_audit(db, action="USER_ATTRIBUTES_UPDATED", target_type="USER", target_id=user.id, provider_id=provider.id, request_id=request.state.request_id, metadata={"department": updated.department, "job_title": updated.job_title})
-    await db.commit()
-    await db.refresh(user)
-    if attributes_changed:
-        # Reconciliation records the admin who made this edit as the actor (not "system") — a human deliberately
-        # changed this, unlike a directory-sync-triggered reconciliation.
-        outcome = await reconcile_birthright_policies_for_user(db, user.id, actor.directory_object_id, request.state.request_id)
-        from app.services.lifecycle import build_changes, record_mover
-        await record_mover(db, user.id, build_changes(previous_attributes, {"department": user.department, "job_title": user.job_title}), "ADMIN_EDIT", outcome, request.state.request_id)
-    return user
+
+    workflow_definition = None
+    if data.workflow_definition_id is not None:
+        from app.models import WorkflowDefinition
+        workflow_definition = await db.get(WorkflowDefinition, data.workflow_definition_id)
+        if workflow_definition is None:
+            raise AccessPilotError("WORKFLOW_DEFINITION_NOT_FOUND", "The selected workflow was not found.", 404)
+        if workflow_definition.status != "ACTIVE":
+            raise AccessPilotError("WORKFLOW_DEFINITION_NOT_ACTIVE", "This workflow is not currently accepting requests.", 409)
+
+    if workflow_definition is not None:
+        from app.models import UserAttributeChangeRequest
+        from app.services.workflows import build_user_condition_payload, start_workflow_instance
+
+        requester_id = await _resolve_internal_user_id(db, actor.directory_object_id)
+        change_request = UserAttributeChangeRequest(
+            user_id=user.id, previous_department=user.department, previous_job_title=user.job_title,
+            requested_department=data.department, requested_job_title=data.job_title, status="PENDING",
+            created_by=requester_id,
+        )
+        db.add(change_request)
+        await db.flush()
+        instance = await start_workflow_instance(db, workflow_definition, requester_id, build_user_condition_payload(user), "USER_ATTRIBUTES", f"Change department/job title for {user.display_name}", subject_id=change_request.id)
+        change_request.workflow_instance_id = instance.id
+        await record_audit(db, action="USER_ATTRIBUTE_CHANGE_REQUESTED", target_type="USER", target_id=user.id, provider_id=user.provider_id, actor_user_id=requester_id, request_id=request.state.request_id, metadata={"requested_department": data.department, "requested_job_title": data.job_title, "workflow_definition_id": str(workflow_definition.id)})
+        await db.commit()
+        await db.refresh(user)
+        response = UserResponse.model_validate(user)
+        response.pending_attribute_change = True
+        return response
+
+    from app.services.identity_attributes import apply_user_attribute_change
+    return await apply_user_attribute_change(db, user.id, data.department, data.job_title, actor.directory_object_id, request.state.request_id)
 
 
 @router.patch("/users/{user_id}/hierarchy", response_model=UserResponse)
@@ -115,28 +130,24 @@ async def update_user_hierarchy(user_id: UUID, data: UserHierarchyUpdate, reques
     return await user_hierarchy_service.update_user_hierarchy(db, user_id, data, actor_id, request.state.request_id)
 
 
-@router.post("/users", response_model=UserCreateResponse, status_code=201)
-async def create_user(data: UserCreate, request: Request, _: AuthenticatedUser = Depends(group_manage), db: AsyncSession = Depends(get_db)):
-    provider = await _primary_provider(db)
-    if not provider:
-        raise AccessPilotError("PROVIDER_NOT_FOUND", "No identity provider is configured.", 404)
-    connector = _connector(provider)
-    try:
-        created = await connector.create_user(NewUserRequest(display_name=data.display_name, user_principal_name=data.user_principal_name, mail_nickname=data.mail_nickname or data.user_principal_name.split("@")[0], department=data.department, job_title=data.job_title))
-    except ProviderConflictError as exc:
-        raise AccessPilotError("USER_ALREADY_EXISTS", str(exc), 409) from exc
-    except GraphError as exc:
-        raise AccessPilotError(exc.code, exc.message, exc.status_code) from exc
-    row, _ = await upsert_user(db, provider.id, created.user)
-    await record_audit(db, action="USER_CREATED", target_type="USER", target_id=row.id, provider_id=provider.id, request_id=request.state.request_id)
-    await db.commit()
-    await db.refresh(row)
-    return UserCreateResponse(user=UserResponse.model_validate(row), temporary_password=created.temporary_password)
-
-
 @router.get("/groups", response_model=list[GroupResponse])
 async def groups(q: str | None = Query(default=None), _: AuthenticatedUser = Depends(group_read), db: AsyncSession = Depends(get_db)):
     return await directory_read.list_groups(db, q)
+
+
+@router.get("/groups/owned", response_model=list[GroupResponse])
+async def list_owned_groups(actor: AuthenticatedUser = Depends(require_authenticated_user), db: AsyncSession = Depends(get_db)):
+    """Self-authorizing, like GET /packages/owned and GET /business-roles/owned — any authenticated user sees
+    the groups they're an AccessPilot-side owner of, Admin or not."""
+    return await group_owner_service.list_owned_groups(db, actor.directory_object_id)
+
+
+@router.patch("/groups/{group_id}/owner-update", response_model=GroupResponse)
+async def owner_update_group(group_id: UUID, data: GroupOwnerSelfServiceUpdate, request: Request, actor: AuthenticatedUser = Depends(require_authenticated_user), db: AsyncSession = Depends(get_db)):
+    """The group owner portal's only edit power — description and Group Label. Mirrors owner_rename_package /
+    owner_rename_business_role: self-authorizing (no GROUP_MANAGE permission needed), only a GroupOwner row for
+    this specific group, enforced inside the service."""
+    return await group_owner_service.owner_update_group(db, group_id, data, actor.directory_object_id, request.state.request_id)
 
 
 @router.get("/groups/{group_id}", response_model=GroupResponse)
@@ -178,7 +189,8 @@ async def create_group(data: GroupCreate, request: Request, _: AuthenticatedUser
     except GraphError as exc:
         raise AccessPilotError(exc.code, exc.message, exc.status_code) from exc
     row = await upsert_group(db, provider.id, created)
-    await record_audit(db, action="GROUP_CREATED", target_type="GROUP", target_id=row.id, provider_id=provider.id, request_id=request.state.request_id)
+    row.group_label = data.group_label
+    await record_audit(db, action="GROUP_CREATED", target_type="GROUP", target_id=row.id, provider_id=provider.id, request_id=request.state.request_id, metadata={"group_label": data.group_label})
     await db.commit()
     await db.refresh(row)
     return GroupResponse.model_validate(row)

@@ -23,6 +23,55 @@ logger = logging.getLogger("accesspilot.sod")
 
 ResourceTuple = tuple[str, UUID, Optional[str]]
 
+# A curated starter library of genuinely recognizable SoD conflicts — a content exercise, not architecture. These
+# describe the SHAPE of a conflict only (no real resource ids exist yet for a fresh tenant), so they're plain
+# static content rather than pre-made SodPolicy rows; the frontend's "use this template" flow pre-fills a new
+# policy's name/description/severity from one of these and then has the admin map each side to their own real
+# Groups/Roles/Applications before it becomes a real SodPolicy, through the same POST /sod/policies endpoint
+# every other policy is created through.
+SOD_RULE_TEMPLATES: list[dict] = [
+    {"id": "payroll-process-vs-approve", "category": "Finance", "name": "Payroll processing vs. payroll approval",
+     "description": "The same person should never be able to both enter/change payroll data and approve a payroll run — the classic finance SoD conflict.",
+     "side_a_label": "Payroll processing / data entry", "side_b_label": "Payroll approval", "default_severity": "HIGH"},
+    {"id": "ap-process-vs-vendor-master", "category": "Finance", "name": "AP processing vs. vendor master maintenance",
+     "description": "Someone who can both process accounts-payable invoices and maintain the vendor master file could create a fake vendor and pay it.",
+     "side_a_label": "AP invoice processing", "side_b_label": "Vendor master maintenance", "default_severity": "HIGH"},
+    {"id": "po-create-vs-approve", "category": "Finance", "name": "Purchase order creation vs. PO approval",
+     "description": "Creating and approving the same purchase order should always require two different people.",
+     "side_a_label": "Purchase order creation", "side_b_label": "Purchase order approval", "default_severity": "MEDIUM"},
+    {"id": "gl-post-vs-reconcile", "category": "Finance", "name": "General ledger posting vs. GL reconciliation",
+     "description": "Whoever posts journal entries shouldn't also be the one reconciling the same ledger — that's the control meant to catch their own mistakes or fraud.",
+     "side_a_label": "GL journal posting", "side_b_label": "GL reconciliation", "default_severity": "MEDIUM"},
+    {"id": "user-provision-vs-access-approve", "category": "IT / Identity", "name": "User provisioning vs. access approval",
+     "description": "Whoever can create/modify user accounts shouldn't also be able to approve the access requests those accounts make — otherwise they can grant themselves anything.",
+     "side_a_label": "User/account provisioning", "side_b_label": "Access request approval", "default_severity": "CRITICAL"},
+    {"id": "dev-vs-prod-deploy", "category": "IT / Identity", "name": "Application development vs. production deployment",
+     "description": "A developer who can also push their own code straight to production bypasses change control entirely.",
+     "side_a_label": "Application development", "side_b_label": "Production deployment", "default_severity": "HIGH"},
+    {"id": "security-admin-vs-audit-log", "category": "IT / Identity", "name": "Security administration vs. audit log management",
+     "description": "Whoever administers security controls shouldn't also control (or be able to clear) the audit log that's supposed to watch them.",
+     "side_a_label": "Security/IAM administration", "side_b_label": "Audit log administration", "default_severity": "CRITICAL"},
+    {"id": "hr-data-vs-payroll-change", "category": "HR", "name": "HR master data maintenance vs. payroll rate changes",
+     "description": "Someone who can edit an employee's HR record and also change their pay rate could quietly give themselves (or a friend) a raise.",
+     "side_a_label": "HR master data maintenance", "side_b_label": "Payroll rate changes", "default_severity": "HIGH"},
+    {"id": "recruit-vs-onboard-approve", "category": "HR", "name": "Candidate recruitment vs. new-hire onboarding approval",
+     "description": "The recruiter who sources a candidate shouldn't also be the one who approves them as an official new hire — a second set of eyes on headcount additions.",
+     "side_a_label": "Candidate recruitment", "side_b_label": "New-hire onboarding approval", "default_severity": "LOW"},
+    {"id": "inventory-receive-vs-adjust", "category": "Operations", "name": "Inventory receiving vs. inventory adjustment",
+     "description": "Whoever physically receives inventory shouldn't also be able to adjust the recorded inventory counts — that combination can hide shrinkage or theft.",
+     "side_a_label": "Inventory receiving", "side_b_label": "Inventory count adjustment", "default_severity": "MEDIUM"},
+    {"id": "contract-negotiate-vs-approve", "category": "Operations", "name": "Contract negotiation vs. contract approval",
+     "description": "Whoever negotiates a vendor/customer contract's terms shouldn't be the same person who gives it final sign-off.",
+     "side_a_label": "Contract negotiation", "side_b_label": "Contract final approval", "default_severity": "MEDIUM"},
+    {"id": "sales-discount-vs-approve", "category": "Operations", "name": "Sales order discounting vs. discount approval",
+     "description": "A salesperson who can both apply a discount and approve their own discount can quietly undercut price controls.",
+     "side_a_label": "Sales order discounting", "side_b_label": "Discount approval", "default_severity": "LOW"},
+]
+
+
+def list_sod_rule_templates() -> list[dict]:
+    return SOD_RULE_TEMPLATES
+
 
 def _dedupe_entities(entities: list) -> list:
     """Same lesson as _apply_package_eligibility's dedupe fix for access_package_eligibility: the DB unique

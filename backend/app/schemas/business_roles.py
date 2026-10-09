@@ -120,12 +120,21 @@ class BusinessRoleAssignCreate(BaseModel):
     start_time: Optional[datetime] = None
     expiration_time: Optional[datetime] = None
     approver_id: Optional[UUID] = None
+    # Mutually exclusive with approver_id — routes every mapped item's approval through a Workflow instead of a
+    # single approver. See app.services.workflows.
+    workflow_definition_id: Optional[UUID] = None
     justification: str = Field(min_length=3, max_length=2000)
 
     @field_validator("justification")
     @classmethod
     def _validate_justification(cls, value: str) -> str:
         return require_justification(value)
+
+    @model_validator(mode="after")
+    def _validate_workflow_exclusive(self) -> "BusinessRoleAssignCreate":
+        if self.workflow_definition_id is not None and self.approver_id is not None:
+            raise ValueError("workflow_definition_id cannot be combined with approver_id — the workflow's own stages are the approval")
+        return self
 
     @model_validator(mode="after")
     def _validate_duration(self) -> "BusinessRoleAssignCreate":

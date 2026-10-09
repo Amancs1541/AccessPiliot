@@ -31,6 +31,8 @@ from app.api.v1.lifecycle import router as lifecycle_router
 from app.api.v1.accounts import router as accounts_router
 from app.api.v1.joiner import router as joiner_router
 from app.api.v1.business_roles import router as business_roles_router
+from app.api.v1.workflows import router as workflows_router
+from app.api.v1.entitlement_catalog import router as entitlement_catalog_router
 
 logger = logging.getLogger("accesspilot.api.v1")
 router = APIRouter(prefix="/api/v1")
@@ -56,6 +58,8 @@ router.include_router(lifecycle_router)
 router.include_router(accounts_router)
 router.include_router(joiner_router)
 router.include_router(business_roles_router)
+router.include_router(workflows_router)
+router.include_router(entitlement_catalog_router)
 router.include_router(placeholder_router)
 router.include_router(providers_router)
 

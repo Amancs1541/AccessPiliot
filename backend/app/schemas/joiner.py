@@ -19,7 +19,7 @@ class JoinerCreate(BaseModel):
     employee_id: Optional[str] = Field(default=None, max_length=100)
     department: str = Field(min_length=1, max_length=200)
     job_title: Optional[str] = Field(default=None, max_length=200)
-    manager_id: Optional[UUID] = None
+    manager_id: UUID
     employee_category: Optional[str] = Field(default=None, pattern="^(EMPLOYEE|MANAGER)$")
     employment_type: Optional[str] = Field(default=None, pattern="^(EMPLOYEE|CONTRACTOR|INTERN|OTHER)$")
     start_at: datetime

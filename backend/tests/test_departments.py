@@ -75,3 +75,44 @@ async def test_a_normal_user_cannot_manage_departments(db_override):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/api/v1/policies/departments", json={"name": "AppDev"})
     assert response.status_code == 403
+
+
+async def _seed_manager(db_override):
+    from app.models import IdentityProvider, User
+    async with db_override.factory() as session:
+        provider = IdentityProvider(name="Entra", type="ENTRA", status="CONNECTED", tenant_id="t")
+        session.add(provider)
+        await session.flush()
+        manager = User(provider_id=provider.id, external_id="mgr-oid", email="mgr@x.com", display_name="Dana Manager", status="ACTIVE")
+        session.add(manager)
+        await session.commit()
+        await session.refresh(manager)
+        return manager.id
+
+
+@pytest.mark.asyncio
+async def test_admin_can_set_and_clear_a_departments_manager(db_override):
+    manager_id = await _seed_manager(db_override)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/policies/departments", json={"name": "Finance"})
+        department_id = created.json()["id"]
+        set_response = await client.patch(f"/api/v1/policies/departments/{department_id}/manager", json={"manager_id": str(manager_id)})
+        listed = await client.get("/api/v1/policies/departments")
+        clear_response = await client.patch(f"/api/v1/policies/departments/{department_id}/manager", json={"manager_id": None})
+    assert set_response.status_code == 200
+    assert set_response.json()["manager_id"] == str(manager_id)
+    assert set_response.json()["manager_display_name"] == "Dana Manager"
+    assert listed.json()[0]["manager_id"] == str(manager_id)
+    assert clear_response.status_code == 200
+    assert clear_response.json()["manager_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_setting_an_unknown_manager_is_rejected(db_override):
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/policies/departments", json={"name": "Finance"})
+        department_id = created.json()["id"]
+        response = await client.patch(f"/api/v1/policies/departments/{department_id}/manager", json={"manager_id": "00000000-0000-0000-0000-000000000000"})
+    assert response.status_code == 404

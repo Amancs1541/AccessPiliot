@@ -338,3 +338,127 @@ Business Role **owners** (set on the create/edit form) get a narrow self-service
 ## 25. "Dormant access" on the Security Operations dashboard
 
 The **Security Operations** dashboard (`AccessPilot.SoCAdmin` only) has a new built-in widget: **Dormant access (90+ days)** — every currently-ACTIVE grant that was activated 90 or more days ago and never touched since. This is the honest proxy this app can offer without real sign-in/usage telemetry (the same limitation already noted for the Inactive Users review scope) — it flags standing access that's been sitting active a long time and may be worth a fresh look, not necessarily unused access in a literal sense. Click the card to see the real list behind the count, same as every other widget on this dashboard.
+
+## 26. Workflow / Approval Engine — a new, standalone multi-stage approval capability
+
+Admins can now build real **multi-stage approval workflows** under **Workflow Definitions** (Admin) — an ordered list of stages, each with:
+- **Any one approver, or every approver** (`ANY_OF` / `ALL_OF`) must decide before the stage moves on.
+- **Fallback approvers + an escalation window** (optional) — if nobody named has decided within N hours, the fallback approvers are notified and may step in; once they do, their decision finalizes the stage outright, the same way a fallback approver already works everywhere else in AccessPilot.
+- **A condition** (optional) — the stage only activates if a detail on the request matches a value (e.g. only run a "Finance sign-off" stage when the requester filled in `department = Finance`); otherwise it's skipped automatically. If every stage in a workflow gets skipped, the request is approved immediately with no human decision needed.
+
+Any user can submit a request against an **ACTIVE** workflow from the **Workflow Requests** page — pick the workflow, give it a title and justification, optionally fill in extra details the workflow's conditions might check, and submit. The same page shows **My requests** (status and full stage-by-stage history) and **Pending my decision** (an inline approve/reject with justification for anything waiting on you).
+
+**Multiple items from the same request bundle into one card.** A multi-item Access Package (or Business Role) assignment, or a multi-item workflow-routed Access Review campaign, gives each item its own independent approval chain so they can each move at their own pace — but on this page they show up together as one bundle (each item's own status still visible) with a single shared justification and **Approve all / Reject all**, instead of as separate unrelated-looking cards.
+
+This is a deliberately **separate, new capability** — it does not replace or get wired into the approval steps Assignments, Access Packages, Business Roles, or Access Reviews already use; those keep working exactly as they always have. A decision can never be taken back once made, and a request can only be cancelled by its requester or an Admin while it's still pending.
+
+## 27. A real Group/Role/Application/Package/Business Role grant can be routed through a Workflow
+
+Everywhere you could already pick an "Approver (optional)" when assigning access — the admin **Assignments** page, an **Access Package**'s Assign panel, a **Business Role**'s Assign panel — there's now a third choice alongside "No approval required" / "Single approver": **Workflow**. Pick one of your ACTIVE workflow definitions instead, and the grant waits on that multi-stage chain instead of one person.
+
+A few things worth knowing:
+- The grant lands **PENDING_APPROVAL** with no single approver shown — the workflow's own stages are the approval. Once every stage finishes, it becomes **ELIGIBLE** (never straight to ACTIVE) for the person to self-activate, exactly like a single-approver grant already works.
+- Any condition a workflow stage checks (e.g. "only run this stage if department = Finance") is matched against the **real target person's own directory record** — their actual department, job title, employment type, and account type — never anything typed into a form. When authoring a condition in **Workflow Definitions**, typing "department" as the field swaps the value box to a real department picker, the same one Birthright policies already use.
+- Cancelling a workflow-routed grant (or having it rejected at any stage) sets the assignment to REJECTED — the exact same outcome a human-rejected request already produces.
+
+## 28. Editing a person's department or job title can be routed through a Workflow too
+
+On a user's **User Detail** page, the "Department & job title" edit now has an **Approval** choice: apply immediately (today's behavior — a real write pushes to Entra/Okta right away and birthright access re-evaluates on the spot), or route it through a workflow instead.
+
+Pick a workflow and save: nothing happens to the real directory record yet. The edit sits pending — the page shows a banner saying so — until the workflow's stages finish. Only once it's **approved** does the real write actually go to Entra/Okta, the local record update, and the usual birthright "mover" re-evaluation (losing access a policy no longer grants, gaining anything newly matching) all happen — exactly the same sequence as the instant path, just held until a human (or chain of humans) signs off. If it's **rejected**, the person's record is left completely untouched.
+
+This is explicitly scoped to the attribute edit on an existing person. Workflow-routing was NOT added to Joiner (new-hire onboarding) or to Birthright Policy/Group-Role-Mapping's own automated grants — those keep working exactly as they do today.
+
+## 29. Access Review Campaigns can be routed through a Workflow
+
+When creating a campaign under **Access Reviews**, the **Reviewer** field is now a choice: a **Single reviewer** (today's behavior — one person, plus an optional fallback after a wait period) or a **Workflow**. A campaign always needs one or the other — unlike a one-off access grant, a review can't be left with no decision path at all.
+
+Pick a workflow and every item the campaign snapshots gets its **own independent, multi-stage approval chain** — reviewing 20 people's access with a workflow starts 20 separate chains, each able to move at its own pace, not one shared decision for the whole campaign. Certifying an item (workflow approved) never touches the real grant, exactly like a human reviewer's "Approve" today; the workflow rejecting an item revokes the real access for real, exactly like "Revoke." Decisions on these items happen from the **Workflow Requests** page, not the review item's own Approve/Revoke buttons (which show "Decide from Workflow Requests" instead once an item is routed this way).
+
+If the campaign closes — its due date passes, or an admin closes it early — before an item's workflow has finished, that item is resolved exactly the way an undecided reviewer-mode item already is: per the campaign's **"If nobody decides by the due date"** setting, either kept (certified) or auto-revoked for real. A workflow-routed campaign's reviewer can't be reassigned after creation (there's no single reviewer slot to reassign) — everything else about it (name, due date, recurrence) stays editable as before.
+
+## 30. Access Packages: workflow-routing extended to group assignment and self-service requests
+
+Two gaps closed from the Access Package workflow-routing added earlier:
+
+- **Assigning a package to everyone in a group** can now also be routed through a Workflow (previously only assigning to one named person could be) — each group member gets their own independent approval chain, the same as assigning to a group with a single approver already works.
+- **Self-service requests** — when an eligible person requests a package themselves from **Request Packages** — can now be routed through a Workflow too. A package's **Approval** setting (set when creating it, or changed later from its eligibility panel) is now a 3-way choice: no approval required, a single default approver, or a workflow. Picking a workflow means every self-service request for that package starts its own approval chain instead of waiting on one person.
+- **Admin's "Assign" panel now defaults to the package's own workflow too** (added 2026-10-05, after a real "the workflow isn't working" report traced to an admin forgetting to pick it manually): opening **Assign** for a package that already has a configured workflow pre-selects "Workflow" with that workflow chosen — for both a single person and a whole group. It's still just a default, not a lock — the admin can switch it to a single approver or no approval for that one assignment if they need to.
+- **A workflow made only of conditional stages has no catch-all.** If a stage's condition doesn't match (e.g. "department = Finance" and the person's department is blank or different), that stage is skipped — and if every stage gets skipped, the request auto-approves with **zero human decisions**, which can look like "the workflow did nothing." If you want a workflow to always require someone's sign-off regardless of who's asking, give it a final stage with **no condition** as a catch-all.
+
+## 31. Group Label — classify a Group as Standard, Privileged, or a custom name
+
+When creating a new group, there's now a **Label** field alongside its name and description: the two built-ins **Standard** or **Privileged**, or any custom label your team has defined. This is purely an AccessPilot governance classification — it is never written to Entra/Okta, and it doesn't change anything about the group's real permissions. It shows up on the group's own detail page and in the admin Groups list.
+
+Custom labels are managed from **Policies → Group Labels** — the same "small managed list" pattern Departments already uses: type a name, add it, and it's immediately selectable the next time someone creates a group. A label is only picked **at the moment a group is created** — there's currently no way to relabel a group afterward, and a group synced in from Entra (rather than created in AccessPilot) has no label until that capability is added.
+
+## 32. Joiner is now the only way to create an identity in AccessPilot
+
+The Users page's "Add user" button is gone. From now on, every new identity in AccessPilot is created through the **Joiner** process — accounts created disabled across every chosen directory, switched on automatically at the person's start date. This closes the gap where an identity could previously be created directly, bypassing scheduling, multi-directory provisioning, and the manager/department data Joiner already collects.
+
+## 33. Joiner: Manager is now required, and it's suggested from the person's Department
+
+Submitting a new joiner now requires a **Manager** — it's no longer optional. To make picking one easier, **Policies → Org Chart** has a new **Department → Manager mapping** section: set one manager per department once, and from then on, picking that department on the Joiner form automatically fills in the matching manager (you can still change it for any individual joiner — it's a suggestion, not a lock).
+
+## 34. Joiner submissions notify the manager, for audit/awareness
+
+The moment a joiner is submitted, their assigned manager gets a notification that someone new reports to them and when they're starting — purely informational, there's nothing for the manager to approve or act on. This fires immediately on submission, even for a joiner who doesn't start for weeks, so the manager always knows ahead of time rather than only finding out on the actual start date.
+
+## 35. Access Review items now come with a suggestion
+
+Reviewing access one item at a time with no guidance is slow and tends to turn into rubber-stamping. Each pending item in an Access Review now shows a small "⚠ suggest revoke — \<reason\>" note when one of two signals fires: the item currently has an **open SoD conflict** with something else the person holds, or the real grant has sat **unused for 90+ days** (the same threshold the Security Operations dashboard's "Dormant access" widget already uses). An SoD conflict always wins over dormancy when both are true, since it's the stronger signal.
+
+This is a nudge from data the app already tracks, not a prediction — if neither signal fires, **no suggestion is shown at all**, deliberately. An absence of red flags isn't treated as a positive "this looks fine," since that would be a confidence the app doesn't actually have.
+
+An **"Apply all suggestions"** button appears whenever a campaign has one or more flagged items — one shared justification, then every flagged item is decided in one pass (reusing the same bundled-decision mechanism Workflow Requests uses for multi-item approvals). Items without a suggestion are left for the reviewer to look at individually, same as before.
+
+## 36. Security Operations dashboard: Access outliers widget
+
+A new built-in SoC widget, "Access outliers," flags grants that are unusually rare within a person's own department — the same "peer group" idea every modern IGA tool now leads with, built here as a lightweight prevalence check rather than full behavioral analytics.
+
+For every real (ACTIVE, NORMAL-account) grant, the widget computes what fraction of the holder's department holds that exact same entitlement (same resource, same app role where relevant). A holder is flagged when their department's prevalence for that entitlement is 10% or less — e.g. one person in a 20-person department holding an admin role nobody else on their team has. Departments with fewer than 5 real people are skipped entirely, since prevalence percentages aren't meaningful (and tend to produce false positives) in a tiny group.
+
+Like the existing "Dormant access" and "Open SoD violations" widgets, this is computed live on every view — nothing is stored or pre-materialized, so it's always current. Add it from the SoC dashboard's widget builder like any other built-in panel; click through for the full list of flagged holders, their department's prevalence percentage, and how many people in that department hold the same thing.
+
+## 37. Entitlement Catalog
+
+A new **Entitlement Catalog** admin page (under Governance) gives every real Group, Role, and Application AppRole a plain-English description, a risk tier (Low/Medium/High/Critical), and an accountable owner — independent of whether it's bundled into a Package or Business Role yet. Without this, a reviewer or requester only ever sees a raw technical name like "grp-finance-approvers"; the catalog is what turns that into "Finance Approvers — grants PO approval up to $50k (Risk: High, Owner: Jane)."
+
+The catalog starts complete automatically: the first time anyone opens the page, every real entitlement in the tenant gets a blank starter row (Low risk, no description yet) if it doesn't already have one — there's no setup step, and a newly synced group or a newly added AppRole gets its own row the next time the page is opened, with nothing going stale. An Admin fills in the description, risk tier, and owner inline, right in the table; everything else keeps working exactly as before until someone does.
+
+Once set, a description and risk tier also appear directly on Access Review items (for the reviewing Admin) next to the resource name — so a reviewer deciding whether to keep or revoke something no longer has to go guess what a cryptic group name actually grants.
+
+## 38. Separation of Duties: starter rule templates
+
+Building a new SoD rule used to mean starting from a completely blank form. The SoD page now has a **"Start from a template"** gallery of 12 recognizable conflict shapes (payroll processing vs. payroll approval, user provisioning vs. access approval, AP processing vs. vendor master maintenance, and nine more across Finance, IT/Identity, HR, and Operations).
+
+Picking a template pre-fills the new policy's name, description, and a sensible default severity, and relabels each side of the form with the template's own concrete language (e.g. "Payroll processing / data entry" instead of a generic "Side A") — you still map each side to your own real Groups, Roles, or Applications before saving, the same as building a rule from scratch. Nothing about creating a rule manually changes; the gallery is purely a faster starting point.
+
+## 39. Group Owners can now self-service their group's description and label
+
+A Group Owner (set from the group's Owners list, same as before) can now edit their own group's description and Group Label from a new **My Groups** page — no Admin role needed. This mirrors the self-service portal Package and Business Role owners already had: narrow, cosmetic-only editing, nothing that touches membership, privilege, or the group's real identity.
+
+The group's real name always stays whatever the directory (Entra/Okta) has it as — that never becomes owner-editable, or Admin-editable either; description and Group Label are the only two fields a Group has ever had an edit path for at all. Everything else about managing a group — who else owns it, deleting it, anything structural — still requires an Admin.
+
+## 40. Access Review campaigns can now be exported as a PDF report or CSV
+
+Every Access Review campaign's detail page now has **"Report (PDF)"** and **"Export (CSV)"** buttons — a polished, shareable attestation record for an auditor or compliance team, so the record doesn't only live inside AccessPilot's own UI.
+
+The PDF covers the campaign's metadata (status, scope, reviewer, due date), summary counts (approved/revoked/auto-revoked/pending), and every item with its decision, justification, decider, and when it was decided. The CSV carries the same per-item data for anyone who'd rather process it than file it. Both work on a campaign at any stage — completed or still in progress — and reflect exactly what the campaign's own detail page already shows.
+
+## 41. Entitlement risk tier now actually does something: workflow-required routing + auto-review offer
+
+Previously the Entitlement Catalog's risk tier (Low/Medium/High/Critical) was purely informational. It now has two real effects:
+
+- **Assigning a HIGH or CRITICAL-risk entitlement via a Package or Business Role — admin direct-assign, group fan-out, or self-service request — now requires a workflow.** If no workflow is attached, the assign/request is rejected with a clear error naming the entitlement and its risk tier, instead of silently going through on a single approver (or no approval at all). An entitlement nobody has ever risk-rated still defaults to Low and is never blocked.
+- **Marking an entry CRITICAL (with an owner already set) now offers to set up a recurring Access Review for it** — every 90 days, reviewed by the entry's owner. This is a confirm-dialog offer, never silent: decline it and nothing changes; there's also no offer at all if the entry has no owner set yet.
+
+## 42. Security Operations dashboard: Identity Risk Posture widget
+
+A new built-in SoC widget, "Identity Risk Posture," rolls up every open risk signal this app already tracks into one number: open SoD violations, dormant access (90+ days), access outliers, and Access Review campaigns past their due date. Deliberately **not** a fabricated 0-100 score — just an honest total of real counts, since this app has no sign-in-risk model to back a weighted score with. Click through for the breakdown by category.
+
+## 43. Entitlement Catalog: unclassified-entries nudge
+
+The Entitlement Catalog page now shows a banner when entitlements are still sitting at their auto-created default (Low risk, no description, no owner) — "N entitlements still unclassified" — with a one-click toggle to filter the table down to just those. Without this, the catalog could look complete at a glance while almost nothing in it had actually been reviewed by anyone.
+
+A matching "Unclassified entitlements" widget is also available on the Security Operations dashboard, for governance-health visibility alongside the other SoC signals.

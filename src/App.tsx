@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Bot, Box, Check, ChevronLeft, ChevronRight, Clock3, Cloud, Copy, Database, ExternalLink, FileCheck2, FolderKanban, Gauge, GitBranch, IdCard, Image, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Lock, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldAlert, ShieldCheck, SlidersHorizontal, UploadCloud, UserRound, Users, UserX, X } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Bot, Box, Check, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Clock3, Cloud, Copy, Database, ExternalLink, FileCheck2, FolderKanban, Gauge, GitBranch, IdCard, Image, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Lock, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldAlert, ShieldCheck, SlidersHorizontal, UploadCloud, UserRound, Users, UserX, Workflow, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { currentUser, policies, type RequestStatus, type Role } from './mock';
 import { mockService, useMockState } from './mockService';
@@ -10,18 +10,18 @@ import { BreakGlassDashboard } from './BreakGlassDashboard';
 import { IdleGuard, useRefreshSecuritySettings, useAppTimezone } from './IdleGuard';
 import logo from './assets/logo.png';
 
-interface ApiUser { id: string; provider_id: string; external_id: string; email: string; display_name: string; given_name: string | null; surname: string | null; department: string | null; job_title: string | null; status: string; employee_id: string | null; source: string | null; account_type: string; linked_user_id: string | null; employee_category: string | null; manager_id: string | null; start_date: string | null; leaver_date: string | null; employment_type: string | null; last_synced_at: string | null; }
+interface ApiUser { id: string; provider_id: string; external_id: string; email: string; display_name: string; given_name: string | null; surname: string | null; department: string | null; job_title: string | null; status: string; employee_id: string | null; source: string | null; account_type: string; linked_user_id: string | null; employee_category: string | null; manager_id: string | null; start_date: string | null; leaver_date: string | null; employment_type: string | null; last_synced_at: string | null; pending_attribute_change?: boolean; }
 interface ApiHierarchyNode { id: string; display_name: string; email: string; status: string; employee_category: string | null; manager_id: string | null; }
 interface ApiLinkedAccount { id: string; display_name: string; email: string; account_type: string; status: string; }
 interface ApiPrivilegedAccountPolicy { account_type: string; default_approver_id: string | null; default_approver_display_name: string | null; approval_required: boolean; }
 interface ApiPrivilegedAccountRequest { id: string; requester_id: string; requester_display_name: string | null; account_type: string; status: string; approver_id: string | null; approver_display_name: string | null; justification: string | null; provisioned_user_id: string | null; provisioned_user_display_name: string | null; failure_reason: string | null; created_at: string; decided_at: string | null; }
-interface ApiGroup { id: string; external_id: string; name: string; description: string | null; is_privileged: boolean; status: string; last_synced_at: string | null; }
+interface ApiGroup { id: string; external_id: string; name: string; description: string | null; is_privileged: boolean; status: string; group_label?: string | null; last_synced_at: string | null; }
 interface ApiRole { id: string; external_id: string; name: string; description: string | null; role_type: string; is_privileged: boolean; status: string; }
 interface ApiApplicationRole { id: string; name: string; description: string | null; }
 interface ApiApplication { id: string; external_id: string; name: string; status: string; app_roles: ApiApplicationRole[] | null; last_synced_at: string | null; }
 interface ApiPackageItem { id: string; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; }
 interface ApiPackageEligiblePrincipal { principal_type: string; principal_id: string; display_name: string | null; }
-interface ApiPackage { id: string; name: string; description: string | null; status: string; items: ApiPackageItem[]; default_approver_id: string | null; default_fallback_approver_id: string | null; eligible_principals: ApiPackageEligiblePrincipal[]; owners: { user_id: string; display_name: string | null; email: string | null }[]; created_at: string; }
+interface ApiPackage { id: string; name: string; description: string | null; status: string; items: ApiPackageItem[]; default_approver_id: string | null; default_fallback_approver_id: string | null; workflow_definition_id?: string | null; workflow_definition_name?: string | null; eligible_principals: ApiPackageEligiblePrincipal[]; owners: { user_id: string; display_name: string | null; email: string | null }[]; created_at: string; }
 interface ApiUserAccessItem { id: string | null; resource_type: string; resource_display_name: string | null; status: string; assignment_type: string; expiration_time: string | null; package_name: string | null; source: string; }
 interface ApiUserLicense { sku_id: string; name: string; }
 interface ApiUserAccessSummary { assignments: ApiUserAccessItem[]; licenses: ApiUserLicense[]; }
@@ -41,6 +41,7 @@ const COMMON_TIMEZONES = ['UTC', 'Europe/London', 'Europe/Berlin', 'Europe/Paris
 interface ApiCurrentUser { id: string; displayName: string; email: string | null; tenantId: string; roles: string[]; department: string | null; jobTitle: string | null; employeeId: string | null; }
 interface ApiSodEntity { id: string; conflict_side: string; entity_type: string; entity_id: string; entity_display_name: string | null; app_role_external_id: string | null; entity_resolved: boolean; }
 interface ApiSodPolicy { id: string; name: string; description: string | null; severity: string; status: string; entities: ApiSodEntity[]; created_at: string; updated_at: string; }
+interface ApiSodRuleTemplate { id: string; name: string; description: string; category: string; side_a_label: string; side_b_label: string; default_severity: string; }
 interface ApiSodViolationHolding { assignment_id: string | null; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; source: string; }
 interface ApiSodViolation { policy_id: string; policy_name: string; severity: string; user_id: string; user_display_name: string | null; side_a_holdings: ApiSodViolationHolding[]; side_b_holdings: ApiSodViolationHolding[]; exception_active: boolean; exception_expires_at: string | null; }
 interface ApiSodException { id: string; sod_policy_id: string; policy_name: string | null; user_id: string; user_display_name: string | null; user_email: string | null; justification: string; granted_by: string | null; granted_by_display_name: string | null; expires_at: string; revoked_at: string | null; is_active: boolean; created_at: string; }
@@ -123,6 +124,8 @@ const nav = [
   { label: 'My Access Reviews', icon: FileCheck2, to: '/my-access-reviews', roles: ['user','admin'] },
   { label: 'My Packages', icon: Box, to: '/my-packages', roles: ['user','admin'] },
   { label: 'My Business Roles', icon: IdCard, to: '/my-business-roles', roles: ['user','admin'] },
+  { label: 'My Groups', icon: Network, to: '/my-groups', roles: ['user','admin'] },
+  { label: 'Workflow Requests', icon: Workflow, to: '/workflow-requests', roles: ['user','admin'] },
   { label: 'Profile', icon: UserRound, to: '/profile', roles: ['user','admin'] },
   { label: 'Users', icon: Users, to: '/admin/users', roles: ['admin'], section: 'ADMINISTRATION' },
   { label: 'Org Chart', icon: GitBranch, to: '/admin/org-chart', roles: ['admin'] },
@@ -132,7 +135,9 @@ const nav = [
   { label: 'Assignments', icon: KeyRound, to: '/admin/assignments', roles: ['admin'] },
   { label: 'Access Packages', icon: Box, to: '/admin/access-packages', roles: ['admin'] },
   { label: 'Business Roles', icon: IdCard, to: '/admin/business-roles', roles: ['admin'] },
+  { label: 'Workflow Definitions', icon: Workflow, to: '/admin/workflow-definitions', roles: ['admin'] },
   { label: 'Policies', icon: SlidersHorizontal, to: '/admin/policies', roles: ['admin'], section: 'GOVERNANCE' },
+  { label: 'Entitlement Catalog', icon: Database, to: '/admin/entitlement-catalog', roles: ['admin'] },
   { label: 'Privileged/Test Activity', icon: ShieldCheck, to: '/admin/privileged-accounts', roles: ['admin'] },
   { label: 'Audit Logs', icon: BookOpen, to: '/admin/audit', roles: ['admin'] },
   // Deliberately NOT gated behind an extra:-flag like SoD/SoC/NHI — AccessPilot.AccessReviewAdmin's backend
@@ -171,7 +176,7 @@ function App() {
   if (auth.breakglassActive && !auth.breakglassElevated) return <BreakGlassDashboard />;
   const role = auth.authConfigured ? auth.role : mockRole;
   const changeRole = (nextRole: Role) => { localStorage.setItem('accesspilot.mockRole', nextRole); setMockRole(nextRole); };
-  return <IdleGuard><Shell role={role} setRole={changeRole}><Routes><Route path="/" element={<Navigate to="/dashboard" replace />} /><Route path="/dashboard" element={<Dashboard role={role} />} /><Route path="/my-access" element={<MyAccess />} /><Route path="/request-access" element={<RequestAccess />} /><Route path="/request-packages" element={<RequestPackagesPage />} /><Route path="/my-requests" element={<Requests mine />} /><Route path="/approvals" element={<MyApprovalsPage />} /><Route path="/profile" element={<Profile />} /><Route path="/admin/users" element={<AdminOnly role={role}><UsersPage /></AdminOnly>} /><Route path="/admin/users/:id" element={<AdminOnly role={role}><UserDetail /></AdminOnly>} /><Route path="/admin/org-chart" element={<AdminOnly role={role}><OrgChartPage /></AdminOnly>} /><Route path="/admin/groups" element={<AdminOnly role={role}><GroupsPage /></AdminOnly>} /><Route path="/admin/groups/:id" element={<AdminOnly role={role}><GroupDetail /></AdminOnly>} /><Route path="/admin/roles" element={<AdminOnly role={role}><RolesPage /></AdminOnly>} /><Route path="/admin/access-requests" element={<AdminOnly role={role}><Requests /></AdminOnly>} /><Route path="/admin/access-requests/:id" element={<AdminOnly role={role}><RequestDetailInteractive /></AdminOnly>} /><Route path="/admin/assignments" element={<AdminOnly role={role}><AssignmentsInteractive /></AdminOnly>} /><Route path="/admin/access-packages" element={<AdminOnly role={role}><AccessPackagesInteractive /></AdminOnly>} /><Route path="/admin/business-roles" element={<AdminOnly role={role}><BusinessRolesPage /></AdminOnly>} /><Route path="/admin/policies" element={<AdminOnly role={role}><PoliciesPage /></AdminOnly>} /><Route path="/admin/privileged-accounts" element={<AdminOnly role={role}><PrivilegedAccountActivityPage /></AdminOnly>} /><Route path="/admin/joiners" element={<AdminOnly role={role}><JoinersPage /></AdminOnly>} /><Route path="/admin/movers" element={<AdminOnly role={role}><MoversPage /></AdminOnly>} /><Route path="/admin/leavers" element={<AdminOnly role={role}><LeaversPage /></AdminOnly>} /><Route path="/admin/access-reviews" element={<AdminOnly role={role}><AccessReviewsPage /></AdminOnly>} /><Route path="/admin/access-reviews/:id" element={<AdminOnly role={role}><AccessReviewDetailPage /></AdminOnly>} /><Route path="/my-packages" element={<MyPackagesPage />} /><Route path="/my-business-roles" element={<MyBusinessRolesPage />} /><Route path="/my-access-reviews" element={<MyAccessReviewsPage />} /><Route path="/admin/audit" element={<AdminOnly role={role}><AuditPage /></AdminOnly>} /><Route path="/admin/providers" element={<AdminOnly role={role}><ProvidersPage /></AdminOnly>} /><Route path="/admin/sync" element={<AdminOnly role={role}><SyncPage /></AdminOnly>} /><Route path="/admin/onboarding" element={<AdminOnly role={role}><OnboardingPage /></AdminOnly>} /><Route path="/admin/security" element={<AdminOnly role={role}><SecurityPage /></AdminOnly>} /><Route path="/admin/branding" element={<AdminOnly role={role}><BrandingPage /></AdminOnly>} /><Route path="/admin/sod" element={auth.isSodAdmin ? <SodPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/sod/configuration" element={auth.isSodAdmin ? <SodConfigurationPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/soc" element={auth.isSocAdmin ? <SocDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health" element={auth.isServerAdmin ? <ServerHealthDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health/troubleshooting" element={auth.isServerAdmin ? <TroubleshootingDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi" element={auth.isNhiAdmin ? <NhiPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi/:id" element={auth.isNhiAdmin ? <NhiDetailPage /> : <Navigate to="/dashboard" replace />} /><Route path="*" element={<Navigate to="/dashboard" replace />} /></Routes></Shell></IdleGuard>;
+  return <IdleGuard><Shell role={role} setRole={changeRole}><Routes><Route path="/" element={<Navigate to="/dashboard" replace />} /><Route path="/dashboard" element={<Dashboard role={role} />} /><Route path="/my-access" element={<MyAccess />} /><Route path="/request-access" element={<RequestAccess />} /><Route path="/request-packages" element={<RequestPackagesPage />} /><Route path="/my-requests" element={<Requests mine />} /><Route path="/approvals" element={<MyApprovalsPage />} /><Route path="/profile" element={<Profile />} /><Route path="/admin/users" element={<AdminOnly role={role}><UsersPage /></AdminOnly>} /><Route path="/admin/users/:id" element={<AdminOnly role={role}><UserDetail /></AdminOnly>} /><Route path="/admin/org-chart" element={<AdminOnly role={role}><OrgChartPage /></AdminOnly>} /><Route path="/admin/groups" element={<AdminOnly role={role}><GroupsPage /></AdminOnly>} /><Route path="/admin/groups/:id" element={<AdminOnly role={role}><GroupDetail /></AdminOnly>} /><Route path="/admin/roles" element={<AdminOnly role={role}><RolesPage /></AdminOnly>} /><Route path="/admin/access-requests" element={<AdminOnly role={role}><Requests /></AdminOnly>} /><Route path="/admin/access-requests/:id" element={<AdminOnly role={role}><RequestDetailInteractive /></AdminOnly>} /><Route path="/admin/assignments" element={<AdminOnly role={role}><AssignmentsInteractive /></AdminOnly>} /><Route path="/admin/access-packages" element={<AdminOnly role={role}><AccessPackagesInteractive /></AdminOnly>} /><Route path="/admin/business-roles" element={<AdminOnly role={role}><BusinessRolesPage /></AdminOnly>} /><Route path="/admin/workflow-definitions" element={<AdminOnly role={role}><WorkflowDefinitionsPage /></AdminOnly>} /><Route path="/admin/policies" element={<AdminOnly role={role}><PoliciesPage /></AdminOnly>} /><Route path="/admin/entitlement-catalog" element={<AdminOnly role={role}><EntitlementCatalogPage /></AdminOnly>} /><Route path="/admin/privileged-accounts" element={<AdminOnly role={role}><PrivilegedAccountActivityPage /></AdminOnly>} /><Route path="/admin/joiners" element={<AdminOnly role={role}><JoinersPage /></AdminOnly>} /><Route path="/admin/movers" element={<AdminOnly role={role}><MoversPage /></AdminOnly>} /><Route path="/admin/leavers" element={<AdminOnly role={role}><LeaversPage /></AdminOnly>} /><Route path="/admin/access-reviews" element={<AdminOnly role={role}><AccessReviewsPage /></AdminOnly>} /><Route path="/admin/access-reviews/:id" element={<AdminOnly role={role}><AccessReviewDetailPage /></AdminOnly>} /><Route path="/my-packages" element={<MyPackagesPage />} /><Route path="/my-business-roles" element={<MyBusinessRolesPage />} /><Route path="/my-groups" element={<MyGroupsPage />} /><Route path="/workflow-requests" element={<WorkflowRequestsPage />} /><Route path="/my-access-reviews" element={<MyAccessReviewsPage />} /><Route path="/admin/audit" element={<AdminOnly role={role}><AuditPage /></AdminOnly>} /><Route path="/admin/providers" element={<AdminOnly role={role}><ProvidersPage /></AdminOnly>} /><Route path="/admin/sync" element={<AdminOnly role={role}><SyncPage /></AdminOnly>} /><Route path="/admin/onboarding" element={<AdminOnly role={role}><OnboardingPage /></AdminOnly>} /><Route path="/admin/security" element={<AdminOnly role={role}><SecurityPage /></AdminOnly>} /><Route path="/admin/branding" element={<AdminOnly role={role}><BrandingPage /></AdminOnly>} /><Route path="/admin/sod" element={auth.isSodAdmin ? <SodPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/sod/configuration" element={auth.isSodAdmin ? <SodConfigurationPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/soc" element={auth.isSocAdmin ? <SocDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health" element={auth.isServerAdmin ? <ServerHealthDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health/troubleshooting" element={auth.isServerAdmin ? <TroubleshootingDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi" element={auth.isNhiAdmin ? <NhiPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi/:id" element={auth.isNhiAdmin ? <NhiDetailPage /> : <Navigate to="/dashboard" replace />} /><Route path="*" element={<Navigate to="/dashboard" replace />} /></Routes></Shell></IdleGuard>;
 }
 function SignInScreen() {
   const auth = useAuth();
@@ -373,6 +378,17 @@ function SodPage() {
   const [form, setForm] = useState(emptySodForm);
   const [message, setMessage] = useState('');
   const [saving, setSaving] = useState(false);
+  const { data: ruleTemplates } = useApiResource<ApiSodRuleTemplate[]>('/api/v1/sod/rule-templates');
+  const [showTemplates, setShowTemplates] = useState(false);
+  // Set only by "Use this template" — swaps the form's generic "Side A"/"Side B" labels for the template's own
+  // conflict-shape labels (e.g. "Payroll processing" / "Payroll approval"), so the admin maps real resources
+  // against a concrete prompt instead of a blank "Side A". Cleared back to generic on a plain create/edit.
+  const [sideLabels, setSideLabels] = useState<{ a: string; b: string } | null>(null);
+  const startFromTemplate = (template: ApiSodRuleTemplate) => {
+    setForm({ name: template.name, description: template.description, severity: template.default_severity, sideA: [], sideB: [] });
+    setSideLabels({ a: template.side_a_label, b: template.side_b_label });
+    setEditingId(null); setShowForm(true); setShowTemplates(false); setMessage('');
+  };
   // Granting an exception is deliberately only reachable through the exception-request workflow now (a blocked
   // admin attempt -> request -> SoDAdmin review in the Exception Requests panel) — there used to also be an
   // instant "Grant exception" button right on this Violations table, bypassing that trail entirely with no
@@ -397,14 +413,14 @@ function SodPage() {
     if (response.ok) { reloadExceptions(); reloadViolations(); }
   };
 
-  const startCreate = () => { setForm(emptySodForm); setEditingId(null); setShowForm(true); setMessage(''); };
+  const startCreate = () => { setForm(emptySodForm); setSideLabels(null); setEditingId(null); setShowForm(true); setMessage(''); };
   const startEdit = (policy: ApiSodPolicy) => {
     setForm({
       name: policy.name, description: policy.description || '', severity: policy.severity,
       sideA: policy.entities.filter(e => e.conflict_side === 'A').map(e => ({ entity_type: e.entity_type, entity_id: e.entity_id, app_role_external_id: e.app_role_external_id || '' })),
       sideB: policy.entities.filter(e => e.conflict_side === 'B').map(e => ({ entity_type: e.entity_type, entity_id: e.entity_id, app_role_external_id: e.app_role_external_id || '' })),
     });
-    setEditingId(policy.id); setShowForm(true); setMessage('');
+    setSideLabels(null); setEditingId(policy.id); setShowForm(true); setMessage('');
   };
   const addEntity = (side: 'sideA' | 'sideB') => setForm({ ...form, [side]: [...form[side], { ...emptySodEntity }] });
   const removeEntity = (side: 'sideA' | 'sideB', index: number) => setForm({ ...form, [side]: form[side].filter((_, i) => i !== index) });
@@ -443,16 +459,27 @@ function SodPage() {
 
   const summarize = (policy: ApiSodPolicy, side: string) => policy.entities.filter(e => e.conflict_side === side).map(e => e.entity_display_name || 'Unresolved').join(', ') || '—';
 
-  return <Page eyebrow="GOVERNANCE" title="Separation of Duties" subtitle="Admin-configurable rules preventing any user from holding two conflicting entitlements at once — enforced live, at the moment access actually becomes real." action={canManageRules && <button className="btn btn-primary" onClick={startCreate}>+ Add SoD policy</button>}>
+  return <Page eyebrow="GOVERNANCE" title="Separation of Duties" subtitle="Admin-configurable rules preventing any user from holding two conflicting entitlements at once — enforced live, at the moment access actually becomes real." action={canManageRules && <span style={{ display: 'flex', gap: 8 }}><button className="btn" onClick={() => setShowTemplates(true)}>Start from a template</button><button className="btn btn-primary" onClick={startCreate}>+ Add SoD policy</button></span>}>
     {!canManageRules && <div className="notice" style={{ marginBottom: 18 }}>You can view rules and violations. Only an AccessPilot.SoDAdmin can create, edit, or disable rules — that role is assigned directly in Entra, not from inside AccessPilot.</div>}
+    {showTemplates && canManageRules && <div className="panel" style={{ marginBottom: 24 }}><div className="detail-section">
+      <div className="detail-title"><h2>Starter SoD rule templates</h2><button className="btn" onClick={() => setShowTemplates(false)}>Close</button></div>
+      <p className="subtitle" style={{ marginBottom: 14 }}>Recognizable conflict shapes to build a real policy from — pick one, then map each side to your own real Groups, Roles, or Applications.</p>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
+        {(ruleTemplates || []).map(template => <div key={template.id} className="panel" style={{ padding: 14 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}><strong>{template.name}</strong><span className="badge neutral">{template.category}</span></div>
+          <p className="subtitle" style={{ margin: '6px 0 10px' }}>{template.description}</p>
+          <button className="btn btn-primary" onClick={() => startFromTemplate(template)}>Use this template</button>
+        </div>)}
+      </div>
+    </div></div>}
     {showForm && canManageRules && <div className="panel" style={{ marginBottom: 24 }}><div className="detail-section">
       <div className="detail-title"><h2>{editingId ? 'Edit SoD policy' : 'New SoD policy'}</h2></div>
       <label className="key" style={{ display: 'block', marginBottom: 14, maxWidth: 420 }}><span>Name</span><input className="select" style={{ width: '100%' }} value={form.name} onChange={event => setForm({ ...form, name: event.target.value })} /></label>
       <label className="key" style={{ display: 'block', marginBottom: 14, maxWidth: 420 }}><span>Description</span><input className="select" style={{ width: '100%' }} value={form.description} onChange={event => setForm({ ...form, description: event.target.value })} /></label>
       <label className="key" style={{ display: 'block', marginBottom: 20, maxWidth: 220 }}><span>Severity</span><select className="select" style={{ width: '100%' }} value={form.severity} onChange={event => setForm({ ...form, severity: event.target.value })}><option value="LOW">Low</option><option value="MEDIUM">Medium</option><option value="HIGH">High</option><option value="CRITICAL">Critical</option></select></label>
-      <div className="key" style={{ marginBottom: 8 }}><span>Side A — holding anything here...</span></div>
+      <div className="key" style={{ marginBottom: 8 }}><span>{sideLabels ? `Side A — ${sideLabels.a}` : 'Side A — holding anything here...'}</span></div>
       <SodEntityPicker rows={form.sideA} groups={groups} roles={roles} applications={applications} packages={packages} businessRoles={businessRoles} onAdd={() => addEntity('sideA')} onRemove={i => removeEntity('sideA', i)} onUpdate={(i, patch) => updateEntity('sideA', i, patch)} />
-      <div className="key" style={{ margin: '18px 0 8px' }}><span>...conflicts with holding anything here (Side B)</span></div>
+      <div className="key" style={{ margin: '18px 0 8px' }}><span>{sideLabels ? `Side B — ${sideLabels.b}` : '...conflicts with holding anything here (Side B)'}</span></div>
       <SodEntityPicker rows={form.sideB} groups={groups} roles={roles} applications={applications} packages={packages} businessRoles={businessRoles} onAdd={() => addEntity('sideB')} onRemove={i => removeEntity('sideB', i)} onUpdate={(i, patch) => updateEntity('sideB', i, patch)} />
       {message && <div className="notice" style={{ margin: '14px 0' }}>{message}</div>}
       <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
@@ -811,8 +838,17 @@ function SocDashboard() {
               <div className="soc-event-time" style={{ marginTop: 4 }}>Holds: {(row.side_a as string[]).join(', ')} + {(row.side_b as string[]).join(', ')}{row.exception_active && row.exception_expires_at ? ` — exception expires ${formatDate(row.exception_expires_at, timezone)}` : ''}</div>
             </div> : row.action
               ? <div className="soc-event-main"><strong>{row.action.replace(/_/g, ' ')}</strong> — {row.actor_display_name || 'System'}{row.target_user_display_name ? ` → ${row.target_user_display_name}` : ''}</div>
+              : row.department_prevalence_pct !== undefined
+              ? <div className="soc-event-main">
+                <strong>{row.user_display_name}</strong> — {row.resource_display_name}
+                <div className="soc-event-time" style={{ marginTop: 4 }}>{row.department}: {row.holder_count} of {row.department_size} hold this ({row.department_prevalence_pct}%)</div>
+              </div>
+              : row.category !== undefined
+              ? <div className="soc-event-main"><strong>{row.category}</strong> — {row.count}</div>
+              : row.unclassified_entitlement
+              ? <div className="soc-event-main"><strong>{row.resource_type}</strong> — {row.resource_display_name}</div>
               : <div className="soc-event-main"><strong>{row.status}</strong> — {row.resource_type}{row.user_display_name ? ` · ${row.user_display_name}` : ''}{row.activated_at ? ` · activated ${formatDate(row.activated_at, timezone)}` : ''}</div>}
-            {!row.policy_name && <div className="soc-event-time">{formatDateTime(row.timestamp || row.created_at, timezone)}</div>}
+            {!row.policy_name && row.department_prevalence_pct === undefined && row.category === undefined && !row.unclassified_entitlement && <div className="soc-event-time">{formatDateTime(row.timestamp || row.created_at, timezone)}</div>}
           </div>)}
         </div>
       </div>
@@ -1530,9 +1566,8 @@ function sourceLabel(user: ApiUser, providers: ApiProvider[] | null): { label: s
   return { label: provider?.provider_type === 'ENTRA' ? 'Microsoft Entra ID' : provider?.provider_type === 'OKTA' ? 'Okta' : provider?.name || 'Connector', detail: connector };
 }
 function UsersPage() {
-  const auth = useAuth();
   const timezone = useAppTimezone();
-  const { data: users, error, loading, reload } = useApiResource<ApiUser[]>('/api/v1/users');
+  const { data: users, error, loading } = useApiResource<ApiUser[]>('/api/v1/users');
   const { data: providers } = useApiResource<ApiProvider[]>('/api/v1/providers');
   const [searchParams, setSearchParams] = useSearchParams();
   const search = searchParams.get('q') || '';
@@ -1541,36 +1576,7 @@ function UsersPage() {
   const setStatusFilter = (value: string) => setSearchParams(prev => { const next = new URLSearchParams(prev); if (value) next.set('status', value); else next.delete('status'); return next; });
   const statusOptions = useMemo(() => Array.from(new Set((users || []).map(u => u.status))).sort().map(s => ({ value: s, label: s })), [users]);
   const filteredUsers = (users || []).filter(u => (!statusFilter || u.status === statusFilter) && (!search || u.display_name.toLowerCase().includes(search.toLowerCase()) || u.email.toLowerCase().includes(search.toLowerCase())));
-  const [open, setOpen] = useState(false);
-  const [form, setForm] = useState({ display_name: '', user_principal_name: '', department: '', job_title: '' });
-  const [saving, setSaving] = useState(false);
-  const [formMessage, setFormMessage] = useState('');
-  const [createdPassword, setCreatedPassword] = useState<string | null>(null);
-  const submit = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!form.display_name.trim() || !form.user_principal_name.trim()) { setFormMessage('Display name and email are required.'); return; }
-    setSaving(true); setFormMessage('');
-    try {
-      const response = await auth.apiRequest('/api/v1/users', { method: 'POST', body: JSON.stringify(form) });
-      if (response.status === 201) {
-        const body = await response.json();
-        setCreatedPassword(body.temporary_password || null);
-        setForm({ display_name: '', user_principal_name: '', department: '', job_title: '' });
-        setOpen(false);
-        reload();
-      } else if (response.status === 409) {
-        setFormMessage('A user with this email already exists.');
-      } else {
-        const errorBody = await response.json().catch(() => null);
-        setFormMessage(errorBody?.error?.message || 'Unable to create user. Please try again.');
-      }
-    } catch (err) {
-      setFormMessage(err instanceof Error && err.message === 'AUTHENTICATION_REQUIRED' ? 'Please sign in to continue.' : 'Unable to create user. Please try again.');
-    } finally { setSaving(false); }
-  };
-  return <Page eyebrow="ADMINISTRATION" title="Users" subtitle="Directory identities and their AccessPilot entitlements." action={<button className="btn btn-primary" onClick={() => { setOpen(true); setFormMessage(''); }}><Plus size={14}/> Add user</button>}>
-    {createdPassword && <div className="notice" style={{marginBottom:14}}>User created. Temporary password (shown once, share it securely): <strong>{createdPassword}</strong></div>}
-    {open && <form role="dialog" aria-modal="true" className="panel" style={{maxWidth:640,marginBottom:18}} onSubmit={submit}><div className="panel-head"><h2>Add user</h2><button type="button" className="btn" aria-label="Close" onClick={() => setOpen(false)}><X size={14}/></button></div><div className="detail-section"><div className="key-grid">{([['display_name','Display name'],['user_principal_name','Email / UPN'],['department','Department'],['job_title','Job title']] as const).map(([key,label]) => <label className="key" key={key}><span>{label}</span><input className="select" value={form[key]} onChange={event => setForm({...form, [key]: event.target.value})}/></label>)}</div>{formMessage && <div className="notice" style={{marginTop:14}}>{formMessage}</div>}</div><div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setOpen(false)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Creating...' : 'Create user'}</button></div></form>}
+  return <Page eyebrow="ADMINISTRATION" title="Users" subtitle="Directory identities and their AccessPilot entitlements. New identities are created via Joiner.">
     <TablePanel toolbar={<Toolbar placeholder="Search users by name or email" searchValue={search} onSearchChange={setSearch} filterLabel="All statuses" filterValue={statusFilter} onFilterChange={setStatusFilter} filterOptions={statusOptions}/>}>{loading ? <div className="empty">Loading users...</div> : error ? <div className="empty">{error}</div> : !users || users.length === 0 ? <div className="empty">No users found.</div> : filteredUsers.length === 0 ? <div className="empty">No users match this filter.</div> : <table><thead><tr><th>User</th><th>Department</th><th>Job title</th><th>Source</th><th>Status</th><th>Last synced</th><th></th></tr></thead><tbody>{filteredUsers.map(u => { const source = sourceLabel(u, providers); return <tr key={u.id}><td><Link to={`/admin/users/${u.id}`} className="user-cell"><span className="avatar">{initialsFor(u.display_name)}</span><span><span className="user-name">{u.display_name}</span><span className="user-email">{u.email}</span></span></Link></td><td>{u.department || '—'}</td><td>{u.job_title || '—'}</td><td><span className="badge neutral" title={source.detail}>{source.label}</span></td><td><StatusBadge status={u.status}/></td><td>{u.last_synced_at ? formatDateTime(u.last_synced_at, timezone) : 'Never'}</td><td><ChevronRight size={15} color="#829198"/></td></tr>; })}</tbody></table>}</TablePanel>
     {users && users.length > 0 && <p className="footer-note">Showing {filteredUsers.length} of {users.length} users</p>}
   </Page>;
@@ -1586,6 +1592,28 @@ function OrgChartNode({ node, byManager, collapsed, toggle, depth }: { node: Api
     </div>
     {!isCollapsed && children.length > 0 && <ul style={{listStyle:'none',margin:0,paddingLeft:36,borderLeft:'1px dashed #d5dde0'}}>{children.map(child => <OrgChartNode key={child.id} node={child} byManager={byManager} collapsed={collapsed} toggle={toggle} depth={depth + 1}/>)}</ul>}
   </li>;
+}
+function DepartmentManagerMappingPanel() {
+  const auth = useAuth();
+  const { data: departments, loading, error, reload } = useApiResource<ApiDepartment[]>('/api/v1/policies/departments');
+  const { data: users } = useApiResource<ApiUser[]>('/api/v1/users');
+  const [message, setMessage] = useState('');
+  const setManager = async (department: ApiDepartment, managerId: string) => {
+    setMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/policies/departments/${department.id}/manager`, { method: 'PATCH', body: JSON.stringify({ manager_id: managerId || null }) });
+      if (response.ok) reload(); else setMessage((await response.json().catch(() => null))?.error?.message || 'Unable to update this mapping.');
+    } catch { setMessage('Unable to reach the backend.'); }
+  };
+  const managers = (users || []).filter(u => u.account_type === 'NORMAL' && u.status === 'ACTIVE');
+  return <section className="panel" style={{marginBottom:18}}>
+    <div className="panel-head"><h2>Department → Manager mapping</h2></div>
+    <div className="detail-section">
+      <p className="subtitle" style={{marginBottom:14}}>One manager per department — Joiner suggests this manager the moment that department is picked (still changeable per joiner).</p>
+      {message && <div className="notice" style={{marginBottom:14}}>{message}</div>}
+      {loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : !departments || departments.length === 0 ? <div className="empty">No departments defined yet — add some from Policies.</div> : <div className="table-wrap"><table><thead><tr><th>Department</th><th>Manager</th></tr></thead><tbody>{departments.map(d => <tr key={d.id}><td>{d.name}</td><td><select className="select" value={d.manager_id || ''} onChange={event => void setManager(d, event.target.value)}><option value="">No manager set</option>{managers.map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></td></tr>)}</tbody></table></div>}
+    </div>
+  </section>;
 }
 function OrgChartPage() {
   const { data: nodes, loading, error, reload } = useApiResource<ApiHierarchyNode[]>('/api/v1/users/hierarchy-tree');
@@ -1615,6 +1643,7 @@ function OrgChartPage() {
         {unassigned.length === 0 ? <div className="empty">Everyone is placed in the hierarchy above.</div> : <div className="table-wrap"><table><thead><tr><th>User</th><th>Tag</th></tr></thead><tbody>{unassigned.map(u => <tr key={u.id}><td><Link to={`/admin/users/${u.id}`} className="user-name">{u.display_name}</Link></td><td>{u.employee_category === 'EMPLOYEE' ? 'Employee' : 'Unclassified'}</td></tr>)}</tbody></table></div>}
       </div>
     </section>
+    <DepartmentManagerMappingPanel/>
   </Page>;
 }
 const EMPLOYMENT_TYPES = [{ value: 'EMPLOYEE', label: 'Employee' }, { value: 'CONTRACTOR', label: 'Contractor' }, { value: 'INTERN', label: 'Intern' }, { value: 'OTHER', label: 'Other' }];
@@ -1839,10 +1868,11 @@ function UserDetail() {
   const timezone = useAppTimezone();
   const { id } = useParams();
   const { data: user, error, loading, reload: reloadUser } = useApiResource<ApiUser>(`/api/v1/users/${id}`);
-  const [attributesForm, setAttributesForm] = useState({ department: '', job_title: '' });
+  const [attributesForm, setAttributesForm] = useState({ department: '', job_title: '', workflow_definition_id: '' });
   const [savingAttributes, setSavingAttributes] = useState(false);
   const [attributesMessage, setAttributesMessage] = useState('');
-  useEffect(() => { if (user) setAttributesForm({ department: user.department || '', job_title: user.job_title || '' }); }, [user]);
+  useEffect(() => { if (user) setAttributesForm({ department: user.department || '', job_title: user.job_title || '', workflow_definition_id: '' }); }, [user]);
+  const { data: activeWorkflows } = useApiResource<ApiWorkflowDefinition[]>('/api/v1/workflows/definitions/active');
   const { data: hierarchyNodes, reload: reloadHierarchy } = useApiResource<ApiHierarchyNode[]>('/api/v1/users/hierarchy-tree');
   const [hierarchyForm, setHierarchyForm] = useState({ employee_category: '', manager_id: '' });
   const [savingHierarchy, setSavingHierarchy] = useState(false);
@@ -1863,8 +1893,14 @@ function UserDetail() {
   const saveAttributes = async () => {
     setSavingAttributes(true); setAttributesMessage('');
     try {
-      const response = await auth.apiRequest(`/api/v1/users/${id}/attributes`, { method: 'PATCH', body: JSON.stringify({ department: attributesForm.department.trim() || null, job_title: attributesForm.job_title.trim() || null }) });
-      if (response.ok) { setAttributesMessage('Saved — pushed to the real directory and any birthright policy grants re-evaluated.'); reloadUser(); }
+      const payload: Record<string, unknown> = { department: attributesForm.department.trim() || null, job_title: attributesForm.job_title.trim() || null };
+      if (attributesForm.workflow_definition_id) payload.workflow_definition_id = attributesForm.workflow_definition_id;
+      const response = await auth.apiRequest(`/api/v1/users/${id}/attributes`, { method: 'PATCH', body: JSON.stringify(payload) });
+      if (response.ok) {
+        const body = await response.json().catch(() => null);
+        setAttributesMessage(body?.pending_attribute_change ? 'Submitted for approval — nothing is pushed to the real directory until the workflow approves it.' : 'Saved — pushed to the real directory and any birthright policy grants re-evaluated.');
+        reloadUser();
+      }
       else { const body = await response.json().catch(() => null); setAttributesMessage(body?.error?.message || 'Unable to save these attributes.'); }
     } catch { setAttributesMessage('Unable to reach the backend.'); } finally { setSavingAttributes(false); }
   };
@@ -1913,7 +1949,7 @@ function UserDetail() {
     {user.employee_id && <div className="key"><span>Employee ID (from CSV)</span><strong>{user.employee_id}</strong></div>}
     <div className="key"><span>Connector</span><strong>{connectorName}</strong></div>
     <div className="key"><span>Connector external ID</span><strong>{user.external_id}</strong></div>
-  </div>{isCsvOnly && <p className="subtitle" style={{marginTop:12}}>This identity has no real {providers?.some(p => p.provider_type === 'ENTRA') ? 'Entra' : providers?.some(p => p.provider_type === 'OKTA') ? 'Okta' : 'connector'} account yet — group/role membership shown below is AccessPilot-local (eligible) only. Re-uploading its CSV row after a real connector is available will provision one automatically.</p>}</div>{user.account_type !== 'NORMAL' && <div className="detail-section"><div className="detail-title"><h2>{user.account_type === 'PU' ? 'Privileged' : 'Test'} account</h2><span className="badge neutral">{user.account_type}</span></div><p className="subtitle" style={{marginTop:0}}>This is a {user.account_type === 'PU' ? 'Privileged (PU)' : 'Test (TU)'} account — deliberately excluded from Birthright and Group Role Mapping automation. Access to it is always granted manually.</p><div className="key-grid"><div className="key"><span>Linked to</span><strong>{linkedOwner ? <Link to={`/admin/users/${linkedOwner.id}`} className="user-name">{linkedOwner.display_name}</Link> : 'Not linked to a real user'}</strong></div></div></div>}{(linkedAccounts && linkedAccounts.length > 0) && <div className="detail-section"><div className="detail-title"><h2>Privileged / Test accounts</h2></div><p className="subtitle" style={{marginTop:0,marginBottom:12}}>Shadow accounts linked to this person for elevated admin work or QA/UAT — no mailbox, access granted manually only.</p><div className="table-wrap"><table><thead><tr><th>Account</th><th>Type</th><th>Status</th><th></th></tr></thead><tbody>{linkedAccounts.map(account => <tr key={account.id}><td className="user-name"><Link to={`/admin/users/${account.id}`} className="user-name">{account.display_name}</Link></td><td>{account.account_type}</td><td><StatusBadge status={account.status}/></td><td><button className="btn" disabled={enabledBusyId === account.id} onClick={() => void toggleAccountEnabled(account.id, account.status !== 'ACTIVE')}>{enabledBusyId === account.id ? 'Working...' : account.status === 'ACTIVE' ? 'Disable' : 'Enable'}</button></td></tr>)}</tbody></table></div></div>}<div className="detail-section"><div className="detail-title"><h2>Department &amp; job title</h2></div><p className="subtitle" style={{marginTop:0,marginBottom:14}}>Editing either pushes a real write to {connectorName} (not just a local edit) and re-evaluates birthright policies — a mover loses any group a policy no longer grants and gains any newly-matching one, ELIGIBLE only, same as a new joiner.</p><div className="key-grid"><label className="key" style={{display:'block'}}><span>Department</span><select className="select" style={{width:'100%'}} value={attributesForm.department} onChange={event => setAttributesForm({...attributesForm, department: event.target.value})}><option value="">No department</option>{attributesForm.department && !(departments || []).some(d => d.name === attributesForm.department) && <option value={attributesForm.department}>{attributesForm.department} (not in the managed list)</option>}{(departments || []).map(d => <option key={d.id} value={d.name}>{d.name}</option>)}</select></label><label className="key" style={{display:'block'}}><span>Job title</span><input className="select" style={{width:'100%'}} value={attributesForm.job_title} onChange={event => setAttributesForm({...attributesForm, job_title: event.target.value})}/></label></div><div style={{display:'flex',alignItems:'center',gap:10,marginTop:14}}><button className="btn btn-primary" disabled={savingAttributes} onClick={saveAttributes}>{savingAttributes ? 'Saving...' : 'Save'}</button>{attributesMessage && <span className="footer-note" style={{margin:0}}>{attributesMessage}</span>}</div></div><div className="detail-section"><div className="detail-title"><h2>Role &amp; manager</h2></div><p className="subtitle" style={{marginTop:0,marginBottom:14}}>AccessPilot-internal only — never pushed to Entra/Okta. Tag this person as an Employee or a Manager, and (for an Employee, or a Manager reporting further up) who they report to. Powers the Org Chart tab.</p><div className="key-grid"><label className="key" style={{display:'block'}}><span>Tag</span><select className="select" style={{width:'100%'}} value={hierarchyForm.employee_category} onChange={event => setHierarchyForm({...hierarchyForm, employee_category: event.target.value})}><option value="">Unclassified</option><option value="EMPLOYEE">Employee</option><option value="MANAGER">Manager</option></select></label><label className="key" style={{display:'block'}}><span>Reports to</span><select className="select" style={{width:'100%'}} value={hierarchyForm.manager_id} onChange={event => setHierarchyForm({...hierarchyForm, manager_id: event.target.value})}><option value="">No manager assigned</option>{managerOptions.map(m => <option key={m.id} value={m.id}>{m.display_name}</option>)}</select></label></div><div style={{display:'flex',alignItems:'center',gap:10,marginTop:14}}><button className="btn btn-primary" disabled={savingHierarchy} onClick={() => void saveHierarchy()}>{savingHierarchy ? 'Saving...' : 'Save'}</button>{hierarchyMessage && <span className="footer-note" style={{margin:0}}>{hierarchyMessage}</span>}</div></div></section><aside className="panel">
+  </div>{isCsvOnly && <p className="subtitle" style={{marginTop:12}}>This identity has no real {providers?.some(p => p.provider_type === 'ENTRA') ? 'Entra' : providers?.some(p => p.provider_type === 'OKTA') ? 'Okta' : 'connector'} account yet — group/role membership shown below is AccessPilot-local (eligible) only. Re-uploading its CSV row after a real connector is available will provision one automatically.</p>}</div>{user.account_type !== 'NORMAL' && <div className="detail-section"><div className="detail-title"><h2>{user.account_type === 'PU' ? 'Privileged' : 'Test'} account</h2><span className="badge neutral">{user.account_type}</span></div><p className="subtitle" style={{marginTop:0}}>This is a {user.account_type === 'PU' ? 'Privileged (PU)' : 'Test (TU)'} account — deliberately excluded from Birthright and Group Role Mapping automation. Access to it is always granted manually.</p><div className="key-grid"><div className="key"><span>Linked to</span><strong>{linkedOwner ? <Link to={`/admin/users/${linkedOwner.id}`} className="user-name">{linkedOwner.display_name}</Link> : 'Not linked to a real user'}</strong></div></div></div>}{(linkedAccounts && linkedAccounts.length > 0) && <div className="detail-section"><div className="detail-title"><h2>Privileged / Test accounts</h2></div><p className="subtitle" style={{marginTop:0,marginBottom:12}}>Shadow accounts linked to this person for elevated admin work or QA/UAT — no mailbox, access granted manually only.</p><div className="table-wrap"><table><thead><tr><th>Account</th><th>Type</th><th>Status</th><th></th></tr></thead><tbody>{linkedAccounts.map(account => <tr key={account.id}><td className="user-name"><Link to={`/admin/users/${account.id}`} className="user-name">{account.display_name}</Link></td><td>{account.account_type}</td><td><StatusBadge status={account.status}/></td><td><button className="btn" disabled={enabledBusyId === account.id} onClick={() => void toggleAccountEnabled(account.id, account.status !== 'ACTIVE')}>{enabledBusyId === account.id ? 'Working...' : account.status === 'ACTIVE' ? 'Disable' : 'Enable'}</button></td></tr>)}</tbody></table></div></div>}<div className="detail-section"><div className="detail-title"><h2>Department &amp; job title</h2></div><p className="subtitle" style={{marginTop:0,marginBottom:14}}>Editing either pushes a real write to {connectorName} (not just a local edit) and re-evaluates birthright policies — a mover loses any group a policy no longer grants and gains any newly-matching one, ELIGIBLE only, same as a new joiner.</p><div className="key-grid"><label className="key" style={{display:'block'}}><span>Department</span><select className="select" style={{width:'100%'}} value={attributesForm.department} onChange={event => setAttributesForm({...attributesForm, department: event.target.value})}><option value="">No department</option>{attributesForm.department && !(departments || []).some(d => d.name === attributesForm.department) && <option value={attributesForm.department}>{attributesForm.department} (not in the managed list)</option>}{(departments || []).map(d => <option key={d.id} value={d.name}>{d.name}</option>)}</select></label><label className="key" style={{display:'block'}}><span>Job title</span><input className="select" style={{width:'100%'}} value={attributesForm.job_title} onChange={event => setAttributesForm({...attributesForm, job_title: event.target.value})}/></label><label className="key" style={{display:'block'}}><span>Approval</span><select className="select" style={{width:'100%'}} value={attributesForm.workflow_definition_id} onChange={event => setAttributesForm({...attributesForm, workflow_definition_id: event.target.value})}><option value="">Apply immediately (no approval)</option>{(activeWorkflows || []).map(w => <option key={w.id} value={w.id}>Route through workflow: {w.name}</option>)}</select></label></div>{user.pending_attribute_change && <div className="notice" style={{marginTop:10}}>An attribute change for this person is pending approval — the real directory record is untouched until it's decided.</div>}<div style={{display:'flex',alignItems:'center',gap:10,marginTop:14}}><button className="btn btn-primary" disabled={savingAttributes} onClick={saveAttributes}>{savingAttributes ? 'Saving...' : 'Save'}</button>{attributesMessage && <span className="footer-note" style={{margin:0}}>{attributesMessage}</span>}</div></div><div className="detail-section"><div className="detail-title"><h2>Role &amp; manager</h2></div><p className="subtitle" style={{marginTop:0,marginBottom:14}}>AccessPilot-internal only — never pushed to Entra/Okta. Tag this person as an Employee or a Manager, and (for an Employee, or a Manager reporting further up) who they report to. Powers the Org Chart tab.</p><div className="key-grid"><label className="key" style={{display:'block'}}><span>Tag</span><select className="select" style={{width:'100%'}} value={hierarchyForm.employee_category} onChange={event => setHierarchyForm({...hierarchyForm, employee_category: event.target.value})}><option value="">Unclassified</option><option value="EMPLOYEE">Employee</option><option value="MANAGER">Manager</option></select></label><label className="key" style={{display:'block'}}><span>Reports to</span><select className="select" style={{width:'100%'}} value={hierarchyForm.manager_id} onChange={event => setHierarchyForm({...hierarchyForm, manager_id: event.target.value})}><option value="">No manager assigned</option>{managerOptions.map(m => <option key={m.id} value={m.id}>{m.display_name}</option>)}</select></label></div><div style={{display:'flex',alignItems:'center',gap:10,marginTop:14}}><button className="btn btn-primary" disabled={savingHierarchy} onClick={() => void saveHierarchy()}>{savingHierarchy ? 'Saving...' : 'Save'}</button>{hierarchyMessage && <span className="footer-note" style={{margin:0}}>{hierarchyMessage}</span>}</div></div></section><aside className="panel">
     <UserAccountsPanel userId={user.id} onChanged={reloadUser}/>
     <UserLeaverPanel user={user} onChanged={reloadUser}/>
     <div className="panel-head"><h2>Groups</h2></div>
@@ -2188,10 +2224,10 @@ function RequestPackagesPage() {
     <TablePanel toolbar={undefined}>{loading ? <div className="empty">Loading packages...</div> : error ? <div className="empty">{error}</div> : !packages || packages.length === 0 ? <div className="empty">No access packages are available for you to request.</div> : <table><thead><tr><th>Name</th><th>Description</th><th>Includes</th><th></th></tr></thead><tbody>{packages.map(p => <tr key={p.id}><td className="user-name">{p.name}</td><td>{p.description || '—'}</td><td>{p.items.map(i => i.resource_display_name || i.resource_id).join(', ')}</td><td><button className="btn btn-primary" onClick={() => openRequest(p)}>Request</button></td></tr>)}</tbody></table>}</TablePanel>
   </Page>;
 }
-interface ApiAssignment { id: string; user_id: string; user_display_name: string | null; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; assignment_type: string; status: string; start_time: string | null; expiration_time: string | null; justification: string | null; requested_by: string | null; approved_by: string | null; bypass_activation: boolean; activated_at: string | null; created_at: string; package_name: string | null; business_role_name: string | null; sod_exception_expires_at: string | null; }
+interface ApiAssignment { id: string; user_id: string; user_display_name: string | null; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; assignment_type: string; status: string; start_time: string | null; expiration_time: string | null; justification: string | null; requested_by: string | null; approved_by: string | null; bypass_activation: boolean; activated_at: string | null; created_at: string; package_name: string | null; business_role_name: string | null; workflow_definition_name: string | null; sod_exception_expires_at: string | null; }
 interface ApiActivationPolicy { max_self_activation_hours: number; }
 function todayDateValue(date: Date) { const pad = (n: number) => String(n).padStart(2, '0'); return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`; }
-const emptyAssignmentForm = { user_id: '', resource_type: 'GROUP', resource_id: '', app_role_external_id: '', assignment_type: 'PERMANENT', start_date: '', start_clock: '', end_date: '', end_clock: '', approver_id: '', bypass_activation: false, justification: '' };
+const emptyAssignmentForm = { user_id: '', resource_type: 'GROUP', resource_id: '', app_role_external_id: '', assignment_type: 'PERMANENT', start_date: '', start_clock: '', end_date: '', end_clock: '', approval_method: 'NONE', approver_id: '', workflow_definition_id: '', bypass_activation: false, justification: '' };
 function AssignmentsInteractive() {
   const auth = useAuth();
   const timezone = useAppTimezone();
@@ -2201,6 +2237,7 @@ function AssignmentsInteractive() {
   const { data: roles, reload: reloadRoles } = useApiResource<ApiRole[]>('/api/v1/roles');
   const { data: applications, reload: reloadApplications } = useApiResource<ApiApplication[]>('/api/v1/applications');
   const { data: packages, reload: reloadPackages } = useApiResource<ApiPackage[]>('/api/v1/packages');
+  const { data: activeWorkflows } = useApiResource<ApiWorkflowDefinition[]>('/api/v1/workflows/definitions/active');
   const { data: batches } = useApiResource<ApiPackageBatch[]>('/api/v1/packages/assignment-batches');
   const { data: roleBatches } = useApiResource<ApiRoleBatch[]>('/api/v1/business-roles/assignment-batches');
   const [searchParams, setSearchParams] = useSearchParams();
@@ -2284,8 +2321,9 @@ function AssignmentsInteractive() {
       if (!isPackage && form.resource_type === 'APPLICATION') payload.app_role_external_id = form.app_role_external_id;
       if (form.start_date || form.start_clock) payload.start_time = new Date(`${form.start_date || today}T${form.start_clock || '00:00'}`).toISOString();
       if (form.assignment_type === 'TEMPORARY' && (form.end_date || form.end_clock)) payload.expiration_time = new Date(`${form.end_date || today}T${form.end_clock || '23:59'}`).toISOString();
-      if (!isPackage && form.bypass_activation) payload.bypass_activation = true;
-      else if (form.approver_id) payload.approver_id = form.approver_id;
+      if (!isPackage && form.approval_method === 'BYPASS') payload.bypass_activation = true;
+      else if (form.approval_method === 'APPROVER' && form.approver_id) payload.approver_id = form.approver_id;
+      else if (form.approval_method === 'WORKFLOW' && form.workflow_definition_id) payload.workflow_definition_id = form.workflow_definition_id;
       const endpoint = isPackage ? `/api/v1/packages/${form.resource_id}/assign` : '/api/v1/assignments';
       const response = await auth.apiRequest(endpoint, { method: 'POST', body: JSON.stringify(payload) });
       if (response.status === 201) { setOpen(false); setForm(emptyAssignmentForm); reload(); }
@@ -2404,10 +2442,11 @@ function AssignmentsInteractive() {
         <label className="key"><span>{form.resource_type === 'GROUP' ? 'Group' : form.resource_type === 'ROLE' ? 'Role' : form.resource_type === 'APPLICATION' ? 'Application' : 'Package'}</span><select className="select" value={form.resource_id} onChange={event => setForm({...form, resource_id: event.target.value, app_role_external_id: ''})}><option value="">Select {form.resource_type === 'GROUP' ? 'a group' : form.resource_type === 'ROLE' ? 'a role' : form.resource_type === 'APPLICATION' ? 'an application' : 'a package'}</option>{targets.map((t: ApiGroup | ApiRole | ApiApplication | ApiPackage) => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
         {form.resource_type === 'APPLICATION' && <label className="key"><span>Application role</span><select className="select" value={form.app_role_external_id} onChange={event => setForm({...form, app_role_external_id: event.target.value})} disabled={!selectedApplication}><option value="">Select a role</option>{(selectedApplication?.app_roles || []).map(r => <option key={r.id} value={r.id}>{r.name}</option>)}</select></label>}
         <label className="key"><span>Duration</span><select className="select" value={form.assignment_type} onChange={event => setForm({...form, assignment_type: event.target.value})}><option value="PERMANENT">Permanent</option><option value="TEMPORARY">Time-bound</option></select></label>
-        <label className="key"><span>Approver (optional)</span><select className="select" value={form.approver_id} disabled={form.bypass_activation} onChange={event => setForm({...form, approver_id: event.target.value})}><option value="">No approval required</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+        <label className="key"><span>Approval</span><select className="select" value={form.approval_method} onChange={event => setForm({...form, approval_method: event.target.value, approver_id: '', workflow_definition_id: ''})}><option value="NONE">No approval required</option><option value="APPROVER">Single approver</option><option value="WORKFLOW">Workflow</option>{form.resource_type !== 'PACKAGE' && <option value="BYPASS">Assign immediately (Admin only)</option>}</select></label>
+        {form.approval_method === 'APPROVER' && <label className="key"><span>Approver</span><select className="select" value={form.approver_id} onChange={event => setForm({...form, approver_id: event.target.value})}><option value="">Select an approver</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>}
+        {form.approval_method === 'WORKFLOW' && <label className="key"><span>Workflow</span><select className="select" value={form.workflow_definition_id} onChange={event => setForm({...form, workflow_definition_id: event.target.value})}><option value="">Select a workflow</option>{(activeWorkflows || []).map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select></label>}
       </div>
-      {form.resource_type !== 'PACKAGE' && <label className="key" style={{display:'flex',alignItems:'center',gap:8,marginTop:16,cursor:'pointer'}}><input type="checkbox" checked={form.bypass_activation} onChange={event => setForm({...form, bypass_activation: event.target.checked, approver_id: event.target.checked ? '' : form.approver_id})}/><span style={{textTransform:'none',fontSize:12,fontWeight:600,color:'#37515c'}}>Assign immediately (Admin only) — skip activation, grant real access now; the user won't be able to deactivate it themselves</span></label>}
-      <div className="notice" style={{marginTop:14}}>{form.bypass_activation ? 'This grants real access immediately, with no approval or self-activation step — the end user cannot deactivate it themselves; only an Admin can.' : form.approver_id ? 'Once approved, this becomes eligible, not active — the user still activates it themselves (up to the admin-configured limit) from their My Access page.' : 'This lands as eligible, not active — the user activates it themselves (up to the admin-configured limit) from their My Access page.'}</div>
+      <div className="notice" style={{marginTop:14}}>{form.approval_method === 'BYPASS' ? 'This grants real access immediately, with no approval or self-activation step — the end user cannot deactivate it themselves; only an Admin can.' : form.approval_method === 'APPROVER' ? 'Once approved, this becomes eligible, not active — the user still activates it themselves (up to the admin-configured limit) from their My Access page.' : form.approval_method === 'WORKFLOW' ? 'This moves through the selected workflow’s stages first; once every stage approves it, it becomes eligible (not active) for the user to self-activate, same as a single approver.' : 'This lands as eligible, not active — the user activates it themselves (up to the admin-configured limit) from their My Access page.'}</div>
       <div style={{marginTop:18}}>
         <div className="key" style={{marginBottom:8}}><span>{form.assignment_type === 'TEMPORARY' ? 'Start (optional) — deadline to activate by is set below' : 'Start (optional) — leave blank to start now'}</span></div>
         <div style={{display:'flex',gap:10}}>
@@ -2429,7 +2468,7 @@ function AssignmentsInteractive() {
       <div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setOpen(false)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Creating...' : 'Create assignment'}</button></div>
     </form>}
     <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12}}><label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:'#52656d',cursor:'pointer'}}><input type="checkbox" checked={expiringFilter === '24h'} onChange={event => setExpiringFilter(event.target.checked)}/> Expiring within 24 hours</label></div>
-    <TablePanel toolbar={<Toolbar placeholder="Search assignments" searchValue={search} onSearchChange={setSearch} filterLabel="All statuses" filterValue={statusFilter} onFilterChange={setStatusFilter} filterOptions={statusOptions}/>}>{loading ? <div className="empty">Loading assignments...</div> : error ? <div className="empty">{error}</div> : !assignmentList || assignmentList.length === 0 ? <div className="empty">No assignments found.</div> : groupedRows.length === 0 ? <div className="empty">No assignments match this filter.</div> : <table><thead><tr><th>User</th><th>Resource</th><th>Type</th><th>Duration</th><th>Status</th><th>Start</th><th>Expiration</th><th></th></tr></thead><tbody>{groupedRows.map(row => row.kind === 'single' ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.user_display_name || row.assignment.user_id}</td><td>{row.assignment.resource_display_name || row.assignment.resource_id}{row.assignment.business_role_name && <div className="user-email">🏷 {row.assignment.business_role_name}</div>}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.assignment_type}</td><td><StatusBadge status={row.assignment.status}/></td><td>{row.assignment.start_time ? formatDateTime(row.assignment.start_time, timezone) : '—'}</td><td>{row.assignment.expiration_time ? formatDateTime(row.assignment.expiration_time, timezone) : '—'}</td><td>{isRevocable(row.assignment.status) ? <span style={{display:'flex',gap:5}}>{row.assignment.status === 'PENDING_APPROVAL' && <><button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'approve')} aria-label="Approve"><Check size={14}/></button><button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'reject')} aria-label="Reject"><X size={14}/></button></>}<button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void revoke(row.assignment.id, row.assignment.resource_display_name || 'this assignment')} aria-label="Revoke">Revoke</button></span> : <span className="footer-note">No actions</span>}</td></tr> : row.kind === 'batch' ? <>
+    <TablePanel toolbar={<Toolbar placeholder="Search assignments" searchValue={search} onSearchChange={setSearch} filterLabel="All statuses" filterValue={statusFilter} onFilterChange={setStatusFilter} filterOptions={statusOptions}/>}>{loading ? <div className="empty">Loading assignments...</div> : error ? <div className="empty">{error}</div> : !assignmentList || assignmentList.length === 0 ? <div className="empty">No assignments found.</div> : groupedRows.length === 0 ? <div className="empty">No assignments match this filter.</div> : <table><thead><tr><th>User</th><th>Resource</th><th>Type</th><th>Duration</th><th>Status</th><th>Start</th><th>Expiration</th><th></th></tr></thead><tbody>{groupedRows.map(row => row.kind === 'single' ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.user_display_name || row.assignment.user_id}</td><td>{row.assignment.resource_display_name || row.assignment.resource_id}{row.assignment.business_role_name && <div className="user-email">🏷 {row.assignment.business_role_name}</div>}{row.assignment.workflow_definition_name && <div className="user-email">🔀 {row.assignment.workflow_definition_name}</div>}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.assignment_type}</td><td><StatusBadge status={row.assignment.status}/></td><td>{row.assignment.start_time ? formatDateTime(row.assignment.start_time, timezone) : '—'}</td><td>{row.assignment.expiration_time ? formatDateTime(row.assignment.expiration_time, timezone) : '—'}</td><td>{isRevocable(row.assignment.status) ? <span style={{display:'flex',gap:5}}>{row.assignment.status === 'PENDING_APPROVAL' && <><button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'approve')} aria-label="Approve"><Check size={14}/></button><button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'reject')} aria-label="Reject"><X size={14}/></button></>}<button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void revoke(row.assignment.id, row.assignment.resource_display_name || 'this assignment')} aria-label="Revoke">Revoke</button></span> : <span className="footer-note">No actions</span>}</td></tr> : row.kind === 'batch' ? <>
       <tr key={row.batch.package_assignment_id} style={{cursor:'pointer'}} onClick={() => toggleBatch(row.batch.package_assignment_id)}>
         <td className="user-name">{row.assignments[0]?.user_display_name || row.batch.user_id}</td>
         <td>📦 {row.batch.package_name} <span className="footer-note">({row.assignments.length} items)</span></td>
@@ -2457,8 +2496,8 @@ function AssignmentsInteractive() {
   </Page>;
 }
 function AssignmentsPage() { return <AssignmentsInteractive />; }
-const emptyPackageForm = { name: '', description: '', owner_ids: [] as string[], items: [] as { resource_type: string; resource_id: string; app_role_external_id: string }[], principals: [] as { principal_type: string; principal_id: string }[], default_approver_id: '', default_fallback_approver_id: '', fallback_unlock_hours: '' };
-const emptyPackageAssignForm = { target_type: 'USER', user_id: '', group_id: '', assignment_type: 'PERMANENT', start_date: '', start_clock: '', end_date: '', end_clock: '', approver_id: '', justification: '' };
+const emptyPackageForm = { name: '', description: '', owner_ids: [] as string[], items: [] as { resource_type: string; resource_id: string; app_role_external_id: string }[], principals: [] as { principal_type: string; principal_id: string }[], approval_method: 'NONE', default_approver_id: '', default_fallback_approver_id: '', fallback_unlock_hours: '', workflow_definition_id: '' };
+const emptyPackageAssignForm = { target_type: 'USER', user_id: '', group_id: '', assignment_type: 'PERMANENT', start_date: '', start_clock: '', end_date: '', end_clock: '', approval_method: 'NONE', approver_id: '', workflow_definition_id: '', justification: '' };
 function AccessPackagesInteractive() {
   const auth = useAuth();
   const { data: packageList, error, loading, reload } = useApiResource<ApiPackage[]>('/api/v1/packages');
@@ -2472,6 +2511,7 @@ function AccessPackagesInteractive() {
   const { data: groups } = useApiResource<ApiGroup[]>('/api/v1/groups');
   const { data: roles } = useApiResource<ApiRole[]>('/api/v1/roles');
   const { data: applications } = useApiResource<ApiApplication[]>('/api/v1/applications');
+  const { data: activeWorkflows } = useApiResource<ApiWorkflowDefinition[]>('/api/v1/workflows/definitions/active');
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(emptyPackageForm);
   const [saving, setSaving] = useState(false);
@@ -2484,7 +2524,7 @@ function AccessPackagesInteractive() {
   const [archivingId, setArchivingId] = useState<string | null>(null);
   const [eligibilityPackage, setEligibilityPackage] = useState<ApiPackage | null>(null);
   const [viewingEligibility, setViewingEligibility] = useState<ApiPackage | null>(null);
-  const [eligibilityForm, setEligibilityForm] = useState<{ principals: { principal_type: string; principal_id: string }[]; default_approver_id: string; default_fallback_approver_id: string }>({ principals: [], default_approver_id: '', default_fallback_approver_id: '' });
+  const [eligibilityForm, setEligibilityForm] = useState<{ principals: { principal_type: string; principal_id: string }[]; approval_method: string; default_approver_id: string; default_fallback_approver_id: string; workflow_definition_id: string }>({ principals: [], approval_method: 'NONE', default_approver_id: '', default_fallback_approver_id: '', workflow_definition_id: '' });
   const [eligibilitySaving, setEligibilitySaving] = useState(false);
   const [eligibilityMessage, setEligibilityMessage] = useState('');
   const today = todayDateValue(new Date());
@@ -2499,7 +2539,7 @@ function AccessPackagesInteractive() {
 
   const openEligibility = (pkg: ApiPackage) => {
     setEligibilityPackage(pkg);
-    setEligibilityForm({ principals: pkg.eligible_principals.map(p => ({ principal_type: p.principal_type, principal_id: p.principal_id })), default_approver_id: pkg.default_approver_id || '', default_fallback_approver_id: pkg.default_fallback_approver_id || '' });
+    setEligibilityForm({ principals: pkg.eligible_principals.map(p => ({ principal_type: p.principal_type, principal_id: p.principal_id })), approval_method: pkg.workflow_definition_id ? 'WORKFLOW' : pkg.default_approver_id ? 'APPROVER' : 'NONE', default_approver_id: pkg.default_approver_id || '', default_fallback_approver_id: pkg.default_fallback_approver_id || '', workflow_definition_id: pkg.workflow_definition_id || '' });
     setEligibilityMessage('');
   };
   const addPrincipal = () => setEligibilityForm({ ...eligibilityForm, principals: [...eligibilityForm.principals, { principal_type: 'USER', principal_id: '' }] });
@@ -2511,7 +2551,9 @@ function AccessPackagesInteractive() {
     if (eligibilityForm.principals.some(p => !p.principal_id)) { setEligibilityMessage('Select a target for every entry.'); return; }
     setEligibilitySaving(true); setEligibilityMessage('');
     try {
-      const payload = { principals: eligibilityForm.principals, default_approver_id: eligibilityForm.default_approver_id || undefined, default_fallback_approver_id: eligibilityForm.default_fallback_approver_id || undefined };
+      const payload = eligibilityForm.approval_method === 'WORKFLOW'
+        ? { principals: eligibilityForm.principals, workflow_definition_id: eligibilityForm.workflow_definition_id }
+        : { principals: eligibilityForm.principals, default_approver_id: eligibilityForm.approval_method === 'APPROVER' ? (eligibilityForm.default_approver_id || undefined) : undefined, default_fallback_approver_id: eligibilityForm.approval_method === 'APPROVER' ? (eligibilityForm.default_fallback_approver_id || undefined) : undefined };
       const response = await auth.apiRequest(`/api/v1/packages/${eligibilityPackage.id}/eligibility`, { method: 'PUT', body: JSON.stringify(payload) });
       if (response.ok) { setEligibilityPackage(null); reload(); }
       else { const errorBody = await response.json().catch(() => null); setEligibilityMessage(errorBody?.error?.message || 'Unable to update eligibility.'); }
@@ -2523,7 +2565,7 @@ function AccessPackagesInteractive() {
   const openCreate = () => { setEditingPackageId(null); setForm(emptyPackageForm); setFormMessage(''); setOpen(true); };
   const openEdit = (pkg: ApiPackage) => {
     setEditingPackageId(pkg.id);
-    setForm({ name: pkg.name, description: pkg.description || '', owner_ids: (pkg.owners || []).map(o => o.user_id), items: pkg.items.map(item => ({ resource_type: item.resource_type, resource_id: item.resource_id, app_role_external_id: item.app_role_external_id || '' })), principals: [], default_approver_id: '', default_fallback_approver_id: '', fallback_unlock_hours: '' });
+    setForm({ name: pkg.name, description: pkg.description || '', owner_ids: (pkg.owners || []).map(o => o.user_id), items: pkg.items.map(item => ({ resource_type: item.resource_type, resource_id: item.resource_id, app_role_external_id: item.app_role_external_id || '' })), principals: [], approval_method: 'NONE', default_approver_id: '', default_fallback_approver_id: '', fallback_unlock_hours: '', workflow_definition_id: '' });
     setFormMessage(''); setOpen(true);
   };
 
@@ -2542,9 +2584,12 @@ function AccessPackagesInteractive() {
       payload.owner_ids = form.owner_ids;
       if (!editingPackageId) {
         payload.principals = form.principals;
-        if (form.default_approver_id) payload.default_approver_id = form.default_approver_id;
-        if (form.default_fallback_approver_id) payload.default_fallback_approver_id = form.default_fallback_approver_id;
-        if (form.fallback_unlock_hours) payload.fallback_unlock_hours = Number(form.fallback_unlock_hours);
+        if (form.approval_method === 'WORKFLOW') payload.workflow_definition_id = form.workflow_definition_id;
+        else {
+          if (form.default_approver_id) payload.default_approver_id = form.default_approver_id;
+          if (form.default_fallback_approver_id) payload.default_fallback_approver_id = form.default_fallback_approver_id;
+          if (form.fallback_unlock_hours) payload.fallback_unlock_hours = Number(form.fallback_unlock_hours);
+        }
       }
       const response = editingPackageId
         ? await auth.apiRequest(`/api/v1/packages/${editingPackageId}`, { method: 'PATCH', body: JSON.stringify(payload) })
@@ -2568,7 +2613,8 @@ function AccessPackagesInteractive() {
       const payload: Record<string, unknown> = assignForm.target_type === 'USER' ? { user_id: assignForm.user_id, assignment_type: assignForm.assignment_type, justification: assignForm.justification.trim() } : { group_id: assignForm.group_id, assignment_type: assignForm.assignment_type, justification: assignForm.justification.trim() };
       if (assignForm.start_date || assignForm.start_clock) payload.start_time = new Date(`${assignForm.start_date || today}T${assignForm.start_clock || '00:00'}`).toISOString();
       if (assignForm.assignment_type === 'TEMPORARY' && (assignForm.end_date || assignForm.end_clock)) payload.expiration_time = new Date(`${assignForm.end_date || today}T${assignForm.end_clock || '23:59'}`).toISOString();
-      if (assignForm.approver_id) payload.approver_id = assignForm.approver_id;
+      if (assignForm.approval_method === 'APPROVER' && assignForm.approver_id) payload.approver_id = assignForm.approver_id;
+      else if (assignForm.approval_method === 'WORKFLOW' && assignForm.workflow_definition_id) payload.workflow_definition_id = assignForm.workflow_definition_id;
       const response = await auth.apiRequest(`/api/v1/packages/${assigningPackage.id}/assign`, { method: 'POST', body: JSON.stringify(payload) });
       if (response.status === 201) {
         const body = await response.json();
@@ -2609,9 +2655,12 @@ function AccessPackagesInteractive() {
           <div className="key" style={{marginTop:18,marginBottom:8}}><span>1. Approval flow — set this up before adding items</span></div>
           <div className="notice" style={{marginBottom:14}}>Set an approver so requests for this package go through an approval flow. A fallback approver may also decide — immediately, or only after a wait period if the primary hasn't responded.</div>
           <div className="key-grid">
-            <label className="key"><span>Approver (optional) — leave blank for no approval required</span><select className="select" style={{width:'100%'}} value={form.default_approver_id} onChange={event => setForm({...form, default_approver_id: event.target.value})}><option value="">No approval required</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+            <label className="key"><span>Approval (for self-service requests)</span><select className="select" style={{width:'100%'}} value={form.approval_method} onChange={event => setForm({...form, approval_method: event.target.value})}><option value="NONE">No approval required</option><option value="APPROVER">Approver</option><option value="WORKFLOW">Workflow</option></select></label>
+            {form.approval_method === 'WORKFLOW' ? <label className="key"><span>Workflow</span><select className="select" style={{width:'100%'}} value={form.workflow_definition_id} onChange={event => setForm({...form, workflow_definition_id: event.target.value})}><option value="">Select a workflow</option>{(activeWorkflows || []).map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select></label> : form.approval_method === 'APPROVER' && <>
+            <label className="key"><span>Approver</span><select className="select" style={{width:'100%'}} value={form.default_approver_id} onChange={event => setForm({...form, default_approver_id: event.target.value})}><option value="">Select an approver</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
             <label className="key"><span>Fallback approver (optional)</span><select className="select" style={{width:'100%'}} value={form.default_fallback_approver_id} onChange={event => setForm({...form, default_fallback_approver_id: event.target.value})}><option value="">No fallback</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
             <label className="key"><span>Fallback may act after (hours) — optional; blank means immediately</span><input className="select" style={{width:'100%'}} type="number" min={1} disabled={!form.default_fallback_approver_id} value={form.fallback_unlock_hours} onChange={event => setForm({...form, fallback_unlock_hours: event.target.value})}/></label>
+            </>}
           </div>
           <div className="key" style={{marginTop:18,marginBottom:8}}><span>Who can request this package</span></div>
           {form.principals.map((principal, index) => {
@@ -2647,7 +2696,9 @@ function AccessPackagesInteractive() {
         <label className="key"><span>Assign to</span><select className="select" value={assignForm.target_type} onChange={event => setAssignForm({...assignForm, target_type: event.target.value, user_id: '', group_id: ''})}><option value="USER">Individual user</option><option value="GROUP">Everyone in a group</option></select></label>
         {assignForm.target_type === 'USER' ? <label className="key"><span>User</span><select className="select" value={assignForm.user_id} onChange={event => setAssignForm({...assignForm, user_id: event.target.value})}><option value="">Select a user</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name} ({u.email})</option>)}</select></label> : <label className="key"><span>Group</span><select className="select" value={assignForm.group_id} onChange={event => setAssignForm({...assignForm, group_id: event.target.value})}><option value="">Select a group</option>{(groups || []).map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select></label>}
         <label className="key"><span>Duration</span><select className="select" value={assignForm.assignment_type} onChange={event => setAssignForm({...assignForm, assignment_type: event.target.value})}><option value="PERMANENT">Permanent</option><option value="TEMPORARY">Time-bound</option></select></label>
-        <label className="key"><span>Approver (optional)</span><select className="select" value={assignForm.approver_id} onChange={event => setAssignForm({...assignForm, approver_id: event.target.value})}><option value="">No approval required</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+        <label className="key"><span>Approval</span><select className="select" value={assignForm.approval_method} onChange={event => setAssignForm({...assignForm, approval_method: event.target.value, approver_id: '', workflow_definition_id: ''})}><option value="NONE">No approval required</option><option value="APPROVER">Single approver</option><option value="WORKFLOW">Workflow</option></select></label>
+        {assignForm.approval_method === 'APPROVER' && <label className="key"><span>Approver</span><select className="select" value={assignForm.approver_id} onChange={event => setAssignForm({...assignForm, approver_id: event.target.value})}><option value="">Select an approver</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>}
+        {assignForm.approval_method === 'WORKFLOW' && <label className="key"><span>Workflow</span><select className="select" value={assignForm.workflow_definition_id} onChange={event => setAssignForm({...assignForm, workflow_definition_id: event.target.value})}><option value="">Select a workflow</option>{(activeWorkflows || []).map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select></label>}
       </div>
       <div style={{marginTop:18}}>
         <div className="key" style={{marginBottom:8}}><span>Start (optional) — leave blank to start now</span></div>
@@ -2670,9 +2721,12 @@ function AccessPackagesInteractive() {
     {eligibilityPackage && <form role="dialog" aria-modal="true" className="panel" style={{maxWidth:720,marginBottom:18}} onSubmit={submitEligibility}>
       <div className="panel-head"><h2>Who can request "{eligibilityPackage.name}"</h2><button type="button" className="btn" aria-label="Close" onClick={() => setEligibilityPackage(null)}><X size={14}/></button></div>
       <div className="detail-section">
-        <div style={{display:'flex',gap:14,marginBottom:14}}>
-          <label className="key" style={{flex:1}}><span>Default approver (optional) — used automatically when someone eligible requests this package</span><select className="select" style={{width:'100%'}} value={eligibilityForm.default_approver_id} onChange={event => setEligibilityForm({...eligibilityForm, default_approver_id: event.target.value})}><option value="">No approval required</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+        <div style={{display:'flex',gap:14,marginBottom:14,flexWrap:'wrap'}}>
+          <label className="key" style={{flex:1}}><span>Approval — used automatically when someone eligible requests this package</span><select className="select" style={{width:'100%'}} value={eligibilityForm.approval_method} onChange={event => setEligibilityForm({...eligibilityForm, approval_method: event.target.value})}><option value="NONE">No approval required</option><option value="APPROVER">Approver</option><option value="WORKFLOW">Workflow</option></select></label>
+          {eligibilityForm.approval_method === 'WORKFLOW' ? <label className="key" style={{flex:1}}><span>Workflow</span><select className="select" style={{width:'100%'}} value={eligibilityForm.workflow_definition_id} onChange={event => setEligibilityForm({...eligibilityForm, workflow_definition_id: event.target.value})}><option value="">Select a workflow</option>{(activeWorkflows || []).map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select></label> : eligibilityForm.approval_method === 'APPROVER' && <>
+          <label className="key" style={{flex:1}}><span>Default approver</span><select className="select" style={{width:'100%'}} value={eligibilityForm.default_approver_id} onChange={event => setEligibilityForm({...eligibilityForm, default_approver_id: event.target.value})}><option value="">Select an approver</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
           <label className="key" style={{flex:1}}><span>Fallback approver (optional) — may also approve if the default approver hasn't</span><select className="select" style={{width:'100%'}} value={eligibilityForm.default_fallback_approver_id} onChange={event => setEligibilityForm({...eligibilityForm, default_fallback_approver_id: event.target.value})}><option value="">No fallback</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+          </>}
         </div>
         <div className="key" style={{marginBottom:8}}><span>Eligible users / groups</span></div>
         {eligibilityForm.principals.map((principal, index) => {
@@ -2689,7 +2743,7 @@ function AccessPackagesInteractive() {
       </div>
       <div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setEligibilityPackage(null)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={eligibilitySaving}>{eligibilitySaving ? 'Saving...' : 'Save eligibility'}</button></div>
     </form>}
-    <TablePanel toolbar={<Toolbar placeholder="Search packages" searchValue={search} onSearchChange={setSearch} filterLabel="All statuses" filterValue={statusFilter} onFilterChange={setStatusFilter} filterOptions={[{value:'ACTIVE',label:'Active'},{value:'ARCHIVED',label:'Archived'}]}/>}>{loading ? <div className="empty">Loading packages...</div> : error ? <div className="empty">{error}</div> : !packageList || packageList.length === 0 ? <div className="empty">No packages found.</div> : filteredPackages.length === 0 ? <div className="empty">No packages match this filter.</div> : <table><thead><tr><th>Name</th><th>Description</th><th>Items</th><th>Status</th><th>Requestable by</th><th></th></tr></thead><tbody>{filteredPackages.map(p => <tr key={p.id}><td className="user-name">{p.name}</td><td>{p.description || '—'}</td><td>{p.items.map(i => i.resource_display_name || i.resource_id).join(', ')}</td><td><StatusBadge status={p.status}/></td><td>{p.eligible_principals.length === 0 ? '—' : <button type="button" className="btn" style={{padding:'4px 9px',fontSize:11,fontWeight:700,color:'var(--teal-dark)',borderColor:'#c7e3e3',background:'var(--mint)'}} onClick={() => setViewingEligibility(p)} title="Click to see who">{p.eligible_principals.length}</button>}</td><td><span style={{display:'flex',gap:5}}>{p.status === 'ACTIVE' && <button className="btn btn-primary" onClick={() => { setAssigningPackage(p); setAssignForm(emptyPackageAssignForm); setAssignMessage(''); }}>Assign</button>}<button className="btn" onClick={() => openEdit(p)}>Edit</button>{p.status === 'ACTIVE' && <button className="btn" onClick={() => openEligibility(p)}>Eligibility</button>}{p.status === 'ACTIVE' && <button className="btn" disabled={archivingId === p.id} onClick={() => void deletePackage(p.id)}>Delete</button>}</span></td></tr>)}</tbody></table>}</TablePanel>
+    <TablePanel toolbar={<Toolbar placeholder="Search packages" searchValue={search} onSearchChange={setSearch} filterLabel="All statuses" filterValue={statusFilter} onFilterChange={setStatusFilter} filterOptions={[{value:'ACTIVE',label:'Active'},{value:'ARCHIVED',label:'Archived'}]}/>}>{loading ? <div className="empty">Loading packages...</div> : error ? <div className="empty">{error}</div> : !packageList || packageList.length === 0 ? <div className="empty">No packages found.</div> : filteredPackages.length === 0 ? <div className="empty">No packages match this filter.</div> : <table><thead><tr><th>Name</th><th>Description</th><th>Items</th><th>Status</th><th>Requestable by</th><th></th></tr></thead><tbody>{filteredPackages.map(p => <tr key={p.id}><td className="user-name">{p.name}</td><td>{p.description || '—'}</td><td>{p.items.map(i => i.resource_display_name || i.resource_id).join(', ')}</td><td><StatusBadge status={p.status}/></td><td>{p.eligible_principals.length === 0 ? '—' : <button type="button" className="btn" style={{padding:'4px 9px',fontSize:11,fontWeight:700,color:'var(--teal-dark)',borderColor:'#c7e3e3',background:'var(--mint)'}} onClick={() => setViewingEligibility(p)} title="Click to see who">{p.eligible_principals.length}</button>}</td><td><span style={{display:'flex',gap:5}}>{p.status === 'ACTIVE' && <button className="btn btn-primary" onClick={() => { setAssigningPackage(p); setAssignForm(p.workflow_definition_id ? {...emptyPackageAssignForm, approval_method: 'WORKFLOW', workflow_definition_id: p.workflow_definition_id} : emptyPackageAssignForm); setAssignMessage(''); }}>Assign</button>}<button className="btn" onClick={() => openEdit(p)}>Edit</button>{p.status === 'ACTIVE' && <button className="btn" onClick={() => openEligibility(p)}>Eligibility</button>}{p.status === 'ACTIVE' && <button className="btn" disabled={archivingId === p.id} onClick={() => void deletePackage(p.id)}>Delete</button>}</span></td></tr>)}</tbody></table>}</TablePanel>
     {viewingEligibility && <div className="overlay-backdrop" onClick={() => setViewingEligibility(null)}>
       <div className="overlay-card" onClick={event => event.stopPropagation()}>
         <div className="panel-head">
@@ -2803,7 +2857,7 @@ function MyApprovalsPage() {
   return <Page eyebrow="ACCESS MANAGEMENT" title="Approvals" subtitle="Access assignments where you are the designated approver." action={<button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button>}>
     {message && <div className="detail-section" style={{marginBottom:14}}><div className="notice">{message}</div></div>}
     <TablePanel toolbar={undefined}>{loading ? <div className="empty">Loading approvals...</div> : error ? <div className="empty">{error}</div> : !items || items.length === 0 ? <div className="empty">No assignments are waiting on your approval.</div> : <table><thead><tr><th>User</th><th>Resource</th><th>Type</th><th>Duration</th><th>Status</th><th>Requested</th><th></th></tr></thead><tbody>
-      {pendingRows.map(row => row.kind === 'single' ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.user_display_name || row.assignment.user_id}</td><td>{row.assignment.resource_display_name || row.assignment.resource_id}{row.assignment.business_role_name && <div className="user-email">🏷 {row.assignment.business_role_name}</div>}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.assignment_type}</td><td><StatusBadge status={row.assignment.status}/></td><td>{formatDateTime(row.assignment.created_at, timezone)}</td><td><span style={{display:'flex',gap:5}}><button className="btn btn-primary" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'approve')} aria-label="Approve"><Check size={14}/> Approve</button><button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'reject')} aria-label="Reject"><X size={14}/> Reject</button></span></td></tr> : row.kind === 'batch' ? <>
+      {pendingRows.map(row => row.kind === 'single' ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.user_display_name || row.assignment.user_id}</td><td>{row.assignment.resource_display_name || row.assignment.resource_id}{row.assignment.business_role_name && <div className="user-email">🏷 {row.assignment.business_role_name}</div>}{row.assignment.workflow_definition_name && <div className="user-email">🔀 {row.assignment.workflow_definition_name}</div>}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.assignment_type}</td><td><StatusBadge status={row.assignment.status}/></td><td>{formatDateTime(row.assignment.created_at, timezone)}</td><td><span style={{display:'flex',gap:5}}><button className="btn btn-primary" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'approve')} aria-label="Approve"><Check size={14}/> Approve</button><button className="btn" disabled={actioningId === row.assignment.id} onClick={() => void decide(row.assignment.id, 'reject')} aria-label="Reject"><X size={14}/> Reject</button></span></td></tr> : row.kind === 'batch' ? <>
         <tr key={row.batch.package_assignment_id} style={{cursor:'pointer'}} onClick={() => toggleBatch(row.batch.package_assignment_id)}>
           <td className="user-name">{row.assignments[0]?.user_display_name || row.batch.user_id}</td>
           <td>📦 {row.batch.package_name} <span className="footer-note">({row.assignments.length} items)</span></td>
@@ -2826,7 +2880,7 @@ function MyApprovalsPage() {
         </tr>
         {expandedBatches.has(row.batch.role_assignment_id) && row.assignments.map(a => <tr key={a.id} style={{opacity:0.8}}><td className="user-name">↳</td><td>{a.resource_display_name || a.resource_id}</td><td>{a.resource_type}</td><td>{a.assignment_type}</td><td><StatusBadge status={a.status}/></td><td>{formatDateTime(a.created_at, timezone)}</td><td></td></tr>)}
       </>)}
-      {decidedRows.map(row => row.kind === 'single' ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.user_display_name || row.assignment.user_id}</td><td>{row.assignment.resource_display_name || row.assignment.resource_id}{row.assignment.business_role_name && <div className="user-email">🏷 {row.assignment.business_role_name}</div>}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.assignment_type}</td><td><StatusBadge status={row.assignment.status}/></td><td>{formatDateTime(row.assignment.created_at, timezone)}</td><td><span className="footer-note">Decided</span></td></tr> : row.kind === 'batch' ? <>
+      {decidedRows.map(row => row.kind === 'single' ? <tr key={row.assignment.id}><td className="user-name">{row.assignment.user_display_name || row.assignment.user_id}</td><td>{row.assignment.resource_display_name || row.assignment.resource_id}{row.assignment.business_role_name && <div className="user-email">🏷 {row.assignment.business_role_name}</div>}{row.assignment.workflow_definition_name && <div className="user-email">🔀 {row.assignment.workflow_definition_name}</div>}</td><td>{row.assignment.resource_type}</td><td>{row.assignment.assignment_type}</td><td><StatusBadge status={row.assignment.status}/></td><td>{formatDateTime(row.assignment.created_at, timezone)}</td><td><span className="footer-note">Decided</span></td></tr> : row.kind === 'batch' ? <>
         <tr key={row.batch.package_assignment_id} style={{cursor:'pointer'}} onClick={() => toggleBatch(row.batch.package_assignment_id)}>
           <td className="user-name">{row.assignments[0]?.user_display_name || row.batch.user_id}</td>
           <td>📦 {row.batch.package_name} <span className="footer-note">({row.assignments.length} items)</span></td>
@@ -2886,7 +2940,7 @@ const emptyBusinessRoleForm = { name: '', description: '', role_type: 'BUSINESS'
 const ROLE_TYPE_LABELS: Record<string, string> = { BUSINESS: 'Business', IT: 'IT', APPLICATION: 'Application', DIRECTORY: 'Directory', PRIVILEGED: 'Privileged', COMPOSITE: 'Composite' };
 interface ApiBusinessRoleAssignItemResult { item_id: string; resource_type: string; resource_id: string; status: string; error_message: string | null; }
 interface ApiBusinessRoleHolder { user_id: string; user_display_name: string | null; user_email: string | null; role_assignment_id: string; assigned_at: string; items: ApiBusinessRoleAssignItemResult[]; }
-const emptyAssignForm = { user_id: '', assignment_type: 'PERMANENT', expiration_time: '', approver_id: '', justification: '' };
+const emptyAssignForm = { user_id: '', assignment_type: 'PERMANENT', expiration_time: '', approval_method: 'NONE', approver_id: '', workflow_definition_id: '', justification: '' };
 // Business Roles: a named, owned bundle of real entitlements (groups/directory roles/application roles) that raw
 // IdP-side access maps onto — Step 1 of the Role Management & Entitlement Mapping plan. See AccessPackages'
 // own create/edit pattern above, which this deliberately mirrors.
@@ -2900,6 +2954,7 @@ function BusinessRolesPage() {
   const { data: groups } = useApiResource<ApiGroup[]>('/api/v1/groups');
   const { data: roles } = useApiResource<ApiRole[]>('/api/v1/roles');
   const { data: applications } = useApiResource<ApiApplication[]>('/api/v1/applications');
+  const { data: activeWorkflows } = useApiResource<ApiWorkflowDefinition[]>('/api/v1/workflows/definitions/active');
   const [open, setOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState(emptyBusinessRoleForm);
@@ -2978,7 +3033,8 @@ function BusinessRolesPage() {
     try {
       const payload: Record<string, unknown> = { user_id: assignForm.user_id, assignment_type: assignForm.assignment_type, justification: assignForm.justification.trim() };
       if (assignForm.assignment_type === 'TEMPORARY') payload.expiration_time = new Date(assignForm.expiration_time).toISOString();
-      if (assignForm.approver_id) payload.approver_id = assignForm.approver_id;
+      if (assignForm.approval_method === 'APPROVER' && assignForm.approver_id) payload.approver_id = assignForm.approver_id;
+      else if (assignForm.approval_method === 'WORKFLOW' && assignForm.workflow_definition_id) payload.workflow_definition_id = assignForm.workflow_definition_id;
       const response = await auth.apiRequest(`/api/v1/business-roles/${assigningRole.id}/assign`, { method: 'POST', body: JSON.stringify(payload) });
       const body = await response.json().catch(() => null);
       if (response.ok) {
@@ -3066,7 +3122,9 @@ function BusinessRolesPage() {
         <label className="key"><span>Person</span><select className="select" value={assignForm.user_id} onChange={event => setAssignForm({...assignForm, user_id: event.target.value})}><option value="">Select a person</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
         <label className="key"><span>Duration</span><select className="select" value={assignForm.assignment_type} onChange={event => setAssignForm({...assignForm, assignment_type: event.target.value})}><option value="PERMANENT">Permanent (eligible indefinitely)</option><option value="TEMPORARY">Temporary</option></select></label>
         {assignForm.assignment_type === 'TEMPORARY' && <label className="key"><span>Expires</span><input className="select" type="datetime-local" value={assignForm.expiration_time} onChange={event => setAssignForm({...assignForm, expiration_time: event.target.value})}/></label>}
-        <label className="key"><span>Approver (optional)</span><select className="select" value={assignForm.approver_id} onChange={event => setAssignForm({...assignForm, approver_id: event.target.value})}><option value="">No approval needed</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+        <label className="key"><span>Approval</span><select className="select" value={assignForm.approval_method} onChange={event => setAssignForm({...assignForm, approval_method: event.target.value, approver_id: '', workflow_definition_id: ''})}><option value="NONE">No approval needed</option><option value="APPROVER">Single approver</option><option value="WORKFLOW">Workflow</option></select></label>
+        {assignForm.approval_method === 'APPROVER' && <label className="key"><span>Approver</span><select className="select" value={assignForm.approver_id} onChange={event => setAssignForm({...assignForm, approver_id: event.target.value})}><option value="">Select an approver</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>}
+        {assignForm.approval_method === 'WORKFLOW' && <label className="key"><span>Workflow</span><select className="select" value={assignForm.workflow_definition_id} onChange={event => setAssignForm({...assignForm, workflow_definition_id: event.target.value})}><option value="">Select a workflow</option>{(activeWorkflows || []).map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select></label>}
       </div>
       <label className="key" style={{display:'block',marginBottom:12}}><span>Justification</span><input className="select" style={{width:'100%'}} value={assignForm.justification} onChange={event => setAssignForm({...assignForm, justification: event.target.value})} placeholder="Why does this person need this role?"/></label>
       {assignMessage && <div className="notice" style={{marginBottom:12}}>{assignMessage}</div>}
@@ -3114,8 +3172,9 @@ function GroupsPage() {
   const setSearch = (value: string) => setSearchParams(prev => { const next = new URLSearchParams(prev); if (value) next.set('q', value); else next.delete('q'); return next; });
   const setPrivilegedFilter = (value: string) => setSearchParams(prev => { const next = new URLSearchParams(prev); if (value) next.set('privileged', value); else next.delete('privileged'); return next; });
   const filteredGroups = (groups || []).filter(g => (!privilegedFilter || String(g.is_privileged) === privilegedFilter) && (!search || g.name.toLowerCase().includes(search.toLowerCase())));
+  const { data: groupLabels } = useApiResource<ApiGroupLabel[]>('/api/v1/policies/group-labels');
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState({ display_name: '', description: '' });
+  const [form, setForm] = useState({ display_name: '', description: '', group_label: '' });
   const [saving, setSaving] = useState(false);
   const [formMessage, setFormMessage] = useState('');
   const submit = async (event: React.FormEvent) => {
@@ -3123,8 +3182,9 @@ function GroupsPage() {
     if (!form.display_name.trim()) { setFormMessage('Group name is required.'); return; }
     setSaving(true); setFormMessage('');
     try {
-      const response = await auth.apiRequest('/api/v1/groups', { method: 'POST', body: JSON.stringify(form) });
-      if (response.status === 201) { setForm({ display_name: '', description: '' }); setOpen(false); reload(); }
+      const payload = { display_name: form.display_name, description: form.description, group_label: form.group_label || undefined };
+      const response = await auth.apiRequest('/api/v1/groups', { method: 'POST', body: JSON.stringify(payload) });
+      if (response.status === 201) { setForm({ display_name: '', description: '', group_label: '' }); setOpen(false); reload(); }
       else if (response.status === 409) setFormMessage('A group with this name already exists.');
       else { const errorBody = await response.json().catch(() => null); setFormMessage(errorBody?.error?.message || 'Unable to create group. Please try again.'); }
     } catch (err) {
@@ -3132,8 +3192,8 @@ function GroupsPage() {
     } finally { setSaving(false); }
   };
   return <Page eyebrow="ADMINISTRATION" title="Groups" subtitle="Directory groups and membership governance." action={<button className="btn btn-primary" onClick={() => { setOpen(true); setFormMessage(''); }}><Plus size={14}/> Add group</button>}>
-    {open && <form role="dialog" aria-modal="true" className="panel" style={{maxWidth:640,marginBottom:18}} onSubmit={submit}><div className="panel-head"><h2>Add group</h2><button type="button" className="btn" aria-label="Close" onClick={() => setOpen(false)}><X size={14}/></button></div><div className="detail-section"><label className="key" style={{display:'block'}}><span>Group name</span><input className="select" style={{width:'100%'}} value={form.display_name} onChange={event => setForm({...form, display_name: event.target.value})}/></label><label className="key" style={{display:'block',marginTop:14}}><span>Description</span><input className="select" style={{width:'100%'}} value={form.description} onChange={event => setForm({...form, description: event.target.value})}/></label>{formMessage && <div className="notice" style={{marginTop:14}}>{formMessage}</div>}</div><div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setOpen(false)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Creating...' : 'Create group'}</button></div></form>}
-    <TablePanel toolbar={<Toolbar placeholder="Search groups" searchValue={search} onSearchChange={setSearch} filterLabel="All groups" filterValue={privilegedFilter} onFilterChange={setPrivilegedFilter} filterOptions={[{value:'true',label:'Privileged'},{value:'false',label:'Standard'}]}/>}>{loading ? <div className="empty">Loading groups...</div> : error ? <div className="empty">{error}</div> : !groups || groups.length === 0 ? <div className="empty">No groups found.</div> : filteredGroups.length === 0 ? <div className="empty">No groups match this filter.</div> : <table><thead><tr><th>Name</th><th>Description</th><th>Privileged</th><th>Status</th><th>Last synced</th><th></th></tr></thead><tbody>{filteredGroups.map(g => <tr key={g.id}><td><Link to={`/admin/groups/${g.id}`} className="user-name">{g.name}</Link></td><td>{g.description || '—'}</td><td><span className={`risk ${g.is_privileged ? 'risk-high' : 'risk-low'}`}>{g.is_privileged ? 'Privileged' : 'Standard'}</span></td><td><StatusBadge status={g.status}/></td><td>{g.last_synced_at ? formatDateTime(g.last_synced_at, timezone) : 'Never'}</td><td><Link to={`/admin/groups/${g.id}`}><ChevronRight size={15} color="#829198"/></Link></td></tr>)}</tbody></table>}</TablePanel>
+    {open && <form role="dialog" aria-modal="true" className="panel" style={{maxWidth:640,marginBottom:18}} onSubmit={submit}><div className="panel-head"><h2>Add group</h2><button type="button" className="btn" aria-label="Close" onClick={() => setOpen(false)}><X size={14}/></button></div><div className="detail-section"><label className="key" style={{display:'block'}}><span>Group name</span><input className="select" style={{width:'100%'}} value={form.display_name} onChange={event => setForm({...form, display_name: event.target.value})}/></label><label className="key" style={{display:'block',marginTop:14}}><span>Description</span><input className="select" style={{width:'100%'}} value={form.description} onChange={event => setForm({...form, description: event.target.value})}/></label><label className="key" style={{display:'block',marginTop:14}}><span>Label (optional) — AccessPilot governance classification, not written to Entra</span><select className="select" style={{width:'100%'}} value={form.group_label} onChange={event => setForm({...form, group_label: event.target.value})}><option value="">No label</option><option value="STANDARD">Standard</option><option value="PRIVILEGED">Privileged</option>{(groupLabels || []).map(l => <option key={l.id} value={l.name}>{l.name}</option>)}</select></label>{formMessage && <div className="notice" style={{marginTop:14}}>{formMessage}</div>}</div><div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setOpen(false)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Creating...' : 'Create group'}</button></div></form>}
+    <TablePanel toolbar={<Toolbar placeholder="Search groups" searchValue={search} onSearchChange={setSearch} filterLabel="All groups" filterValue={privilegedFilter} onFilterChange={setPrivilegedFilter} filterOptions={[{value:'true',label:'Privileged'},{value:'false',label:'Standard'}]}/>}>{loading ? <div className="empty">Loading groups...</div> : error ? <div className="empty">{error}</div> : !groups || groups.length === 0 ? <div className="empty">No groups found.</div> : filteredGroups.length === 0 ? <div className="empty">No groups match this filter.</div> : <table><thead><tr><th>Name</th><th>Description</th><th>Privileged</th><th>Label</th><th>Status</th><th>Last synced</th><th></th></tr></thead><tbody>{filteredGroups.map(g => <tr key={g.id}><td><Link to={`/admin/groups/${g.id}`} className="user-name">{g.name}</Link></td><td>{g.description || '—'}</td><td><span className={`risk ${g.is_privileged ? 'risk-high' : 'risk-low'}`}>{g.is_privileged ? 'Privileged' : 'Standard'}</span></td><td>{g.group_label || '—'}</td><td><StatusBadge status={g.status}/></td><td>{g.last_synced_at ? formatDateTime(g.last_synced_at, timezone) : 'Never'}</td><td><Link to={`/admin/groups/${g.id}`}><ChevronRight size={15} color="#829198"/></Link></td></tr>)}</tbody></table>}</TablePanel>
   </Page>;
 }
 
@@ -3211,6 +3271,7 @@ function GroupDetail() {
           <div className="detail-title"><h2>Overview</h2><StatusBadge status={group.status}/></div>
           <div className="key-grid">
             <div className="key"><span>Privileged</span><strong>{group.is_privileged ? 'Yes — assignable to a directory role' : 'No'}</strong></div>
+            <div className="key"><span>Label</span><strong>{group.group_label || '—'}</strong></div>
             <div className="key"><span>External ID</span><strong>{group.external_id}</strong></div>
             <div className="key"><span>Members</span><strong>{summary ? summary.member_count : '…'}</strong></div>
             <div className="key"><span>Active AccessPilot grants</span><strong>{summary ? summary.active_assignment_count : '…'}</strong></div>
@@ -3488,7 +3549,9 @@ function PrivilegedAccountsPanel() {
     </div>
   </section>;
 }
-interface ApiDepartment { id: string; name: string; created_at: string; }
+interface ApiDepartment { id: string; name: string; manager_id: string | null; manager_display_name: string | null; created_at: string; }
+interface ApiGroupLabel { id: string; name: string; created_at: string; }
+interface ApiEntitlementCatalogEntry { id: string; resource_type: string; resource_id: string; app_role_external_id: string | null; resource_display_name: string; description: string | null; risk_tier: string; owner_id: string | null; owner_display_name: string | null; updated_at: string; }
 function DepartmentsPanel() {
   const auth = useAuth();
   const { data: departments, error, loading, reload } = useApiResource<ApiDepartment[]>('/api/v1/policies/departments');
@@ -3525,6 +3588,42 @@ function DepartmentsPanel() {
     </div>
   </section>;
 }
+function GroupLabelsPanel() {
+  const auth = useAuth();
+  const { data: labels, error, loading, reload } = useApiResource<ApiGroupLabel[]>('/api/v1/policies/group-labels');
+  const [name, setName] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+
+  const add = async () => {
+    if (!name.trim()) return;
+    setSaving(true); setMessage('');
+    try {
+      const response = await auth.apiRequest('/api/v1/policies/group-labels', { method: 'POST', body: JSON.stringify({ name: name.trim() }) });
+      const body = await response.json().catch(() => null);
+      if (response.ok) { setName(''); reload(); }
+      else setMessage(body?.error?.message || 'Unable to add this label.');
+    } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
+  };
+  const remove = async (label: ApiGroupLabel) => {
+    if (!window.confirm(`Remove "${label.name}" from the Group Label list? Groups already labeled with it keep showing it.`)) return;
+    await auth.apiRequest(`/api/v1/policies/group-labels/${label.id}`, { method: 'DELETE' });
+    reload();
+  };
+
+  return <section className="panel" style={{marginBottom:18}}>
+    <div className="panel-head"><h2>Group Labels</h2></div>
+    <div className="detail-section">
+      <p className="subtitle" style={{marginBottom:14}}>Custom classifications for Groups, alongside the built-in Standard/Privileged — picked when creating a new group. AccessPilot-only metadata, never written to Entra/Okta.</p>
+      <div style={{display:'flex',gap:8,alignItems:'flex-end',marginBottom:14,flexWrap:'wrap'}}>
+        <label className="key" style={{minWidth:220}}><span>Label name</span><input className="select" style={{width:'100%'}} value={name} onChange={event => setName(event.target.value)} placeholder="e.g. Finance-Sensitive" onKeyDown={event => { if (event.key === 'Enter') void add(); }}/></label>
+        <button className="btn btn-primary" disabled={saving || !name.trim()} onClick={() => void add()}><Plus size={14}/> {saving ? 'Adding...' : 'Add'}</button>
+      </div>
+      {message && <div className="notice" style={{marginBottom:14}}>{message}</div>}
+      {loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : !labels || labels.length === 0 ? <div className="empty">No custom labels added yet.</div> : <div style={{display:'flex',flexWrap:'wrap',gap:8}}>{labels.map(l => <span key={l.id} className="badge neutral" style={{display:'inline-flex',alignItems:'center',gap:6}}>{l.name}<button type="button" className="btn" aria-label={`Remove ${l.name}`} onClick={() => void remove(l)} style={{padding:'0 6px',minWidth:0}}><X size={11}/></button></span>)}</div>}
+    </div>
+  </section>;
+}
 function PoliciesPage() {
   const auth = useAuth();
   const { data: providers, reload: reloadProviders } = useApiResource<ApiProvider[]>('/api/v1/providers');
@@ -3544,9 +3643,97 @@ function PoliciesPage() {
   return <Page eyebrow="GOVERNANCE" title="Policies" subtitle="Rules that govern access duration, approvals, and assurance." action={<button className="btn btn-primary"><Plus size={14}/> Create policy</button>}>
     {provider && <section className="panel" style={{marginBottom:18}}><div className="panel-head"><h2>Self-activation (PIM)</h2><span className="badge neutral">Up to {provider.max_self_activation_hours} hours</span></div><div className="detail-section"><p className="subtitle" style={{marginBottom:14}}>The single, universal maximum duration any end user may self-activate their own eligible access for — Group, Role, Application role, or Access Package alike — from their My Access dashboard, mirroring Entra PIM's activation cap. Raising this takes effect immediately for every eligible assignment across the whole tenant.</p><div style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap'}}><label className="key"><span>Maximum self-activation duration (hours)</span><input className="select" type="number" min={1} max={8760} placeholder={String(provider.max_self_activation_hours)} value={activationHoursValue} onChange={event => setActivationHoursValue(event.target.value)}/></label><button className="btn btn-primary" disabled={activationSaving || !activationHoursValue} onClick={() => void saveActivationCap(Number(activationHoursValue))}><Clock3 size={14}/> {activationSaving ? 'Saving...' : 'Save limit'}</button></div>{activationMessage && <div className="notice" style={{marginTop:12}}>{activationMessage}</div>}</div></section>}
     <DepartmentsPanel/>
+    <GroupLabelsPanel/>
     <BirthrightPoliciesPanel/>
     <PrivilegedAccountsPanel/>
     <TablePanel toolbar={<Toolbar placeholder="Search policies"/>}><table><thead><tr><th>Policy name</th><th>Description</th><th>Scope</th><th>Max duration</th><th>Approval</th><th>MFA</th><th>Ticket</th><th>Status</th><th></th></tr></thead><tbody>{policies.map(p => <tr key={p.name}><td className="user-name">{p.name}</td><td>{p.description}</td><td>{p.scope}</td><td>{p.max}</td><td>{p.approval}</td><td>{p.mfa}</td><td>{p.ticket}</td><td><StatusBadge status={p.status}/></td><td><button className="btn">Edit</button></td></tr>)}</tbody></table></TablePanel>
+  </Page>;
+}
+const RISK_TIER_BADGE: Record<string, string> = { CRITICAL: 'danger', HIGH: 'danger', MEDIUM: 'warning', LOW: 'neutral' };
+function EntitlementCatalogRow({ entry, users, onSaved }: { entry: ApiEntitlementCatalogEntry; users: ApiUser[] | null; onSaved: () => void }) {
+  const auth = useAuth();
+  const [editing, setEditing] = useState(false);
+  const [description, setDescription] = useState(entry.description || '');
+  const [riskTier, setRiskTier] = useState(entry.risk_tier);
+  const [ownerId, setOwnerId] = useState(entry.owner_id || '');
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+
+  const startEdit = () => { setDescription(entry.description || ''); setRiskTier(entry.risk_tier); setOwnerId(entry.owner_id || ''); setMessage(''); setEditing(true); };
+  // Opt-in, not silent: offered only right when an entry is FIRST marked CRITICAL (never re-offered on every
+  // later save) and only when an owner is set — there's no one obvious reviewer to pick otherwise.
+  const offerRecurringReview = async () => {
+    const ownerName = (users || []).find(u => u.id === ownerId)?.display_name || 'the owner';
+    if (!window.confirm(`"${entry.resource_display_name}" is now tagged CRITICAL risk. Set up a recurring Access Review for it (every 90 days, reviewed by ${ownerName})?`)) return;
+    try {
+      const response = await auth.apiRequest('/api/v1/access-reviews', { method: 'POST', body: JSON.stringify({
+        name: `Recurring review: ${entry.resource_display_name}`, scope_type: 'SPECIFIC_RESOURCE', scope_resource_type: entry.resource_type, scope_resource_id: entry.resource_id,
+        reviewer_id: ownerId, due_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(), frequency_days: 90,
+      }) });
+      if (response.ok) setMessage(`Recurring Access Review created — reviewed by ${ownerName}, due in 30 days, repeating every 90 days.`);
+      else { const body = await response.json().catch(() => null); setMessage(body?.error?.message || 'Unable to create the recurring review.'); }
+    } catch { setMessage('Unable to reach the backend.'); }
+  };
+  const save = async () => {
+    setSaving(true); setMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/entitlement-catalog/${entry.id}`, { method: 'PATCH', body: JSON.stringify({ description: description.trim() || null, risk_tier: riskTier, owner_id: ownerId || null }) });
+      if (response.ok) {
+        onSaved();
+        const justBecameCritical = riskTier === 'CRITICAL' && entry.risk_tier !== 'CRITICAL' && ownerId;
+        if (justBecameCritical) await offerRecurringReview(); else setEditing(false);
+      }
+      else { const body = await response.json().catch(() => null); setMessage(body?.error?.message || 'Unable to save this entry.'); }
+    } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
+  };
+
+  if (editing) {
+    return <tr>
+      <td className="user-name">{entry.resource_display_name}</td>
+      <td><span className="badge neutral">{entry.resource_type}</span></td>
+      <td><input className="select" style={{width:'100%'}} value={description} onChange={event => setDescription(event.target.value)} placeholder="What does this entitlement grant?"/></td>
+      <td><select className="select" value={riskTier} onChange={event => setRiskTier(event.target.value)}><option value="LOW">Low</option><option value="MEDIUM">Medium</option><option value="HIGH">High</option><option value="CRITICAL">Critical</option></select></td>
+      <td><select className="select" value={ownerId} onChange={event => setOwnerId(event.target.value)}><option value="">— none —</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></td>
+      <td style={{display:'flex',gap:6}}>
+        <button className="btn btn-primary" disabled={saving} onClick={() => void save()}>{saving ? 'Saving...' : 'Save'}</button>
+        <button className="btn" disabled={saving} onClick={() => setEditing(false)}>Cancel</button>
+        {message && <div className="notice" style={{marginLeft:8}}>{message}</div>}
+      </td>
+    </tr>;
+  }
+  return <tr>
+    <td className="user-name">{entry.resource_display_name}</td>
+    <td><span className="badge neutral">{entry.resource_type}</span></td>
+    <td>{entry.description || <span className="subtitle">No description yet</span>}</td>
+    <td><span className={`badge ${RISK_TIER_BADGE[entry.risk_tier] || 'neutral'}`}>{entry.risk_tier}</span></td>
+    <td>{entry.owner_display_name || <span className="subtitle">Unowned</span>}</td>
+    <td><button className="btn" onClick={startEdit}>Edit</button></td>
+  </tr>;
+}
+function EntitlementCatalogPage() {
+  const { data: entries, error, loading, reload } = useApiResource<ApiEntitlementCatalogEntry[]>('/api/v1/entitlement-catalog');
+  const { data: users } = useApiResource<ApiUser[]>('/api/v1/users');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const search = searchParams.get('q') || '';
+  const typeFilter = searchParams.get('type') || '';
+  // Same create-time-default heuristic as compute_unclassified_entitlements() on the backend (LOW risk, no
+  // description, no owner) — computed client-side from the list already fetched, no second request needed.
+  const unclassifiedOnly = searchParams.get('unclassified') === '1';
+  const setSearch = (value: string) => setSearchParams(prev => { const next = new URLSearchParams(prev); if (value) next.set('q', value); else next.delete('q'); return next; });
+  const setTypeFilter = (value: string) => setSearchParams(prev => { const next = new URLSearchParams(prev); if (value) next.set('type', value); else next.delete('type'); return next; });
+  const setUnclassifiedOnly = (value: boolean) => setSearchParams(prev => { const next = new URLSearchParams(prev); if (value) next.set('unclassified', '1'); else next.delete('unclassified'); return next; });
+  const isUnclassified = (e: ApiEntitlementCatalogEntry) => e.risk_tier === 'LOW' && !e.description && !e.owner_id;
+  const unclassifiedCount = (entries || []).filter(isUnclassified).length;
+  const typeOptions = [{ value: 'GROUP', label: 'Groups' }, { value: 'ROLE', label: 'Roles' }, { value: 'APPLICATION', label: 'Applications' }];
+  const filtered = (entries || []).filter(e => (!typeFilter || e.resource_type === typeFilter) && (!search || e.resource_display_name.toLowerCase().includes(search.toLowerCase())) && (!unclassifiedOnly || isUnclassified(e)));
+  return <Page eyebrow="GOVERNANCE" title="Entitlement Catalog" subtitle="What every real entitlement actually means — a plain-English description, a risk tier, and an accountable owner, independent of which Package or Business Role (if any) it's bundled into.">
+    {unclassifiedCount > 0 && <div className="notice" style={{marginBottom:14,display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10}}>
+      <span>⚠ {unclassifiedCount} entitlement{unclassifiedCount === 1 ? '' : 's'} still unclassified — default Low risk, no description, no owner</span>
+      <button className="btn" onClick={() => setUnclassifiedOnly(!unclassifiedOnly)}>{unclassifiedOnly ? 'Show all' : 'Show only these'}</button>
+    </div>}
+    <TablePanel toolbar={<Toolbar placeholder="Search entitlements" searchValue={search} onSearchChange={setSearch} filterLabel="All types" filterValue={typeFilter} onFilterChange={setTypeFilter} filterOptions={typeOptions}/>}>
+      {loading ? <div className="empty">Loading the catalog...</div> : error ? <div className="empty">{error}</div> : !entries || entries.length === 0 ? <div className="empty">No entitlements found yet — sync a directory provider first.</div> : filtered.length === 0 ? <div className="empty">No entitlements match this filter.</div> : <table><thead><tr><th>Entitlement</th><th>Type</th><th>Description</th><th>Risk tier</th><th>Owner</th><th></th></tr></thead><tbody>{filtered.map(entry => <EntitlementCatalogRow key={entry.id} entry={entry} users={users} onSaved={reload}/>)}</tbody></table>}
+    </TablePanel>
   </Page>;
 }
 interface ApiAuditLog { id: string; timestamp: string; actor_user_id: string | null; actor_display_name: string | null; action: string; target_type: string; target_id: string | null; provider_id: string | null; provider_name: string | null; request_id: string; result: string; target_user_display_name: string | null; target_user_email: string | null; }
@@ -3595,11 +3782,11 @@ function PrivilegedAccountActivityPage() {
   </Page>;
 }
 interface ApiScopeTargetResolved { resource_type: string; resource_id: string; resource_display_name: string | null; }
-interface ApiAccessReviewCampaign { id: string; name: string; description: string | null; scope_type: string; scope_resource_type: string | null; scope_resource_id: string | null; scope_targets: ApiScopeTargetResolved[] | null; scope_user_id: string | null; scope_account_type: string | null; scope_inactive_days: number | null; reviewer_id: string; reviewer_display_name: string | null; fallback_reviewer_id: string | null; fallback_reviewer_display_name: string | null; fallback_unlock_hours: number | null; status: string; due_at: string; on_no_response?: string; frequency_days: number | null; schedule_day_of_month: number | null; schedule_time: string | null; schedule_every_months: number | null; schedule_due_days: number | null; next_run_at: string | null; parent_campaign_id: string | null; created_by: string | null; created_at: string; completed_at: string | null; item_count: number; decided_count: number; approved_count: number; revoked_count: number; auto_revoked_count: number; }
-interface ApiAccessReviewItem { id: string; campaign_id: string; campaign_name: string | null; assignment_id: string; user_id: string; user_display_name: string | null; user_email: string | null; granted_via: string | null; package_id: string | null; package_name: string | null; business_role_id: string | null; business_role_name: string | null; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; assignment_status_at_snapshot: string; decision: string; decided_by: string | null; decided_by_display_name: string | null; decided_at: string | null; justification: string | null; created_at: string; }
+interface ApiAccessReviewCampaign { id: string; name: string; description: string | null; scope_type: string; scope_resource_type: string | null; scope_resource_id: string | null; scope_targets: ApiScopeTargetResolved[] | null; scope_user_id: string | null; scope_account_type: string | null; scope_inactive_days: number | null; reviewer_id: string | null; reviewer_display_name: string | null; fallback_reviewer_id: string | null; fallback_reviewer_display_name: string | null; fallback_unlock_hours: number | null; workflow_definition_id?: string | null; workflow_definition_name?: string | null; status: string; due_at: string; on_no_response?: string; frequency_days: number | null; schedule_day_of_month: number | null; schedule_time: string | null; schedule_every_months: number | null; schedule_due_days: number | null; next_run_at: string | null; parent_campaign_id: string | null; created_by: string | null; created_at: string; completed_at: string | null; item_count: number; decided_count: number; approved_count: number; revoked_count: number; auto_revoked_count: number; }
+interface ApiAccessReviewItem { id: string; campaign_id: string; campaign_name: string | null; assignment_id: string; user_id: string; user_display_name: string | null; user_email: string | null; granted_via: string | null; package_id: string | null; package_name: string | null; business_role_id: string | null; business_role_name: string | null; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; assignment_status_at_snapshot: string; workflow_definition_name?: string | null; suggested_decision?: string | null; suggestion_reason?: string | null; decision: string; decided_by: string | null; decided_by_display_name: string | null; decided_at: string | null; justification: string | null; created_at: string; }
 interface ApiResourceTally { name: string; count: number; }
 interface ApiAccessReviewDashboard { total_campaigns: number; active_campaigns: number; completed_campaigns: number; recurring_campaigns: number; total_items: number; pending_items: number; approved_items: number; revoked_items: number; auto_revoked_items: number; top_groups: ApiResourceTally[]; top_applications: ApiResourceTally[]; }
-const emptyCampaignForm = { name: '', description: '', scope_type: 'ALL', scope_resource_type: 'GROUP', scope_resource_id: '', scope_targets: [] as { resource_type: string; resource_id: string; name: string }[], scope_user_id: '', scope_account_type: 'PU', scope_inactive_days: '90', reviewer_id: '', fallback_reviewer_id: '', fallback_unlock_hours: '', due_days: '30', on_no_response: 'REVOKE', frequency_days: '30', recurrence: 'none', schedule_day: '15', schedule_time: '09:00', schedule_every_months: '1' };
+const emptyCampaignForm = { name: '', description: '', scope_type: 'ALL', scope_resource_type: 'GROUP', scope_resource_id: '', scope_targets: [] as { resource_type: string; resource_id: string; name: string }[], scope_user_id: '', scope_account_type: 'PU', scope_inactive_days: '90', approval_method: 'REVIEWER', reviewer_id: '', fallback_reviewer_id: '', fallback_unlock_hours: '', workflow_definition_id: '', due_days: '30', on_no_response: 'REVOKE', frequency_days: '30', recurrence: 'none', schedule_day: '15', schedule_time: '09:00', schedule_every_months: '1' };
 const emptyEditForm = { name: '', description: '', reviewer_id: '', fallback_reviewer_id: '', fallback_unlock_hours: '', due_at: '', frequency_days: '30', recurrence: 'none', schedule_day: '15', schedule_time: '09:00', schedule_every_months: '1' };
 // Same local-time construction as the SoD exception form's datetime-local default (see defaultExpiry above) —
 // slicing an ISO string's UTC representation would silently shift a due date by the browser's UTC offset.
@@ -3716,12 +3903,14 @@ function AccessReviewsPage() {
   const { data: applications } = useApiResource<ApiApplication[]>('/api/v1/applications');
   const { data: packages } = useApiResource<ApiPackage[]>('/api/v1/packages');
   const { data: businessRoles } = useApiResource<ApiBusinessRole[]>('/api/v1/business-roles');
+  const { data: activeWorkflows } = useApiResource<ApiWorkflowDefinition[]>('/api/v1/workflows/definitions/active');
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(emptyCampaignForm);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState(emptyEditForm);
+  const [editIsWorkflowRouted, setEditIsWorkflowRouted] = useState(false);
   const [editSaving, setEditSaving] = useState(false);
   const [editMessage, setEditMessage] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -3814,14 +4003,17 @@ function AccessReviewsPage() {
 
   const startCreate = () => { setForm(emptyCampaignForm); setOpen(true); setMessage(''); };
   const create = async () => {
-    if (!form.name.trim() || !form.reviewer_id || !form.due_days) { setMessage('Complete every required field.'); return; }
+    if (!form.name.trim() || !form.due_days) { setMessage('Complete every required field.'); return; }
+    if (form.approval_method === 'REVIEWER' && !form.reviewer_id) { setMessage('Complete every required field.'); return; }
+    if (form.approval_method === 'WORKFLOW' && !form.workflow_definition_id) { setMessage('Complete every required field.'); return; }
     if (form.scope_type === 'MULTIPLE_RESOURCES' && form.scope_targets.length === 0) { setMessage('Add at least one resource to review.'); return; }
     setSaving(true); setMessage('');
     try {
       const payload: Record<string, unknown> = {
         name: form.name.trim(), description: form.description.trim() || undefined, scope_type: form.scope_type,
-        reviewer_id: form.reviewer_id, fallback_reviewer_id: form.fallback_reviewer_id || undefined,
-        fallback_unlock_hours: form.fallback_unlock_hours ? Number(form.fallback_unlock_hours) : undefined,
+        ...(form.approval_method === 'WORKFLOW'
+          ? { workflow_definition_id: form.workflow_definition_id }
+          : { reviewer_id: form.reviewer_id, fallback_reviewer_id: form.fallback_reviewer_id || undefined, fallback_unlock_hours: form.fallback_unlock_hours ? Number(form.fallback_unlock_hours) : undefined }),
         due_at: new Date(Date.now() + Number(form.due_days) * 86400000).toISOString(), on_no_response: form.on_no_response,
         frequency_days: form.recurrence === 'after' ? Number(form.frequency_days) : undefined,
         ...(form.recurrence === 'fixed' ? { schedule_day_of_month: Number(form.schedule_day), schedule_time: form.schedule_time, schedule_every_months: Number(form.schedule_every_months), schedule_due_days: Number(form.due_days) } : {}),
@@ -3847,9 +4039,10 @@ function AccessReviewsPage() {
     setOpen(false);
     setEditingId(campaign.id);
     setEditMessage('');
+    setEditIsWorkflowRouted(Boolean(campaign.workflow_definition_id));
     setEditForm({
       name: campaign.name, description: campaign.description || '',
-      reviewer_id: campaign.reviewer_id, fallback_reviewer_id: campaign.fallback_reviewer_id || '',
+      reviewer_id: campaign.reviewer_id || '', fallback_reviewer_id: campaign.fallback_reviewer_id || '',
       fallback_unlock_hours: campaign.fallback_unlock_hours ? String(campaign.fallback_unlock_hours) : '',
       due_at: toLocalDateTimeInput(campaign.due_at),
       frequency_days: campaign.frequency_days ? String(campaign.frequency_days) : '30',
@@ -3859,16 +4052,19 @@ function AccessReviewsPage() {
   };
   const saveEdit = async () => {
     if (!editingId) return;
-    if (!editForm.name.trim() || !editForm.reviewer_id || !editForm.due_at) { setEditMessage('Complete every required field.'); return; }
+    if (!editForm.name.trim() || (!editIsWorkflowRouted && !editForm.reviewer_id) || !editForm.due_at) { setEditMessage('Complete every required field.'); return; }
     setEditSaving(true); setEditMessage('');
     try {
       const payload: Record<string, unknown> = {
         name: editForm.name.trim(), description: editForm.description.trim() || undefined,
-        reviewer_id: editForm.reviewer_id, due_at: new Date(editForm.due_at).toISOString(),
-        fallback_unlock_hours: editForm.fallback_unlock_hours ? Number(editForm.fallback_unlock_hours) : undefined,
+        due_at: new Date(editForm.due_at).toISOString(),
       };
-      if (editForm.fallback_reviewer_id) payload.fallback_reviewer_id = editForm.fallback_reviewer_id;
-      else payload.clear_fallback_reviewer = true;
+      if (!editIsWorkflowRouted) {
+        payload.reviewer_id = editForm.reviewer_id;
+        payload.fallback_unlock_hours = editForm.fallback_unlock_hours ? Number(editForm.fallback_unlock_hours) : undefined;
+        if (editForm.fallback_reviewer_id) payload.fallback_reviewer_id = editForm.fallback_reviewer_id;
+        else payload.clear_fallback_reviewer = true;
+      }
       if (editForm.recurrence === 'after') { payload.frequency_days = Number(editForm.frequency_days); payload.clear_schedule = true; }
       else if (editForm.recurrence === 'fixed') { payload.schedule_day_of_month = Number(editForm.schedule_day); payload.schedule_time = editForm.schedule_time; payload.schedule_every_months = Number(editForm.schedule_every_months); payload.clear_frequency = true; }
       else { payload.clear_frequency = true; payload.clear_schedule = true; }
@@ -3892,9 +4088,12 @@ function AccessReviewsPage() {
         {form.scope_type === 'USER' && <label className="key"><span>User</span><select className="select" value={form.scope_user_id} onChange={event => setForm({...form, scope_user_id: event.target.value})}><option value="">Select a user</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>}
         {form.scope_type === 'ACCOUNT_TYPE' && <label className="key"><span>Account type</span><select className="select" value={form.scope_account_type} onChange={event => setForm({...form, scope_account_type: event.target.value})}><option value="PU">Privileged (PU)</option><option value="TU">Test (TU)</option></select></label>}
         {form.scope_type === 'INACTIVE_USERS' && <label className="key"><span>Inactive for at least (days)</span><input className="select" type="number" min={1} value={form.scope_inactive_days} onChange={event => setForm({...form, scope_inactive_days: event.target.value})}/></label>}
+        <label className="key"><span>Approval</span><select className="select" value={form.approval_method} onChange={event => setForm({...form, approval_method: event.target.value})}><option value="REVIEWER">Single reviewer</option><option value="WORKFLOW">Workflow</option></select></label>
+        {form.approval_method === 'WORKFLOW' ? <label className="key"><span>Workflow</span><select className="select" value={form.workflow_definition_id} onChange={event => setForm({...form, workflow_definition_id: event.target.value})}><option value="">Select a workflow</option>{(activeWorkflows || []).map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select></label> : <>
         <label className="key"><span>Reviewer</span><select className="select" value={form.reviewer_id} onChange={event => setForm({...form, reviewer_id: event.target.value})}><option value="">Select a reviewer</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select>{ownerSuggestions.map(sg => <small key={sg.id} style={{display:'block',marginTop:4,fontWeight:400}}>Suggested (owner): {sg.label}{form.reviewer_id !== sg.id && <> · <button type="button" className="btn" style={{padding:'0 8px',minHeight:0}} onClick={() => setForm(prev => ({...prev, reviewer_id: sg.id}))}>Use</button></>}</small>)}{managerSuggestion && <small style={{display:'block',marginTop:4,fontWeight:400}}>Suggested (manager): {managerSuggestion.label}{form.reviewer_id !== managerSuggestion.id && <> · <button type="button" className="btn" style={{padding:'0 8px',minHeight:0}} onClick={() => setForm(prev => ({...prev, reviewer_id: managerSuggestion.id}))}>Use</button></>}</small>}</label>
         <label className="key"><span>Fallback reviewer (optional)</span><select className="select" value={form.fallback_reviewer_id} onChange={event => setForm({...form, fallback_reviewer_id: event.target.value})}><option value="">None</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
         {form.fallback_reviewer_id && <label className="key"><span>Fallback unlocks after (hours)</span><input className="select" type="number" min={1} value={form.fallback_unlock_hours} onChange={event => setForm({...form, fallback_unlock_hours: event.target.value})}/></label>}
+        </>}
         <label className="key"><span>Due in (days)</span><input className="select" type="number" min={1} value={form.due_days} onChange={event => setForm({...form, due_days: event.target.value})}/></label>
         <label className="key"><span>If nobody decides by the due date</span><select className="select" value={form.on_no_response} onChange={event => setForm({...form, on_no_response: event.target.value})}><option value="REVOKE">Revoke the access (default)</option><option value="KEEP">Keep the access (auto-approve)</option></select></label>
       </div>
@@ -3913,9 +4112,11 @@ function AccessReviewsPage() {
       <div className="key-grid" style={{marginBottom:10}}>
         <label className="key"><span>Name</span><input className="select" value={editForm.name} onChange={event => setEditForm({...editForm, name: event.target.value})}/></label>
         <label className="key"><span>Description (optional)</span><input className="select" value={editForm.description} onChange={event => setEditForm({...editForm, description: event.target.value})}/></label>
+        {editIsWorkflowRouted ? <div className="notice">This campaign is routed through a workflow — there's no single reviewer slot to reassign.</div> : <>
         <label className="key"><span>Reviewer</span><select className="select" value={editForm.reviewer_id} onChange={event => setEditForm({...editForm, reviewer_id: event.target.value})}><option value="">Select a reviewer</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
         <label className="key"><span>Fallback reviewer (optional)</span><select className="select" value={editForm.fallback_reviewer_id} onChange={event => setEditForm({...editForm, fallback_reviewer_id: event.target.value})}><option value="">None</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
         {editForm.fallback_reviewer_id && <label className="key"><span>Fallback unlocks after (hours)</span><input className="select" type="number" min={1} value={editForm.fallback_unlock_hours} onChange={event => setEditForm({...editForm, fallback_unlock_hours: event.target.value})}/></label>}
+        </>}
         <label className="key" style={{display:'block'}}><span>Due (your device's local time)</span><input className="select" style={{width:'100%'}} type="datetime-local" value={editForm.due_at} onChange={event => setEditForm({...editForm, due_at: event.target.value})}/></label>
       </div>
       <RecurrenceFields value={editForm} onChange={patch => setEditForm(prev => ({...prev, ...patch}))} timezone={timezone}/>
@@ -3929,7 +4130,7 @@ function AccessReviewsPage() {
         <tr>
           <td className="user-name"><button type="button" className="btn" style={{border:'none',background:'none',padding:0,display:'inline-flex',alignItems:'center',gap:6,fontWeight:600,color:'inherit'}} onClick={() => setExpandedId(expandedId === c.id ? null : c.id)}><ChevronRight size={14} style={{transform: expandedId === c.id ? 'rotate(90deg)' : 'none', transition:'transform 0.1s'}}/> {c.name}</button></td>
           <td style={{whiteSpace:'normal',maxWidth:260}}>{scopeSummary(c, groups, roles, applications, packages, users, businessRoles)}</td>
-          <td>{c.reviewer_display_name || c.reviewer_id}</td>
+          <td>{c.workflow_definition_id ? <>🔀 {c.workflow_definition_name}</> : (c.reviewer_display_name || c.reviewer_id)}</td>
           <td style={{minWidth:190}}>
             <div style={{fontSize:12,marginBottom:5}}>{c.decided_count} / {c.item_count} decided</div>
             <OutcomeBar approved={c.approved_count} revoked={c.revoked_count} auto={c.auto_revoked_count} pending={c.item_count - c.decided_count}/>
@@ -4005,24 +4206,45 @@ function ReviewItemsTable({ items, variant, onChanged }: { items: ApiAccessRevie
   const [expanded, setExpanded] = useState<string[]>([]);
   const admin = variant === 'admin';
   const rows = useMemo(() => groupReviewItems(items), [items]);
+  // Admin-only for now (ENTITLEMENT_CATALOG_READ isn't granted to a plain reviewer) — gives the decision-maker
+  // who can already see everything else on this page the entitlement's plain-English meaning and risk tier too.
+  const { data: catalog } = useApiResource<ApiEntitlementCatalogEntry[]>('/api/v1/entitlement-catalog', admin);
+  const catalogByKey = useMemo(() => { const map = new Map<string, ApiEntitlementCatalogEntry>(); (catalog || []).forEach(e => map.set(`${e.resource_type}:${e.resource_id}:${e.app_role_external_id || ''}`, e)); return map; }, [catalog]);
+  // A light nudge from signals the app already tracks (open SoD conflict, 90+ days unused) — never a positive
+  // "looks fine," only ever a reason to look closer. "Apply all" still asks for one shared justification, same
+  // as every other bulk decision in this table.
+  const suggestedPending = items.filter(i => i.decision === 'PENDING' && i.suggested_decision);
+  const applySuggestions = async () => {
+    const groups = new Map<string, ApiAccessReviewItem[]>();
+    suggestedPending.forEach(i => { const key = i.suggested_decision as string; if (!groups.has(key)) groups.set(key, []); groups.get(key)!.push(i); });
+    for (const [decision, targets] of groups) {
+      await decide(targets, decision as 'APPROVED' | 'REVOKED', `${targets.length} suggested item${targets.length === 1 ? '' : 's'}`, `suggestions:${decision}`);
+    }
+  };
   const userCell = (item: ApiAccessReviewItem) => {
     const body = <><span className="avatar">{initialsFor(item.user_display_name || '?')}</span><span><span className="user-name">{item.user_display_name || item.user_id}</span>{item.user_email && <span className="user-email">{item.user_email}</span>}</span></>;
     return admin ? <Link to={`/admin/users/${item.user_id}`} className="user-cell">{body}</Link> : <span className="user-cell">{body}</span>;
   };
   const buttons = (targets: ApiAccessReviewItem[], label: string, key: string) => {
-    const pending = targets.filter(t => t.decision === 'PENDING').length;
-    if (pending === 0) return null;
+    const pendingTargets = targets.filter(t => t.decision === 'PENDING');
+    if (pendingTargets.length === 0) return null;
+    if (pendingTargets[0].workflow_definition_name) return <span className="user-email">Decide from Workflow Requests</span>;
     const all = targets.length > 1;
     return <span style={{display:'flex',gap:6}}><button className="btn" disabled={busyKey === key} onClick={() => void decide(targets, 'APPROVED', label, key)}>{all ? 'Approve all' : 'Approve'}</button><button className="btn" disabled={busyKey === key} onClick={() => void decide(targets, 'REVOKED', label, key)}>{all ? 'Revoke all' : 'Revoke'}</button></span>;
   };
-  const itemRow = (item: ApiAccessReviewItem, nested: boolean) => <tr key={item.id} style={nested ? { background: '#fafbfb' } : undefined}>
+  const itemRow = (item: ApiAccessReviewItem, nested: boolean) => { const catalogEntry = catalogByKey.get(`${item.resource_type}:${item.resource_id}:${item.app_role_external_id || ''}`); return <tr key={item.id} style={nested ? { background: '#fafbfb' } : undefined}>
     <td>{nested ? <span style={{paddingLeft:28,display:'inline-block'}} className="user-email">↳ individual item</span> : userCell(item)}</td>
-    <td style={{whiteSpace:'normal',maxWidth:280}}>{item.resource_type.toLowerCase()}: {item.resource_display_name || item.resource_id}</td>
+    <td style={{whiteSpace:'normal',maxWidth:280}}>{item.resource_type.toLowerCase()}: {item.resource_display_name || item.resource_id}{item.workflow_definition_name && <div className="user-email">🔀 {item.workflow_definition_name}</div>}{catalogEntry?.description && <div className="user-email">ℹ {catalogEntry.description}{catalogEntry.risk_tier !== 'LOW' && <span className={`badge ${RISK_TIER_BADGE[catalogEntry.risk_tier] || 'neutral'}`} style={{marginLeft:6}}>{catalogEntry.risk_tier}</span>}</div>}{item.suggested_decision && <div className="user-email" style={{color:'#a56b1f'}}>⚠ suggest {item.suggested_decision.toLowerCase()} — {item.suggestion_reason}</div>}</td>
     <td style={{whiteSpace:'normal',maxWidth:240}}>{item.granted_via || '—'}</td>
     {admin && <><td>{item.assignment_status_at_snapshot}</td><td><StatusBadge status={item.decision}/></td><td>{item.decided_by_display_name || '—'}</td></>}
     <td>{buttons([item], `${item.user_display_name || 'this user'}'s access to ${item.resource_display_name || item.resource_type}`, item.id)}</td>
-  </tr>;
-  return <div className="table-wrap"><table><thead><tr><th>User</th><th>Resource</th><th>Granted via</th>{admin && <><th>Held as of snapshot</th><th>Decision</th><th>Decided by</th></>}<th></th></tr></thead><tbody>
+  </tr>; };
+  return <div>
+    {suggestedPending.length > 0 && <div className="notice" style={{marginBottom:12,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+      <span>⚠ {suggestedPending.length} item{suggestedPending.length === 1 ? '' : 's'} with a suggestion (open SoD conflict or unused 90+ days)</span>
+      <button className="btn btn-primary" disabled={busyKey !== null} onClick={() => void applySuggestions()}>Apply all suggestions</button>
+    </div>}
+    <div className="table-wrap"><table><thead><tr><th>User</th><th>Resource</th><th>Granted via</th>{admin && <><th>Held as of snapshot</th><th>Decision</th><th>Decided by</th></>}<th></th></tr></thead><tbody>
     {rows.map(row => {
       if (row.kind === 'single') return itemRow(row.item, false);
       const first = row.items[0];
@@ -4043,7 +4265,8 @@ function ReviewItemsTable({ items, variant, onChanged }: { items: ApiAccessRevie
         {open && row.items.map(item => itemRow(item, true))}
       </Fragment>;
     })}
-  </tbody></table></div>;
+  </tbody></table></div>
+  </div>;
 }
 // Shared by AccessReviewDetailPage (the full standalone page) and the inline expandable row on the list page —
 // one place for the items fetch, so the two surfaces can never drift apart.
@@ -4054,14 +4277,35 @@ function CampaignItemsPanel({ campaignId, onChanged }: { campaignId: string; onC
   if (!items || items.length === 0) return <div className="empty">Nothing was in scope when this campaign started.</div>;
   return <ReviewItemsTable items={items} variant="admin" onChanged={() => { reloadItems(); onChanged?.(); }}/>;
 }
+function CampaignExportButtons({ campaignId, campaignName }: { campaignId: string; campaignName: string }) {
+  const auth = useAuth();
+  const [busy, setBusy] = useState<'pdf' | 'csv' | null>(null);
+  const [message, setMessage] = useState('');
+  const download = async (kind: 'pdf' | 'csv') => {
+    setBusy(kind); setMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/access-reviews/${campaignId}/${kind === 'pdf' ? 'report.pdf' : 'export.csv'}`);
+      if (!response.ok) { setMessage((await response.json().catch(() => null))?.error?.message || 'Unable to generate this export.'); return; }
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement('a');
+      link.href = url; link.download = `access-review-${campaignName.replace(/\s+/g, '-')}.${kind}`;
+      document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+    } catch { setMessage('Unable to reach the backend.'); } finally { setBusy(null); }
+  };
+  return <span style={{display:'flex',gap:8,alignItems:'center'}}>
+    {message && <span className="notice">{message}</span>}
+    <button className="btn" disabled={busy !== null} onClick={() => void download('pdf')}>{busy === 'pdf' ? 'Generating...' : 'Report (PDF)'}</button>
+    <button className="btn" disabled={busy !== null} onClick={() => void download('csv')}>{busy === 'csv' ? 'Exporting...' : 'Export (CSV)'}</button>
+  </span>;
+}
 function AccessReviewDetailPage() {
   const { id } = useParams();
   const timezone = useAppTimezone();
   const { data: campaign, reload: reloadCampaign } = useApiResource<ApiAccessReviewCampaign>(`/api/v1/access-reviews/${id}`);
-  return <Page eyebrow="ACCESS REVIEW" title={campaign?.name || 'Campaign'} subtitle={campaign?.description || undefined} action={<Link to="/admin/access-reviews" className="btn">Back to list</Link>}>
+  return <Page eyebrow="ACCESS REVIEW" title={campaign?.name || 'Campaign'} subtitle={campaign?.description || undefined} action={<span style={{display:'flex',gap:8}}>{id && campaign && <CampaignExportButtons campaignId={id} campaignName={campaign.name}/>}<Link to="/admin/access-reviews" className="btn">Back to list</Link></span>}>
     {campaign && <section className="panel" style={{marginBottom:18}}><div className="detail-section"><div className="key-grid">
       <div className="key"><span>Status</span><strong><StatusBadge status={campaign.status}/></strong></div>
-      <div className="key"><span>Reviewer</span><strong>{campaign.reviewer_display_name || campaign.reviewer_id}</strong></div>
+      <div className="key"><span>Reviewer</span><strong>{campaign.workflow_definition_id ? `🔀 ${campaign.workflow_definition_name}` : (campaign.reviewer_display_name || campaign.reviewer_id)}</strong></div>
       <div className="key"><span>Due</span><strong>{formatDateTime(campaign.due_at, timezone)}</strong></div>
       <div className="key"><span>Frequency</span><strong>{campaignFrequencyLabel(campaign)}</strong></div>
       <div className="key"><span>Progress</span><strong>{campaign.decided_count} / {campaign.item_count} decided</strong></div>
@@ -4178,6 +4422,378 @@ function MyBusinessRolesPage() {
         {role.items.map(item => <div key={item.id} className="activity-row" style={{gridTemplateColumns:'1fr auto'}}><div className="activity-copy"><strong>{item.resource_display_name || item.resource_id}</strong><small>{item.resource_type}{item.it_role_label ? ` · ${item.it_role_label}` : ''}</small></div><button className="btn" disabled={role.items.length <= 1} title={role.items.length <= 1 ? 'A Business Role must keep at least one mapped item' : undefined} onClick={() => void removeItem(role, item)}>Remove</button></div>)}
       </div>
     </section>)}
+  </Page>;
+}
+function MyGroupsPage() {
+  const auth = useAuth();
+  const { data: ownedGroups, loading, error, reload } = useApiResource<ApiGroup[]>('/api/v1/groups/owned');
+  const { data: groupLabels } = useApiResource<ApiGroupLabel[]>('/api/v1/policies/group-labels');
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [description, setDescription] = useState('');
+  const [groupLabel, setGroupLabel] = useState('');
+  const [message, setMessage] = useState('');
+  const startEdit = (group: ApiGroup) => { setEditingId(group.id); setDescription(group.description || ''); setGroupLabel(group.group_label || ''); setMessage(''); };
+  const save = async (group: ApiGroup) => {
+    setMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/groups/${group.id}/owner-update`, { method: 'PATCH', body: JSON.stringify({ description: description.trim() || null, group_label: groupLabel || null }) });
+      if (response.ok) { setEditingId(null); reload(); }
+      else setMessage((await response.json().catch(() => null))?.error?.message || 'Unable to save this group.');
+    } catch { setMessage('Unable to reach the backend.'); }
+  };
+  return <Page eyebrow="SELF-SERVICE" title="My Groups" subtitle="Groups you own. You can edit their description and label — nothing else; ask an administrator for anything more." action={<button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button>}>
+    {message && <div className="notice" style={{marginBottom:14}}>{message}</div>}
+    {loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : !ownedGroups || ownedGroups.length === 0 ? <div className="panel"><div className="empty">You don't own any groups.</div></div> : ownedGroups.map(group => <section key={group.id} className="panel" style={{marginBottom:18}}>
+      <div className="panel-head"><h2>🔑 {group.name}</h2>{editingId !== group.id && <button className="btn" onClick={() => startEdit(group)}>Edit</button>}</div>
+      <div className="detail-section">
+        {editingId === group.id ? <>
+          <label className="key" style={{display:'block',marginBottom:12}}><span>Description</span><input className="select" style={{width:'100%'}} value={description} onChange={event => setDescription(event.target.value)}/></label>
+          <label className="key" style={{display:'block',marginBottom:14,maxWidth:260}}><span>Group Label</span><select className="select" style={{width:'100%'}} value={groupLabel} onChange={event => setGroupLabel(event.target.value)}><option value="">— none —</option><option value="STANDARD">Standard</option><option value="PRIVILEGED">Privileged</option>{(groupLabels || []).map(l => <option key={l.id} value={l.name}>{l.name}</option>)}</select></label>
+          <div style={{display:'flex',gap:8}}><button className="btn btn-primary" onClick={() => void save(group)}>Save</button><button className="btn" onClick={() => setEditingId(null)}>Cancel</button></div>
+        </> : <>
+          <div className="key"><span>Description</span></div>
+          <p className="subtitle" style={{marginBottom:10}}>{group.description || 'No description yet.'}</p>
+          <div className="key"><span>Label</span></div>
+          <p className="subtitle">{group.group_label || 'None'}</p>
+        </>}
+      </div>
+    </section>)}
+  </Page>;
+}
+interface ApiWorkflowApprover { user_id: string; display_name: string | null; }
+interface ApiWorkflowStageDefinition { id: string; stage_number: number; name: string; approval_mode: string; approvers: ApiWorkflowApprover[]; fallback_approvers: ApiWorkflowApprover[]; escalate_after_hours: number | null; condition_field: string | null; condition_operator: string | null; condition_value: string | null; }
+interface ApiWorkflowDefinition { id: string; name: string; description: string | null; status: string; stages: ApiWorkflowStageDefinition[]; in_flight_count: number; created_at: string; updated_at: string; }
+interface ApiWorkflowStageDecisionInfo { decided_by: string; decided_by_display_name: string | null; decision: string; justification: string | null; decided_at: string; }
+interface ApiWorkflowStageInstance { id: string; stage_number: number; name: string; approval_mode: string; required_approvers: ApiWorkflowApprover[]; status: string; escalates_at: string | null; escalated_at: string | null; decisions: ApiWorkflowStageDecisionInfo[]; created_at: string; completed_at: string | null; }
+interface ApiWorkflowRequest { id: string; workflow_definition_id: string; workflow_definition_name: string; title: string; description: string | null; justification: string | null; batch_id: string | null; batch_label: string | null; payload: Record<string, string>; requested_by: string; requested_by_display_name: string | null; instance_status: string; current_stage_number: number; stages: ApiWorkflowStageInstance[]; can_decide: boolean; created_at: string; completed_at: string | null; }
+const emptyWorkflowStageForm = { name: '', approval_mode: 'ANY_OF', approver_user_ids: [] as string[], fallback_approver_ids: [] as string[], escalate_after_hours: '', condition_field: '', condition_operator: 'EQUALS', condition_value: '' };
+const emptyWorkflowDefinitionForm = { name: '', description: '', stages: [] as (typeof emptyWorkflowStageForm)[] };
+function ApproverChipsPicker({ users, selectedIds, onChange, placeholder }: { users: ApiUser[] | null; selectedIds: string[]; onChange: (ids: string[]) => void; placeholder: string }) {
+  return <div>
+    <select className="select" value="" onChange={event => { const id = event.target.value; if (id && !selectedIds.includes(id)) onChange([...selectedIds, id]); }}>
+      <option value="">{placeholder}</option>{(users || []).filter(u => !selectedIds.includes(u.id)).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}
+    </select>
+    {selectedIds.length > 0 && <div style={{display:'flex',flexWrap:'wrap',gap:6,marginTop:6}}>{selectedIds.map(id => <span key={id} className="badge neutral" style={{display:'inline-flex',alignItems:'center',gap:6}}>{(users || []).find(u => u.id === id)?.display_name || id}<button type="button" className="btn" aria-label="Remove" onClick={() => onChange(selectedIds.filter(x => x !== id))} style={{padding:'0 6px',minWidth:0}}><X size={11}/></button></span>)}</div>}
+  </div>;
+}
+function WorkflowDefinitionsPage() {
+  const auth = useAuth();
+  const timezone = useAppTimezone();
+  const { data: definitions, error, loading, reload } = useApiResource<ApiWorkflowDefinition[]>('/api/v1/workflows/definitions');
+  const { data: users } = useApiResource<ApiUser[]>('/api/v1/users');
+  const { data: departmentList } = useApiResource<{ id: string; name: string }[]>('/api/v1/policies/departments');
+  const [open, setOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState(emptyWorkflowDefinitionForm);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+
+  const addStage = () => setForm({ ...form, stages: [...form.stages, { ...emptyWorkflowStageForm }] });
+  const removeStage = (index: number) => setForm({ ...form, stages: form.stages.filter((_, i) => i !== index) });
+  const updateStage = (index: number, patch: Partial<typeof emptyWorkflowStageForm>) => setForm({ ...form, stages: form.stages.map((s, i) => i === index ? { ...s, ...patch } : s) });
+  const moveStage = (index: number, direction: -1 | 1) => {
+    const target = index + direction;
+    if (target < 0 || target >= form.stages.length) return;
+    const copy = [...form.stages];
+    [copy[index], copy[target]] = [copy[target], copy[index]];
+    setForm({ ...form, stages: copy });
+  };
+
+  const openCreate = () => { setEditingId(null); setForm(emptyWorkflowDefinitionForm); setMessage(''); setOpen(true); };
+  const openEdit = (definition: ApiWorkflowDefinition) => {
+    setEditingId(definition.id);
+    setForm({
+      name: definition.name, description: definition.description || '',
+      stages: definition.stages.map(s => ({
+        name: s.name, approval_mode: s.approval_mode,
+        approver_user_ids: s.approvers.map(a => a.user_id), fallback_approver_ids: s.fallback_approvers.map(a => a.user_id),
+        escalate_after_hours: s.escalate_after_hours ? String(s.escalate_after_hours) : '',
+        condition_field: s.condition_field || '', condition_operator: s.condition_operator || 'EQUALS', condition_value: s.condition_value || '',
+      })),
+    });
+    setMessage(''); setOpen(true);
+  };
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!form.name.trim()) { setMessage('Enter a workflow name.'); return; }
+    if (form.stages.length === 0) { setMessage('Add at least one stage.'); return; }
+    for (const stage of form.stages) {
+      if (!stage.name.trim()) { setMessage('Every stage needs a name.'); return; }
+      if (stage.approver_user_ids.length === 0) { setMessage('Every stage needs at least one approver.'); return; }
+      if (stage.fallback_approver_ids.length > 0 && !stage.escalate_after_hours) { setMessage('Set "Escalate after (hours)" for any stage with a fallback approver.'); return; }
+      if (stage.escalate_after_hours && stage.fallback_approver_ids.length === 0) { setMessage('A stage with an escalation time needs at least one fallback approver.'); return; }
+      if (stage.condition_field.trim() && !stage.condition_value.trim()) { setMessage('A stage condition needs a value, not just a field.'); return; }
+    }
+    setSaving(true); setMessage('');
+    try {
+      const payload = {
+        name: form.name.trim(), description: form.description.trim() || undefined,
+        stages: form.stages.map(stage => ({
+          name: stage.name.trim(), approval_mode: stage.approval_mode, approver_user_ids: stage.approver_user_ids,
+          fallback_approver_ids: stage.fallback_approver_ids.length ? stage.fallback_approver_ids : undefined,
+          escalate_after_hours: stage.escalate_after_hours ? Number(stage.escalate_after_hours) : undefined,
+          condition_field: stage.condition_field.trim() || undefined,
+          condition_operator: stage.condition_field.trim() ? stage.condition_operator : undefined,
+          condition_value: stage.condition_field.trim() ? stage.condition_value.trim() : undefined,
+        })),
+      };
+      const response = editingId
+        ? await auth.apiRequest(`/api/v1/workflows/definitions/${editingId}`, { method: 'PATCH', body: JSON.stringify(payload) })
+        : await auth.apiRequest('/api/v1/workflows/definitions', { method: 'POST', body: JSON.stringify(payload) });
+      if (response.ok) { setOpen(false); reload(); }
+      else { const body = await response.json().catch(() => null); setMessage(body?.error?.message || 'Unable to save this workflow.'); }
+    } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
+  };
+
+  const setStatus = async (definition: ApiWorkflowDefinition, status: string) => {
+    await auth.apiRequest(`/api/v1/workflows/definitions/${definition.id}`, { method: 'PATCH', body: JSON.stringify({ status }) });
+    reload();
+  };
+  const remove = async (definition: ApiWorkflowDefinition) => {
+    if (!window.confirm(`Delete "${definition.name}"? This cannot be undone.`)) return;
+    const response = await auth.apiRequest(`/api/v1/workflows/definitions/${definition.id}`, { method: 'DELETE' });
+    if (response.ok) reload();
+    else { const body = await response.json().catch(() => null); window.alert(body?.error?.message || 'Unable to delete this workflow.'); }
+  };
+
+  return <Page eyebrow="GOVERNANCE" title="Workflow Definitions" subtitle="Multi-stage approval workflows — ordered stages, any-of/all-of approvers, optional fallback escalation and condition-based stage skipping." action={<><button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button><button className="btn btn-primary" onClick={openCreate}><Plus size={14}/> New workflow</button></>}>
+    <datalist id="workflow-condition-fields"><option value="department"/><option value="job_title"/><option value="employment_type"/><option value="account_type"/></datalist>
+    {open && <div className="panel" style={{marginBottom:18}}><form onSubmit={submit}>
+      <div className="panel-head"><h2>{editingId ? 'Edit workflow' : 'New workflow'}</h2><button type="button" className="btn" aria-label="Close" onClick={() => setOpen(false)}><X size={14}/></button></div>
+      <div className="detail-section">
+        <div className="key-grid">
+          <label className="key"><span>Name</span><input className="select" value={form.name} onChange={event => setForm({...form, name: event.target.value})}/></label>
+          <label className="key"><span>Description (optional)</span><input className="select" value={form.description} onChange={event => setForm({...form, description: event.target.value})}/></label>
+        </div>
+        <div className="key" style={{marginTop:18,marginBottom:10}}><span>Stages (in order)</span></div>
+        {form.stages.map((stage, index) => <div key={index} style={{border:'1px solid #dde4e7',borderRadius:10,padding:14,marginBottom:12}}>
+          <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:10,flexWrap:'wrap'}}>
+            <strong style={{minWidth:60}}>Stage {index + 1}</strong>
+            <input className="select" style={{flex:'1 1 200px'}} placeholder="Stage name" value={stage.name} onChange={event => updateStage(index, { name: event.target.value })}/>
+            <select className="select" style={{flex:'0 1 160px'}} value={stage.approval_mode} onChange={event => updateStage(index, { approval_mode: event.target.value })}>
+              <option value="ANY_OF">Any one approver</option><option value="ALL_OF">Every approver</option>
+            </select>
+            <button type="button" className="btn" aria-label="Move up" disabled={index === 0} onClick={() => moveStage(index, -1)}><ChevronUp size={14}/></button>
+            <button type="button" className="btn" aria-label="Move down" disabled={index === form.stages.length - 1} onClick={() => moveStage(index, 1)}><ChevronDown size={14}/></button>
+            <button type="button" className="btn" aria-label="Remove stage" onClick={() => removeStage(index)}><X size={14}/></button>
+          </div>
+          <div className="key-grid">
+            <label className="key"><span>Approvers</span><ApproverChipsPicker users={users} selectedIds={stage.approver_user_ids} onChange={ids => updateStage(index, { approver_user_ids: ids })} placeholder="Add an approver…"/></label>
+            <label className="key"><span>Fallback approvers (optional)</span><ApproverChipsPicker users={users} selectedIds={stage.fallback_approver_ids} onChange={ids => updateStage(index, { fallback_approver_ids: ids })} placeholder="Add a fallback…"/></label>
+            <label className="key"><span>Escalate after (hours)</span><input className="select" type="number" min={1} value={stage.escalate_after_hours} onChange={event => updateStage(index, { escalate_after_hours: event.target.value })} disabled={stage.fallback_approver_ids.length === 0}/></label>
+          </div>
+          <div className="key" style={{marginTop:10,marginBottom:6}}><span>Only activate this stage if (optional)</span></div>
+          <p className="subtitle" style={{margin:'0 0 8px'}}>Checked against the TARGET person's own real directory record (department, job title, employment type, account type) when this stage belongs to an assignment — never anything the requester could type in.</p>
+          <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+            <input className="select" style={{flex:'1 1 160px'}} list="workflow-condition-fields" placeholder="Field — department, job_title, employment_type, account_type" value={stage.condition_field} onChange={event => updateStage(index, { condition_field: event.target.value })}/>
+            <select className="select" style={{flex:'0 1 140px'}} value={stage.condition_operator} onChange={event => updateStage(index, { condition_operator: event.target.value })}><option value="EQUALS">Equals</option><option value="NOT_EQUALS">Not equals</option></select>
+            {stage.condition_field.trim().toLowerCase() === 'department'
+              ? <select className="select" style={{flex:'1 1 160px'}} value={stage.condition_value} onChange={event => updateStage(index, { condition_value: event.target.value })}><option value="">Select a department</option>{stage.condition_value && !(departmentList || []).some(d => d.name === stage.condition_value) && <option value={stage.condition_value}>{stage.condition_value} (not in the department list)</option>}{(departmentList || []).map(d => <option key={d.id} value={d.name}>{d.name}</option>)}</select>
+              : <input className="select" style={{flex:'1 1 160px'}} placeholder="Value" value={stage.condition_value} onChange={event => updateStage(index, { condition_value: event.target.value })}/>}
+          </div>
+        </div>)}
+        <button type="button" className="btn" onClick={addStage}><Plus size={14}/> Add stage</button>
+      </div>
+      {message && <div className="notice" style={{marginTop:14}}>{message}</div>}
+      <div style={{display:'flex',gap:8,marginTop:18}}><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Saving...' : 'Save'}</button><button type="button" className="btn" onClick={() => setOpen(false)}>Cancel</button></div>
+    </form></div>}
+    <TablePanel toolbar={undefined}>
+      {loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : !definitions || definitions.length === 0 ? <div className="empty">No workflows yet.</div> : <table><thead><tr><th>Name</th><th>Stages</th><th>Status</th><th>In flight</th><th></th></tr></thead><tbody>
+        {definitions.map(definition => <tr key={definition.id}>
+          <td className="user-name">{definition.name}{definition.description && <div className="user-email">{definition.description}</div>}</td>
+          <td>{definition.stages.map(s => s.name).join(' → ')}</td>
+          <td><StatusBadge status={definition.status}/></td>
+          <td>{definition.in_flight_count}</td>
+          <td style={{display:'flex',gap:6}}>
+            <button className="btn" onClick={() => openEdit(definition)}>Edit</button>
+            {definition.status === 'ACTIVE' ? <button className="btn" onClick={() => void setStatus(definition, 'DISABLED')}>Disable</button> : <button className="btn" onClick={() => void setStatus(definition, 'ACTIVE')}>Activate</button>}
+            <button className="btn" onClick={() => void remove(definition)}>Delete</button>
+          </td>
+        </tr>)}
+      </tbody></table>}
+    </TablePanel>
+  </Page>;
+}
+type WorkflowRequestRow =
+  | { kind: 'single'; request: ApiWorkflowRequest }
+  | { kind: 'batch'; key: string; label: string; requests: ApiWorkflowRequest[] };
+// Items of the same multi-item Package/Business-Role assignment (or the same Access Review campaign) each get
+// their own independent WorkflowInstance so they can progress at their own pace, but they share a batch_id —
+// collapse those into one bundle so a reviewer can decide them all in one action instead of N separate cards.
+function groupWorkflowRequests(requests: ApiWorkflowRequest[]): WorkflowRequestRow[] {
+  const rows: WorkflowRequestRow[] = [];
+  const index = new Map<string, number>();
+  for (const request of requests) {
+    if (request.batch_id) {
+      const at = index.get(request.batch_id);
+      if (at === undefined) { index.set(request.batch_id, rows.length); rows.push({ kind: 'batch', key: request.batch_id, label: request.batch_label || 'Bundle', requests: [request] }); }
+      else (rows[at] as Extract<WorkflowRequestRow, { kind: 'batch' }>).requests.push(request);
+      continue;
+    }
+    rows.push({ kind: 'single', request });
+  }
+  return rows;
+}
+function WorkflowRequestsPage() {
+  const auth = useAuth();
+  const timezone = useAppTimezone();
+  const { data: activeDefinitions } = useApiResource<ApiWorkflowDefinition[]>('/api/v1/workflows/definitions/active');
+  const { data: mine, reload: reloadMine } = useApiResource<ApiWorkflowRequest[]>('/api/v1/workflows/requests/mine');
+  const { data: pending, reload: reloadPending } = useApiResource<ApiWorkflowRequest[]>('/api/v1/workflows/requests/pending-my-decision');
+  const [open, setOpen] = useState(false);
+  const emptySubmitForm = { workflow_definition_id: '', title: '', description: '', justification: '', payload: [] as { key: string; value: string }[] };
+  const [form, setForm] = useState(emptySubmitForm);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  const [decisionDrafts, setDecisionDrafts] = useState<Record<string, string>>({});
+  const [busyStageId, setBusyStageId] = useState<string | null>(null);
+
+  const reloadAll = () => { reloadMine(); reloadPending(); };
+  const addPayloadRow = () => setForm({ ...form, payload: [...form.payload, { key: '', value: '' }] });
+  const removePayloadRow = (index: number) => setForm({ ...form, payload: form.payload.filter((_, i) => i !== index) });
+  const updatePayloadRow = (index: number, patch: Partial<{ key: string; value: string }>) => setForm({ ...form, payload: form.payload.map((p, i) => i === index ? { ...p, ...patch } : p) });
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!form.workflow_definition_id) { setMessage('Select a workflow.'); return; }
+    if (!form.title.trim()) { setMessage('Enter a title.'); return; }
+    if (form.justification.trim().length < 3) { setMessage('A justification (at least 3 characters) is required.'); return; }
+    setSaving(true); setMessage('');
+    try {
+      const payload: Record<string, string> = {};
+      form.payload.forEach(p => { if (p.key.trim()) payload[p.key.trim()] = p.value; });
+      const response = await auth.apiRequest('/api/v1/workflows/requests', { method: 'POST', body: JSON.stringify({ workflow_definition_id: form.workflow_definition_id, title: form.title.trim(), description: form.description.trim() || undefined, justification: form.justification.trim(), payload }) });
+      if (response.ok) { setOpen(false); setForm(emptySubmitForm); reloadAll(); }
+      else { const body = await response.json().catch(() => null); setMessage(body?.error?.message || 'Unable to submit this request.'); }
+    } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
+  };
+
+  const cancelRequest = async (request: ApiWorkflowRequest) => {
+    if (!window.confirm(`Cancel "${request.title}"?`)) return;
+    const response = await auth.apiRequest(`/api/v1/workflows/requests/${request.id}/cancel`, { method: 'POST' });
+    if (response.ok) reloadAll();
+    else { const body = await response.json().catch(() => null); window.alert(body?.error?.message || 'Unable to cancel this request.'); }
+  };
+
+  const decide = async (request: ApiWorkflowRequest, stage: ApiWorkflowStageInstance, decision: 'APPROVED' | 'REJECTED') => {
+    const justification = (decisionDrafts[stage.id] || '').trim();
+    if (justification.length < 3) { window.alert('A justification (at least 3 characters) is required.'); return; }
+    setBusyStageId(stage.id);
+    try {
+      const response = await auth.apiRequest(`/api/v1/workflows/requests/${request.id}/stages/${stage.id}/decide`, { method: 'POST', body: JSON.stringify({ decision, justification }) });
+      if (response.ok) { setDecisionDrafts(prev => ({ ...prev, [stage.id]: '' })); reloadAll(); }
+      else { const body = await response.json().catch(() => null); window.alert(body?.error?.message || 'Unable to record this decision.'); }
+    } finally { setBusyStageId(null); }
+  };
+
+  const currentStage = (request: ApiWorkflowRequest) => request.stages.find(s => s.status === 'PENDING');
+
+  const decideBatch = async (requests: ApiWorkflowRequest[], decision: 'APPROVED' | 'REJECTED', draftKey: string) => {
+    const justification = (decisionDrafts[draftKey] || '').trim();
+    if (justification.length < 3) { window.alert('A justification (at least 3 characters) is required.'); return; }
+    setBusyStageId(draftKey);
+    let failed = 0; let firstError = '';
+    try {
+      for (const request of requests) {
+        const stage = currentStage(request);
+        if (!stage) continue;
+        const response = await auth.apiRequest(`/api/v1/workflows/requests/${request.id}/stages/${stage.id}/decide`, { method: 'POST', body: JSON.stringify({ decision, justification }) });
+        if (!response.ok) { failed += 1; if (!firstError) firstError = (await response.json().catch(() => null))?.error?.message || ''; }
+      }
+    } finally { setBusyStageId(null); setDecisionDrafts(prev => ({ ...prev, [draftKey]: '' })); reloadAll(); }
+    if (failed > 0) window.alert(`${failed} of ${requests.length} decisions could not be recorded${firstError ? `: ${firstError}` : '.'}`);
+  };
+
+  const requestCard = (request: ApiWorkflowRequest, showDecide: boolean) => {
+    const stage = currentStage(request);
+    return <div key={request.id} className="panel" style={{marginBottom:14}}>
+      <div className="panel-head">
+        <div><h2 style={{marginBottom:2}}>{request.title}</h2><span className="user-email">{request.workflow_definition_name} · requested by {request.requested_by_display_name || request.requested_by}</span></div>
+        <StatusBadge status={request.instance_status}/>
+      </div>
+      <div className="detail-section">
+        {request.description && <p className="subtitle" style={{marginTop:0}}>{request.description}</p>}
+        <div style={{display:'flex',flexWrap:'wrap',gap:8,marginBottom:10}}>
+          {request.stages.map(s => <span key={s.id} className={`badge ${s.status === 'APPROVED' ? 'success' : s.status === 'REJECTED' || s.status === 'CANCELLED' ? 'danger' : s.status === 'SKIPPED' ? 'neutral' : 'warning'}`}>{s.stage_number}. {s.name} — {s.status}</span>)}
+        </div>
+        {stage && <div style={{borderTop:'1px solid #e5eaec',paddingTop:10}}>
+          <div className="key" style={{marginBottom:6}}><span>Current stage: {stage.name} ({stage.approval_mode === 'ALL_OF' ? 'every approver must agree' : 'any one approver'})</span></div>
+          <div style={{fontSize:12,color:'#64767d',marginBottom:8}}>Approvers: {stage.required_approvers.map(a => a.display_name || a.user_id).join(', ')}{stage.escalates_at && !stage.escalated_at && <> · escalates {formatDateTime(stage.escalates_at, timezone)}</>}{stage.escalated_at && <> · escalated, fallback approvers may now act</>}</div>
+          {stage.decisions.length > 0 && <div style={{marginBottom:8}}>{stage.decisions.map((d, i) => <div key={i} className="user-email">{d.decided_by_display_name || d.decided_by}: {d.decision} — {d.justification}</div>)}</div>}
+          {showDecide && request.can_decide && <div>
+            <textarea className="select" style={{width:'100%',minHeight:60}} placeholder="Justification (required)" value={decisionDrafts[stage.id] || ''} onChange={event => setDecisionDrafts(prev => ({ ...prev, [stage.id]: event.target.value }))}/>
+            <div style={{display:'flex',gap:8,marginTop:8}}>
+              <button className="btn btn-primary" disabled={busyStageId === stage.id} onClick={() => void decide(request, stage, 'APPROVED')}><Check size={14}/> Approve</button>
+              <button className="btn" disabled={busyStageId === stage.id} onClick={() => void decide(request, stage, 'REJECTED')}><X size={14}/> Reject</button>
+            </div>
+          </div>}
+          {!showDecide && request.instance_status === 'PENDING' && <button className="btn" onClick={() => void cancelRequest(request)}>Cancel request</button>}
+        </div>}
+      </div>
+    </div>;
+  };
+
+  const batchCard = (row: Extract<WorkflowRequestRow, { kind: 'batch' }>, showDecide: boolean) => {
+    const draftKey = `batch:${row.key}`;
+    const first = row.requests[0];
+    const anyCanDecide = row.requests.some(r => r.can_decide);
+    return <div key={row.key} className="panel" style={{marginBottom:14}}>
+      <div className="panel-head">
+        <div><h2 style={{marginBottom:2}}>{row.label}</h2><span className="user-email">{row.requests.length} item{row.requests.length === 1 ? '' : 's'} · {first.workflow_definition_name} · requested by {first.requested_by_display_name || first.requested_by}</span></div>
+      </div>
+      <div className="detail-section">
+        {row.requests.map(request => {
+          const stage = currentStage(request);
+          return <div key={request.id} style={{borderTop:'1px solid #e5eaec',paddingTop:10,paddingBottom:10}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}><strong>{request.title}</strong><StatusBadge status={request.instance_status}/></div>
+            <div style={{display:'flex',flexWrap:'wrap',gap:8,marginBottom:6}}>
+              {request.stages.map(s => <span key={s.id} className={`badge ${s.status === 'APPROVED' ? 'success' : s.status === 'REJECTED' || s.status === 'CANCELLED' ? 'danger' : s.status === 'SKIPPED' ? 'neutral' : 'warning'}`}>{s.stage_number}. {s.name} — {s.status}</span>)}
+            </div>
+            {stage && <div style={{fontSize:12,color:'#64767d'}}>Current stage: {stage.name} ({stage.approval_mode === 'ALL_OF' ? 'every approver must agree' : 'any one approver'}) · Approvers: {stage.required_approvers.map(a => a.display_name || a.user_id).join(', ')}{stage.escalates_at && !stage.escalated_at && <> · escalates {formatDateTime(stage.escalates_at, timezone)}</>}{stage.escalated_at && <> · escalated, fallback approvers may now act</>}</div>}
+            {!showDecide && request.instance_status === 'PENDING' && <button className="btn" style={{marginTop:8}} onClick={() => void cancelRequest(request)}>Cancel request</button>}
+          </div>;
+        })}
+        {showDecide && anyCanDecide && <div style={{marginTop:10}}>
+          <textarea className="select" style={{width:'100%',minHeight:60}} placeholder={`Justification (applies to all ${row.requests.length} items)`} value={decisionDrafts[draftKey] || ''} onChange={event => setDecisionDrafts(prev => ({ ...prev, [draftKey]: event.target.value }))}/>
+          <div style={{display:'flex',gap:8,marginTop:8}}>
+            <button className="btn btn-primary" disabled={busyStageId === draftKey} onClick={() => void decideBatch(row.requests, 'APPROVED', draftKey)}><Check size={14}/> Approve all ({row.requests.length})</button>
+            <button className="btn" disabled={busyStageId === draftKey} onClick={() => void decideBatch(row.requests, 'REJECTED', draftKey)}><X size={14}/> Reject all ({row.requests.length})</button>
+          </div>
+        </div>}
+      </div>
+    </div>;
+  };
+
+  const requestRow = (row: WorkflowRequestRow, showDecide: boolean) => row.kind === 'batch' ? batchCard(row, showDecide) : requestCard(row.request, showDecide);
+
+  return <Page eyebrow="SELF-SERVICE" title="Workflow Requests" subtitle="Submit a request against an admin-defined multi-stage approval workflow, or decide one waiting on you." action={<button className="btn btn-primary" onClick={() => { setOpen(true); setMessage(''); }}><Plus size={14}/> New request</button>}>
+    {open && <div className="panel" style={{marginBottom:18}}><form onSubmit={submit}>
+      <div className="panel-head"><h2>New request</h2><button type="button" className="btn" aria-label="Close" onClick={() => setOpen(false)}><X size={14}/></button></div>
+      <div className="detail-section">
+        <div className="key-grid">
+          <label className="key"><span>Workflow</span><select className="select" value={form.workflow_definition_id} onChange={event => setForm({...form, workflow_definition_id: event.target.value})}><option value="">Select a workflow</option>{(activeDefinitions || []).map(d => <option key={d.id} value={d.id}>{d.name}</option>)}</select></label>
+          <label className="key"><span>Title</span><input className="select" value={form.title} onChange={event => setForm({...form, title: event.target.value})}/></label>
+        </div>
+        <label className="key" style={{display:'block',marginTop:14}}><span>Description (optional)</span><input className="select" style={{width:'100%'}} value={form.description} onChange={event => setForm({...form, description: event.target.value})}/></label>
+        <label className="key" style={{display:'block',marginTop:14}}><span>Justification</span><textarea className="select" style={{width:'100%',minHeight:60}} value={form.justification} onChange={event => setForm({...form, justification: event.target.value})}/></label>
+        <div className="key" style={{marginTop:14,marginBottom:8}}><span>Extra details (optional — some workflows only activate a stage based on these)</span></div>
+        {form.payload.map((row, index) => <div key={index} style={{display:'flex',gap:8,marginBottom:8}}>
+          <input className="select" style={{flex:1}} placeholder="Field, e.g. department" value={row.key} onChange={event => updatePayloadRow(index, { key: event.target.value })}/>
+          <input className="select" style={{flex:1}} placeholder="Value" value={row.value} onChange={event => updatePayloadRow(index, { value: event.target.value })}/>
+          <button type="button" className="btn" aria-label="Remove" onClick={() => removePayloadRow(index)}><X size={14}/></button>
+        </div>)}
+        <button type="button" className="btn" onClick={addPayloadRow}><Plus size={14}/> Add detail</button>
+      </div>
+      {message && <div className="notice" style={{marginTop:14}}>{message}</div>}
+      <div style={{display:'flex',gap:8,marginTop:18}}><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Submitting...' : 'Submit'}</button><button type="button" className="btn" onClick={() => setOpen(false)}>Cancel</button></div>
+    </form></div>}
+
+    <div className="panel-head" style={{marginBottom:10}}><h2>Pending my decision</h2></div>
+    {!pending || pending.length === 0 ? <div className="empty" style={{marginBottom:18}}>Nothing is waiting on your decision.</div> : groupWorkflowRequests(pending).map(row => requestRow(row, true))}
+
+    <div className="panel-head" style={{marginBottom:10,marginTop:18}}><h2>My requests</h2></div>
+    {!mine || mine.length === 0 ? <div className="empty">You haven't submitted any workflow requests yet.</div> : groupWorkflowRequests(mine).map(row => requestRow(row, false))}
   </Page>;
 }
 interface ApiLeaverPolicy { id: string; name: string; priority: number; delete_after_days: number | null; scope_type: string; scope_value: string | null; effective_time: string; notify_days_before: number[]; revoke_access: boolean; disable_accounts: boolean; disable_privileged_accounts: boolean; remove_group_memberships: boolean; status: string; is_default: boolean; }
@@ -4598,7 +5214,7 @@ function JoinersPage() {
   const { data: joiners, loading, error, reload } = useApiResource<ApiJoiner[]>('/api/v1/lifecycle/joiners');
   const { data: targets, reload: reloadTargets } = useApiResource<ApiJoinerTarget[]>('/api/v1/lifecycle/joiner-targets');
   const { data: users } = useApiResource<ApiUser[]>('/api/v1/users');
-  const { data: departments } = useApiResource<{ id: string; name: string }[]>('/api/v1/policies/departments');
+  const { data: departments } = useApiResource<{ id: string; name: string; manager_id: string | null }[]>('/api/v1/policies/departments');
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(emptyJoinerForm);
   const [picked, setPicked] = useState<Record<string, { checked: boolean; username: string }>>({});
@@ -4633,7 +5249,7 @@ function JoinersPage() {
   };
   const submit = async () => {
     const chosen = Object.entries(picked).filter(([, v]) => v.checked);
-    if (!form.first_name.trim() || !form.last_name.trim() || !form.work_email.trim() || !form.department.trim()) { setMessage('First name, last name, work email and department are required.'); return; }
+    if (!form.first_name.trim() || !form.last_name.trim() || !form.work_email.trim() || !form.department.trim() || !form.manager_id) { setMessage('First name, last name, work email, department and manager are required.'); return; }
     if (chosen.length === 0) { setMessage('Choose at least one IdP to create the account in.'); return; }
     if (!form.start_now && !form.start_at) { setMessage('Pick a start date and time, or tick "Start immediately".'); return; }
     setSaving(true); setMessage('');
@@ -4694,9 +5310,9 @@ function JoinersPage() {
           <label className="key"><span>Last name</span><input className="select" value={form.last_name} onChange={event => setForm({...form, last_name: event.target.value})}/></label>
           <label className="key"><span>Work email</span><input className="select" type="email" value={form.work_email} onChange={event => { setEmailEdited(true); setForm({...form, work_email: event.target.value}); }} placeholder="generated from the directory's naming policy"/></label>
           <label className="key"><span>Employee ID (optional)</span><input className="select" value={form.employee_id} onChange={event => setForm({...form, employee_id: event.target.value})}/></label>
-          <label className="key"><span>Department</span><select className="select" value={form.department} onChange={event => setForm({...form, department: event.target.value})}><option value="">Select a department</option>{(departments || []).map(d => <option key={d.id} value={d.name}>{d.name}</option>)}</select></label>
+          <label className="key"><span>Department</span><select className="select" value={form.department} onChange={event => { const picked = (departments || []).find(d => d.name === event.target.value); setForm({...form, department: event.target.value, manager_id: picked?.manager_id || form.manager_id}); }}><option value="">Select a department</option>{(departments || []).map(d => <option key={d.id} value={d.name}>{d.name}</option>)}</select></label>
           <label className="key"><span>Job title</span><input className="select" value={form.job_title} onChange={event => setForm({...form, job_title: event.target.value})}/></label>
-          <label className="key"><span>Manager</span><select className="select" value={form.manager_id} onChange={event => setForm({...form, manager_id: event.target.value})}><option value="">No manager</option>{(users || []).filter(u => u.account_type === 'NORMAL' && u.status === 'ACTIVE').map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+          <label className="key"><span>Manager (required)</span><select className="select" value={form.manager_id} onChange={event => setForm({...form, manager_id: event.target.value})}><option value="">Select a manager</option>{(users || []).filter(u => u.account_type === 'NORMAL' && u.status === 'ACTIVE').map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
           <label className="key"><span>Role in the org chart</span><select className="select" value={form.employee_category} onChange={event => setForm({...form, employee_category: event.target.value})}><option value="EMPLOYEE">Employee</option><option value="MANAGER">Manager</option></select></label>
           <label className="key"><span>Employment type</span><select className="select" value={form.employment_type} onChange={event => setForm({...form, employment_type: event.target.value})}>{EMPLOYMENT_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></label>
           <label className="key"><span>Leaver date (optional — known end of contract)</span><input className="select" type="date" value={form.leaver_date} onChange={event => setForm({...form, leaver_date: event.target.value})}/></label>

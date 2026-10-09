@@ -203,11 +203,20 @@ async def _validate_target_exists(session: AsyncSession, resource_type: str, res
 
 
 async def create_campaign(session: AsyncSession, data: AccessReviewCampaignCreate, actor_subject: str, request_id: str) -> AccessReviewCampaign:
-    reviewer = await session.get(User, data.reviewer_id)
-    if reviewer is None:
-        raise AccessPilotError("USER_NOT_FOUND", "The selected reviewer was not found.", 404)
-    if data.fallback_reviewer_id is not None and await session.get(User, data.fallback_reviewer_id) is None:
-        raise AccessPilotError("USER_NOT_FOUND", "The selected fallback reviewer was not found.", 404)
+    workflow_definition = None
+    if data.workflow_definition_id is not None:
+        from app.models import WorkflowDefinition
+        workflow_definition = await session.get(WorkflowDefinition, data.workflow_definition_id)
+        if workflow_definition is None:
+            raise AccessPilotError("WORKFLOW_DEFINITION_NOT_FOUND", "The selected workflow was not found.", 404)
+        if workflow_definition.status != "ACTIVE":
+            raise AccessPilotError("WORKFLOW_DEFINITION_NOT_ACTIVE", "This workflow is not currently accepting requests.", 409)
+    else:
+        reviewer = await session.get(User, data.reviewer_id)
+        if reviewer is None:
+            raise AccessPilotError("USER_NOT_FOUND", "The selected reviewer was not found.", 404)
+        if data.fallback_reviewer_id is not None and await session.get(User, data.fallback_reviewer_id) is None:
+            raise AccessPilotError("USER_NOT_FOUND", "The selected fallback reviewer was not found.", 404)
     if data.scope_type in ("USER", "MOVER") and await session.get(User, data.scope_user_id) is None:
         raise AccessPilotError("USER_NOT_FOUND", "The user this campaign is scoped to was not found.", 404)
     if data.scope_type == "SPECIFIC_RESOURCE":
@@ -219,11 +228,14 @@ async def create_campaign(session: AsyncSession, data: AccessReviewCampaignCreat
         scope_targets_json = [{"resource_type": t.resource_type, "resource_id": str(t.resource_id)} for t in data.scope_targets]
 
     created_by = await _resolve_internal_user_id(session, actor_subject)
+    if workflow_definition is not None and created_by is None:
+        raise AccessPilotError("USER_NOT_FOUND", "Your account could not be resolved.", 404)
     campaign = AccessReviewCampaign(
         name=data.name, description=data.description, scope_type=data.scope_type,
         scope_resource_type=data.scope_resource_type, scope_resource_id=data.scope_resource_id, scope_targets=scope_targets_json,
         scope_user_id=data.scope_user_id, scope_account_type=data.scope_account_type, scope_inactive_days=data.scope_inactive_days,
         reviewer_id=data.reviewer_id, fallback_reviewer_id=data.fallback_reviewer_id, fallback_unlock_hours=data.fallback_unlock_hours,
+        workflow_definition_id=data.workflow_definition_id,
         status="ACTIVE", due_at=data.due_at, on_no_response=data.on_no_response, frequency_days=data.frequency_days, created_by=created_by,
     )
     if data.schedule_day_of_month is not None:
@@ -238,16 +250,35 @@ async def create_campaign(session: AsyncSession, data: AccessReviewCampaignCreat
     await session.flush()
 
     assignments = await _matching_assignments(session, data)
+    items = []
     for assignment in assignments:
-        session.add(AccessReviewItem(
+        item = AccessReviewItem(
             campaign_id=campaign.id, assignment_id=assignment.id, user_id=assignment.user_id,
             resource_type=assignment.resource_type, resource_id=assignment.resource_id, app_role_external_id=assignment.app_role_external_id,
             assignment_status_at_snapshot=assignment.status, decision="PENDING",
-        ))
-    await record_audit(session, action="ACCESS_REVIEW_CAMPAIGN_CREATED", target_type="ACCESS_REVIEW_CAMPAIGN", target_id=campaign.id, actor_user_id=created_by, request_id=request_id, metadata={"name": campaign.name, "scope_type": campaign.scope_type, "item_count": len(assignments)})
-    await create_notification(session, data.reviewer_id, "ACCESS_REVIEW_ASSIGNED", f"You've been assigned {len(assignments)} item{'s' if len(assignments) != 1 else ''} to review in \"{campaign.name}\", due {campaign.due_at.strftime('%Y-%m-%d')}.", link="/access-reviews/mine")
-    if data.fallback_reviewer_id is not None:
-        await create_notification(session, data.fallback_reviewer_id, "ACCESS_REVIEW_ASSIGNED", f"You're the fallback reviewer for \"{campaign.name}\" ({len(assignments)} item{'s' if len(assignments) != 1 else ''}), due {campaign.due_at.strftime('%Y-%m-%d')}.", link="/access-reviews/mine")
+        )
+        session.add(item)
+        items.append(item)
+    await session.flush()
+
+    if workflow_definition is not None:
+        # One INDEPENDENT WorkflowInstance per item (not one shared per campaign) — each reviewed grant gets its
+        # own stage-by-stage decision, exactly like each group-fanout package member already gets their own.
+        # Local import: the established convention this session for this import direction (workflows.py needs the
+        # reverse import for its own completion hook) — see services.workflows._apply_access_review_item_outcome.
+        from app.services.workflows import build_user_condition_payload, start_workflow_instance
+        for item, assignment in zip(items, assignments):
+            target_user = await session.get(User, assignment.user_id)
+            resource_name = await _resolve_display_name(session, item.resource_type, item.resource_id, item.app_role_external_id)
+            label = f"Review: {resource_name or item.resource_type} for {target_user.display_name if target_user else 'Unknown user'}"
+            instance = await start_workflow_instance(session, workflow_definition, created_by, build_user_condition_payload(target_user) if target_user else {}, "ACCESS_REVIEW_ITEM", label, subject_id=item.id)
+            item.workflow_instance_id = instance.id
+
+    await record_audit(session, action="ACCESS_REVIEW_CAMPAIGN_CREATED", target_type="ACCESS_REVIEW_CAMPAIGN", target_id=campaign.id, actor_user_id=created_by, request_id=request_id, metadata={"name": campaign.name, "scope_type": campaign.scope_type, "item_count": len(assignments), "workflow_definition_id": str(workflow_definition.id) if workflow_definition else None})
+    if workflow_definition is None:
+        await create_notification(session, data.reviewer_id, "ACCESS_REVIEW_ASSIGNED", f"You've been assigned {len(assignments)} item{'s' if len(assignments) != 1 else ''} to review in \"{campaign.name}\", due {campaign.due_at.strftime('%Y-%m-%d')}.", link="/access-reviews/mine")
+        if data.fallback_reviewer_id is not None:
+            await create_notification(session, data.fallback_reviewer_id, "ACCESS_REVIEW_ASSIGNED", f"You're the fallback reviewer for \"{campaign.name}\" ({len(assignments)} item{'s' if len(assignments) != 1 else ''}), due {campaign.due_at.strftime('%Y-%m-%d')}.", link="/access-reviews/mine")
     await session.commit()
     await session.refresh(campaign)
     return campaign
@@ -273,6 +304,8 @@ async def update_campaign(session: AsyncSession, campaign_id: UUID, data: Access
     campaign = await _get_campaign(session, campaign_id)
     if campaign.status != "ACTIVE":
         raise AccessPilotError("REQUEST_ALREADY_PROCESSED", "A closed campaign can no longer be edited.", 409)
+    if campaign.workflow_definition_id is not None and (data.reviewer_id is not None or data.fallback_reviewer_id is not None or data.clear_fallback_reviewer or data.fallback_unlock_hours is not None):
+        raise AccessPilotError("VALIDATION_ERROR", "This campaign is routed through a workflow — there is no single reviewer slot to reassign.", 422)
 
     changes: dict[str, object] = {}
     if data.name is not None:
@@ -416,21 +449,22 @@ async def _maybe_spawn_recurrence(session: AsyncSession, campaign: AccessReviewC
         scope_resource_type=campaign.scope_resource_type, scope_resource_id=campaign.scope_resource_id, scope_targets=scope_targets,
         scope_user_id=campaign.scope_user_id, scope_account_type=campaign.scope_account_type, scope_inactive_days=campaign.scope_inactive_days,
         reviewer_id=campaign.reviewer_id, fallback_reviewer_id=campaign.fallback_reviewer_id, fallback_unlock_hours=campaign.fallback_unlock_hours,
+        workflow_definition_id=campaign.workflow_definition_id,
         due_at=datetime.now(timezone.utc) + timedelta(days=campaign.frequency_days), frequency_days=campaign.frequency_days, on_no_response=campaign.on_no_response,
     )
+    failure_recipient = campaign.reviewer_id or campaign.created_by
     try:
         next_campaign = await create_campaign(session, next_data, "system:access-review-recurrence", f"{request_id}-recurrence")
     except AccessPilotError as exc:
         logger.warning("Recurrence spawn failed for campaign %s: %s", campaign.id, exc)
-        await create_notification(session, campaign.reviewer_id, "ACCESS_REVIEW_RECURRENCE_FAILED", f"\"{campaign.name}\" recurs every {campaign.frequency_days} days, but the next campaign couldn't be created automatically ({exc.message}). Create it by hand if it's still needed.", link="/access-reviews/mine")
+        if failure_recipient is not None:
+            await create_notification(session, failure_recipient, "ACCESS_REVIEW_RECURRENCE_FAILED", f"\"{campaign.name}\" recurs every {campaign.frequency_days} days, but the next campaign couldn't be created automatically ({exc.message}). Create it by hand if it's still needed.", link="/access-reviews/mine")
         await session.commit()
         return
     next_campaign.parent_campaign_id = campaign.id
     # Lets whoever owns this recurring review know one cycle just wrapped up and the next one is already on the
     # calendar — so they can plan other campaigns/work around it instead of finding out only when it's due again.
-    recipients = {campaign.reviewer_id}
-    if campaign.created_by is not None:
-        recipients.add(campaign.created_by)
+    recipients = {r for r in (campaign.reviewer_id, campaign.created_by) if r is not None}
     for recipient_id in recipients:
         await create_notification(session, recipient_id, "ACCESS_REVIEW_RECURRENCE_CREATED", f"\"{campaign.name}\" completed its {campaign.frequency_days}-day review cycle — the next one is already scheduled, due {next_campaign.due_at.strftime('%Y-%m-%d')}.", link="/admin/access-reviews")
     await session.commit()
@@ -442,6 +476,8 @@ async def decide_item(session: AsyncSession, item_id: UUID, data: AccessReviewIt
         raise AccessPilotError("ACCESS_REVIEW_ITEM_NOT_FOUND", "The access review item was not found.", 404)
     if item.decision != "PENDING":
         raise AccessPilotError("REQUEST_ALREADY_PROCESSED", "This item has already been decided.", 409)
+    if item.workflow_instance_id is not None:
+        raise AccessPilotError("ACCESS_REVIEW_ITEM_ROUTED_THROUGH_WORKFLOW", "This item is routed through a workflow — decide it from Workflow Requests instead.", 409)
     campaign = await _get_campaign(session, item.campaign_id)
     actor_id = await _authorize_review_decision(session, campaign, actor_subject, actor_roles)
 
@@ -486,6 +522,13 @@ async def complete_campaign(session: AsyncSession, campaign_id: UUID, actor_subj
         raise AccessPilotError("REQUEST_ALREADY_PROCESSED", "This campaign is already closed.", 409)
     pending_items = list((await session.scalars(select(AccessReviewItem).where(AccessReviewItem.campaign_id == campaign_id, AccessReviewItem.decision == "PENDING"))).all())
     for item in pending_items:
+        if item.workflow_instance_id is not None:
+            # Cancelling the item's own still-open instance triggers services.workflows's completion hook, which
+            # resolves it exactly the same way the lines below resolve a reviewer-mode item (on_no_response: KEEP
+            # -> APPROVED, REVOKE -> AUTO_REVOKED + a real revoke) — see _apply_access_review_item_outcome.
+            from app.services.workflows import cancel_system_instance
+            await cancel_system_instance(session, item.workflow_instance_id, request_id)
+            continue
         if campaign.on_no_response == "KEEP":
             item.decision = "APPROVED"  # the campaign was set up to keep access nobody objected to
             item.decided_at = datetime.now(timezone.utc)
@@ -496,6 +539,12 @@ async def complete_campaign(session: AsyncSession, campaign_id: UUID, actor_subj
             pass
         item.decision = "AUTO_REVOKED"
         item.decided_at = datetime.now(timezone.utc)
+    if campaign.status == "COMPLETED":
+        # A workflow-routed item's own completion hook (triggered by cancel_system_instance above) already closed
+        # the campaign and spawned recurrence itself, the moment its cancellation made every item decided — see
+        # services.workflows._apply_access_review_item_outcome. Nothing left to do.
+        await session.refresh(campaign)
+        return campaign
     campaign.status = "COMPLETED"
     campaign.completed_at = datetime.now(timezone.utc)
     # actor_id resolves to None for the worker's own synthetic "system:access-review-worker" subject (no User row

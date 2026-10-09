@@ -14,3 +14,10 @@ class GroupOwnerInfo(BaseModel):
 
 class GroupOwnersUpdate(BaseModel):
     user_ids: list[UUID] = []
+
+
+class GroupOwnerSelfServiceUpdate(BaseModel):
+    """The group owner portal's only edit power — cosmetic fields alone, mirroring the narrow scope of
+    owner_rename_package/owner_rename_business_role. Fields left unset are left untouched."""
+    description: Optional[str] = None
+    group_label: Optional[str] = None

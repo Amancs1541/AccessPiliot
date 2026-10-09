@@ -17,6 +17,7 @@ from app.services.accounts import ensure_primary_account
 from app.services.assignments import _resolve_internal_user_id
 from app.services.audit import record_audit
 from app.services.directory_sync import upsert_user
+from app.services.notifications import create_notification
 from app.services.provider_configuration import _connector
 from app.services.provisioning import build_username_local_part
 
@@ -114,7 +115,7 @@ async def create_joiner(session: AsyncSession, data: JoinerCreate, actor_subject
     response with each account's one-time temporary password."""
     if data.employee_id and (await session.scalars(select(User.id).where(User.employee_id == data.employee_id))).first() is not None:
         raise AccessPilotError("EMPLOYEE_ID_TAKEN", "Someone with this employee ID already exists.", 409)
-    if data.manager_id is not None and await session.get(User, data.manager_id) is None:
+    if await session.get(User, data.manager_id) is None:
         raise AccessPilotError("USER_NOT_FOUND", "The selected manager was not found.", 404)
     providers = {p.id: p for p in await _real_providers(session)}
     wanted: list[tuple[IdentityProvider, str]] = []
@@ -138,6 +139,10 @@ async def create_joiner(session: AsyncSession, data: JoinerCreate, actor_subject
         await session.rollback()
         raise AccessPilotError("JOINER_PROVISIONING_FAILED", f"No account could be created in any selected directory. {errors}", 502)
     await _push_manager(session, joiner)
+    # Audit/FYI only — the manager isn't approving anything, just being told a joiner now reports to them. Fires
+    # at submission (not only on activation, which activate_joiner's own LIFECYCLE_JOINER notification already
+    # covers separately) so a future-dated joiner's manager hears about it right away, not only on the start date.
+    await create_notification(session, joiner.manager_id, "JOINER_SUBMITTED", f"{joiner.first_name} {joiner.last_name} has been submitted as a joiner, starting {start_at.strftime('%Y-%m-%d')} — you are their manager.", link="/admin/joiners")
     await record_audit(session, action="JOINER_CREATED", target_type="USER", target_id=joiner.user_id, actor_user_id=actor_id, request_id=request_id, metadata={"start_at": start_at.isoformat(), "targets": [{"provider": t["provider_name"], "status": t["status"]} for t in joiner.targets]})
     await session.commit()
     if start_at <= datetime.now(timezone.utc) + IMMEDIATE_SLACK:

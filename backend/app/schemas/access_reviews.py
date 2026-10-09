@@ -26,9 +26,13 @@ class AccessReviewCampaignCreate(BaseModel):
     scope_user_id: Optional[UUID] = None
     scope_account_type: Optional[str] = Field(default=None, pattern="^(PU|TU)$")
     scope_inactive_days: Optional[int] = Field(default=None, gt=0)
-    reviewer_id: UUID
+    reviewer_id: Optional[UUID] = None
     fallback_reviewer_id: Optional[UUID] = None
     fallback_unlock_hours: Optional[int] = Field(default=None, gt=0)
+    # Mutually exclusive with reviewer_id — exactly one must be set (a campaign always needs something deciding
+    # it, unlike an Assignment's optional "no approval" path). When set, fallback_reviewer_id/fallback_unlock_hours
+    # must be unset too: the workflow has its own per-stage fallback/escalation instead.
+    workflow_definition_id: Optional[UUID] = None
     due_at: datetime
     on_no_response: str = Field(default="REVOKE", pattern=r"^(REVOKE|KEEP)$")
     # Recurrence: NULL/omitted means a one-time campaign, unchanged from before this field existed. A positive
@@ -48,6 +52,15 @@ class AccessReviewCampaignCreate(BaseModel):
             raise ValueError("schedule_day_of_month and schedule_time must be provided together")
         if has_schedule and self.frequency_days is not None:
             raise ValueError("Choose either frequency_days (repeat after completion) or a fixed schedule, not both")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_reviewer_xor_workflow(self) -> "AccessReviewCampaignCreate":
+        if (self.reviewer_id is None) == (self.workflow_definition_id is None):
+            raise ValueError("Provide exactly one of reviewer_id or workflow_definition_id")
+        if self.workflow_definition_id is not None:
+            if self.fallback_reviewer_id is not None or self.fallback_unlock_hours is not None:
+                raise ValueError("workflow_definition_id cannot be combined with fallback_reviewer_id/fallback_unlock_hours — the workflow has its own per-stage fallback/escalation")
         return self
 
     @model_validator(mode="after")
@@ -75,6 +88,8 @@ class AccessReviewCampaignUpdate(BaseModel):
     name/description. Only reaches an ACTIVE campaign — a COMPLETED/CANCELLED one is a closed historical record."""
     name: Optional[str] = Field(default=None, min_length=1, max_length=255)
     description: Optional[str] = None
+    # Only meaningful for a reviewer-mode campaign — rejected (service-level) for a workflow-routed one, which
+    # has no single reviewer slot to reassign. workflow_definition_id itself is never editable after creation.
     reviewer_id: Optional[UUID] = None
     fallback_reviewer_id: Optional[UUID] = None
     clear_fallback_reviewer: bool = False
@@ -107,11 +122,13 @@ class AccessReviewCampaignResponse(BaseModel):
     scope_user_id: Optional[UUID]
     scope_account_type: Optional[str]
     scope_inactive_days: Optional[int] = None
-    reviewer_id: UUID
+    reviewer_id: Optional[UUID] = None
     reviewer_display_name: Optional[str] = None
     fallback_reviewer_id: Optional[UUID]
     fallback_reviewer_display_name: Optional[str] = None
     fallback_unlock_hours: Optional[int]
+    workflow_definition_id: Optional[UUID] = None
+    workflow_definition_name: Optional[str] = None
     status: str
     due_at: datetime
     on_no_response: str = "REVOKE"
@@ -156,6 +173,12 @@ class AccessReviewItemResponse(BaseModel):
     resource_display_name: Optional[str] = None
     app_role_external_id: Optional[str]
     assignment_status_at_snapshot: str
+    workflow_definition_name: Optional[str] = None
+    # Live-computed, never stored — a nudge for the reviewer from signals this app already tracks (an open SoD
+    # conflict, or the grant sitting unused 90+ days), not a model/prediction. None/None when neither signal
+    # fires — no suggestion is shown rather than a low-confidence "looks fine."
+    suggested_decision: Optional[str] = None
+    suggestion_reason: Optional[str] = None
     decision: str
     decided_by: Optional[UUID]
     decided_by_display_name: Optional[str] = None

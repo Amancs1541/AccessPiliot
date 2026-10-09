@@ -7,11 +7,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import request_id as get_request_id
 from app.db.session import get_db
-from app.schemas.departments import DepartmentCreate, DepartmentResponse
+from app.models import User
+from app.schemas.departments import DepartmentCreate, DepartmentManagerUpdate, DepartmentResponse
+from app.schemas.group_labels import GroupLabelCreate, GroupLabelResponse
 from app.schemas.policies import BirthrightEvaluationResult, BirthrightPolicyCreate, BirthrightPolicyJson, BirthrightPolicyResponse, BirthrightPolicyUpdate, BirthrightResolveActionsRequest, BirthrightResolveActionsResponse, GroupRoleMappingCreate, GroupRoleMappingEvaluationResult, GroupRoleMappingResponse, GroupRoleMappingUpdate
 from app.security.auth import AuthenticatedUser, require_permission
 from app.services import birthright as birthright_service
 from app.services import departments as departments_service
+from app.services import group_labels as group_labels_service
 from app.services import group_role_mapping as group_role_mapping_service
 
 router = APIRouter(prefix="/policies", tags=["policies"])
@@ -112,17 +115,47 @@ async def evaluate_group_role_mappings(user_id: UUID, request: Request, actor: A
     return GroupRoleMappingEvaluationResult(user_id=user_id, matched_mappings=len(created), assignments_created=created)
 
 
+async def _hydrate_department(db: AsyncSession, row) -> DepartmentResponse:
+    manager = await db.get(User, row.manager_id) if row.manager_id else None
+    return DepartmentResponse(id=row.id, name=row.name, manager_id=row.manager_id, manager_display_name=manager.display_name if manager else None, created_at=row.created_at)
+
+
 @router.get("/departments", response_model=list[DepartmentResponse])
 async def list_departments(_: AuthenticatedUser = Depends(policy_read), db: AsyncSession = Depends(get_db)):
-    """The managed department list — populates the dropdown on the User Detail page's Department field."""
-    return await departments_service.list_departments(db)
+    """The managed department list — populates the dropdown on the User Detail page's Department field, and
+    (via manager_id) the Department -> Manager mapping Joiner suggests from."""
+    return [await _hydrate_department(db, row) for row in await departments_service.list_departments(db)]
 
 
 @router.post("/departments", response_model=DepartmentResponse, status_code=201)
 async def create_department(data: DepartmentCreate, request: Request, _: AuthenticatedUser = Depends(policy_create), db: AsyncSession = Depends(get_db)):
-    return await departments_service.create_department(db, data.name, get_request_id(request))
+    row = await departments_service.create_department(db, data.name, get_request_id(request))
+    return await _hydrate_department(db, row)
+
+
+@router.patch("/departments/{department_id}/manager", response_model=DepartmentResponse)
+async def update_department_manager(department_id: UUID, data: DepartmentManagerUpdate, request: Request, _: AuthenticatedUser = Depends(policy_create), db: AsyncSession = Depends(get_db)):
+    row = await departments_service.update_department_manager(db, department_id, data.manager_id, get_request_id(request))
+    return await _hydrate_department(db, row)
 
 
 @router.delete("/departments/{department_id}", status_code=204)
 async def delete_department(department_id: UUID, request: Request, _: AuthenticatedUser = Depends(policy_delete), db: AsyncSession = Depends(get_db)):
     await departments_service.delete_department(db, department_id, get_request_id(request))
+
+
+@router.get("/group-labels", response_model=list[GroupLabelResponse])
+async def list_group_labels(_: AuthenticatedUser = Depends(policy_read), db: AsyncSession = Depends(get_db)):
+    """The managed custom Group Label list — populates the Label picker on the "Add group" form, alongside the
+    two built-in STANDARD/PRIVILEGED options."""
+    return await group_labels_service.list_group_labels(db)
+
+
+@router.post("/group-labels", response_model=GroupLabelResponse, status_code=201)
+async def create_group_label(data: GroupLabelCreate, request: Request, _: AuthenticatedUser = Depends(policy_create), db: AsyncSession = Depends(get_db)):
+    return await group_labels_service.create_group_label(db, data.name, get_request_id(request))
+
+
+@router.delete("/group-labels/{group_label_id}", status_code=204)
+async def delete_group_label(group_label_id: UUID, request: Request, _: AuthenticatedUser = Depends(policy_delete), db: AsyncSession = Depends(get_db)):
+    await group_labels_service.delete_group_label(db, group_label_id, get_request_id(request))

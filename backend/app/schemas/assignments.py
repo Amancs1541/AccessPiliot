@@ -26,6 +26,10 @@ class AssignmentCreate(BaseModel):
     approver_id: Optional[UUID] = None
     fallback_approver_id: Optional[UUID] = None
     fallback_unlock_hours: Optional[int] = Field(default=None, gt=0)
+    # Routes this assignment's approval through a multi-stage Workflow instead of a single approver — mutually
+    # exclusive with approver_id/bypass_activation (see _validate_bypass_activation below, extended to cover this
+    # too). See app.services.workflows.start_workflow_instance for what actually happens when this is set.
+    workflow_definition_id: Optional[UUID] = None
     bypass_activation: bool = False
     # Only meaningful alongside bypass_activation (the only branch of create_assignment that checks SoD) — the
     # existing mandatory `justification` field below doubles as the override's justification, no second field
@@ -47,8 +51,14 @@ class AssignmentCreate(BaseModel):
 
     @model_validator(mode="after")
     def _validate_bypass_activation(self) -> "AssignmentCreate":
-        if self.bypass_activation and (self.approver_id is not None or self.fallback_approver_id is not None):
-            raise ValueError("bypass_activation cannot be combined with an approver or fallback approver — it grants access directly, with no approval step")
+        if self.bypass_activation and (self.approver_id is not None or self.fallback_approver_id is not None or self.workflow_definition_id is not None):
+            raise ValueError("bypass_activation cannot be combined with an approver, fallback approver, or workflow — it grants access directly, with no approval step")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_workflow_exclusive(self) -> "AssignmentCreate":
+        if self.workflow_definition_id is not None and (self.approver_id is not None or self.fallback_approver_id is not None):
+            raise ValueError("workflow_definition_id cannot be combined with approver_id/fallback_approver_id — the workflow's own stages are the approval")
         return self
 
     @model_validator(mode="after")
@@ -96,6 +106,7 @@ class AssignmentResponse(BaseModel):
     created_at: datetime
     package_name: Optional[str] = None
     business_role_name: Optional[str] = None
+    workflow_definition_name: Optional[str] = None
     # Display-only: set when this ELIGIBLE/ACTIVE assignment depends on a currently-live SoD exception to stay
     # allowed — lets the frontend show the real ceiling instead of "No activation deadline" when one exists. The
     # real enforcement gate is always the live check at activation time, never this field.

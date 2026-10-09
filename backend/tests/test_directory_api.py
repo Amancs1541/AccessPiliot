@@ -10,7 +10,7 @@ from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
 from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, AccessPackageItem, Application, Group, IdentityProvider, Role, User, UserGroup
-from app.providers.base import CreatedUser, NormalizedGroup, NormalizedUser, ProviderConflictError
+from app.providers.base import NormalizedGroup, NormalizedUser, ProviderConflictError
 from app.security.auth import AuthenticatedUser, require_authenticated_user
 
 
@@ -89,41 +89,6 @@ async def test_users_and_groups_reflect_seeded_data(db_override):
 
 
 @pytest.mark.asyncio
-async def test_create_user_success_and_duplicate(db_override, monkeypatch):
-    async with db_override.factory() as session:
-        session.add(IdentityProvider(name="Entra", type="ENTRA", status="CONNECTED", tenant_id="tenant-1"))
-        await session.commit()
-
-    authenticate_as("AccessPilot.Admin")
-    calls = {"count": 0}
-
-    async def fake_create_user(self, request):
-        calls["count"] += 1
-        if calls["count"] > 1:
-            raise ProviderConflictError("A user with this email already exists in Microsoft Entra.")
-        return CreatedUser(user=NormalizedUser(external_id="new-1", email=request.user_principal_name, display_name=request.display_name), temporary_password="Temp-Pass-1!")
-
-    monkeypatch.setattr("app.providers.entra.EntraProvider.create_user", fake_create_user)
-
-    payload = {"display_name": "New User", "user_principal_name": "new.user@tenant.onmicrosoft.com"}
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        first = await client.post("/api/v1/users", json=payload)
-        second = await client.post("/api/v1/users", json=payload)
-    assert first.status_code == 201
-    assert first.json()["temporary_password"] == "Temp-Pass-1!"
-    assert second.status_code == 409
-    assert second.json()["error"]["code"] == "USER_ALREADY_EXISTS"
-
-
-@pytest.mark.asyncio
-async def test_create_user_denied_for_normal_user(db_override):
-    authenticate_as("AccessPilot.User")
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/v1/users", json={"display_name": "X", "user_principal_name": "x@y.com"})
-    assert response.status_code == 403
-
-
-@pytest.mark.asyncio
 async def test_create_group_success_and_duplicate(db_override, monkeypatch):
     async with db_override.factory() as session:
         session.add(IdentityProvider(name="Entra", type="ENTRA", status="CONNECTED", tenant_id="tenant-1"))
@@ -150,12 +115,55 @@ async def test_create_group_success_and_duplicate(db_override, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_create_user_without_provider_returns_not_found(db_override):
+async def test_post_users_no_longer_exists(db_override):
+    """Identity creation is Joiner-only now — the direct "Add user" endpoint was removed entirely (GET /users
+    still exists to list users, so POST correctly 405s rather than 404ing)."""
     authenticate_as("AccessPilot.Admin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/api/v1/users", json={"display_name": "X", "user_principal_name": "x@y.com"})
-    assert response.status_code == 404
-    assert response.json()["error"]["code"] == "PROVIDER_NOT_FOUND"
+    assert response.status_code == 405
+
+
+@pytest.mark.asyncio
+async def test_a_new_group_can_be_created_with_a_label(db_override, monkeypatch):
+    async with db_override.factory() as session:
+        session.add(IdentityProvider(name="Entra", type="ENTRA", status="CONNECTED", tenant_id="tenant-1"))
+        await session.commit()
+
+    authenticate_as("AccessPilot.Admin")
+
+    async def fake_create_group(self, request):
+        return NormalizedGroup(external_id="new-group-2", name=request.display_name, description=request.description)
+
+    monkeypatch.setattr("app.providers.entra.EntraProvider.create_group", fake_create_group)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/groups", json={"display_name": "Finance-Sensitive Group", "group_label": "PRIVILEGED"})
+    assert response.status_code == 201
+    assert response.json()["group_label"] == "PRIVILEGED"
+
+
+@pytest.mark.asyncio
+async def test_group_label_survives_a_resync(db_override, monkeypatch):
+    """Directory sync's upsert_group() must never reset a group's local-only label — mirrors the same guarantee
+    resource_code/naming_convention already have."""
+    from app.services.directory_sync import upsert_group
+
+    async with db_override.factory() as session:
+        provider = IdentityProvider(name="Entra", type="ENTRA", status="CONNECTED", tenant_id="tenant-1")
+        session.add(provider)
+        await session.flush()
+        group = Group(provider_id=provider.id, external_id="g1", name="Finance Group", status="ACTIVE", is_privileged=False, group_label="STANDARD")
+        session.add(group)
+        await session.commit()
+        provider_id, group_id = provider.id, group.id
+
+    async with db_override.factory() as session:
+        await upsert_group(session, provider_id, NormalizedGroup(external_id="g1", name="Finance Group (renamed)", description="updated"))
+        await session.commit()
+        refreshed = await session.get(Group, group_id)
+    assert refreshed.name == "Finance Group (renamed)"
+    assert refreshed.group_label == "STANDARD"
 
 
 @pytest.mark.asyncio

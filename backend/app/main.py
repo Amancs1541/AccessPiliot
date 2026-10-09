@@ -21,6 +21,7 @@ from app.workers.activation import activation_worker_loop
 from app.workers.expiration import expiration_worker_loop
 from app.workers.scheduler import sync_scheduler_loop
 from app.workers.sod_expiry import sod_exception_expiry_worker_loop
+from app.workers.workflow_escalation import workflow_escalation_worker_loop
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -114,6 +115,7 @@ async def lifespan(_: FastAPI):
             "Scheduled activation worker": activation_worker_loop(AsyncSessionLocal),
             "SoD exception expiry worker": sod_exception_expiry_worker_loop(AsyncSessionLocal),
             "Access review worker": access_review_worker_loop(AsyncSessionLocal),
+            "Workflow escalation worker": workflow_escalation_worker_loop(AsyncSessionLocal),
         }
         for name, coroutine in workers.items():
             task = asyncio.create_task(coroutine)

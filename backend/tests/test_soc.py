@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
-from app.models import AccessAssignment, AuditLog, Group, IdentityProvider, SocDashboardLayout, SodException, SodPolicy, SodPolicyEntity, User
+from app.models import AccessAssignment, AccessReviewCampaign, AuditLog, Group, IdentityProvider, SocDashboardLayout, SodException, SodPolicy, SodPolicyEntity, User
 from app.security.auth import AuthenticatedUser, require_authenticated_user
 
 
@@ -70,18 +70,18 @@ async def test_fields_lists_every_source_and_builtin_widget(db_override):
     assert source_names == {"audit_logs", "assignments"}
     assignments_fields = next(s["fields"] for s in body["sources"] if s["source"] == "assignments")
     assert {"status", "resource_type", "assignment_type"} <= {f["field"] for f in assignments_fields}
-    assert len(body["builtin_widgets"]) == 7
+    assert len(body["builtin_widgets"]) == 10
 
 
 @pytest.mark.asyncio
-async def test_a_never_customized_layout_returns_the_seven_default_builtin_widgets(db_override):
+async def test_a_never_customized_layout_returns_the_ten_default_builtin_widgets(db_override):
     await _seed_directory(db_override.factory)
     authenticate_as("AccessPilot.SoCAdmin")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/soc/layout")
     assert response.status_code == 200
     widgets = response.json()["widgets"]
-    assert len(widgets) == 7
+    assert len(widgets) == 10
     assert all(w["source"] == "builtin" and w["visible"] for w in widgets)
 
 
@@ -100,7 +100,7 @@ async def test_a_layout_saved_under_the_old_pre_builder_shape_falls_back_to_the_
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/soc/layout")
     assert response.status_code == 200
-    assert len(response.json()["widgets"]) == 7
+    assert len(response.json()["widgets"]) == 10
 
 
 @pytest.mark.asyncio
@@ -175,6 +175,69 @@ async def test_dormant_access_counts_only_long_active_assignments(db_override):
     assert len(rows) == 1
     assert rows[0]["resource_type"] == "GROUP"
     assert rows[0]["activated_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_identity_risk_posture_sums_dormant_access_and_overdue_reviews(db_override):
+    """A deliberately honest rolled-up count (never a fabricated score) of every open risk signal this app
+    already tracks elsewhere as its own widget: open SoD violations, dormant access, access outliers, and
+    still-ACTIVE campaigns past their due date."""
+    from datetime import timedelta
+    ids = await _seed_directory(db_override.factory)
+    now = datetime.now(timezone.utc)
+    async with db_override.factory() as session:
+        session.add(AccessAssignment(provider_id=ids["provider_id"], user_id=ids["target_user_id"], resource_type="GROUP", resource_id=ids["target_user_id"], assignment_type="PERMANENT", status="ACTIVE", activated_at=now - timedelta(days=120)))
+        session.add(AccessReviewCampaign(name="Overdue Campaign", scope_type="ALL", reviewer_id=ids["soc_user_id"], status="ACTIVE", due_at=now - timedelta(days=1)))
+        session.add(AccessReviewCampaign(name="On-time Campaign", scope_type="ALL", reviewer_id=ids["soc_user_id"], status="ACTIVE", due_at=now + timedelta(days=5)))
+        session.add(AccessReviewCampaign(name="Completed Campaign", scope_type="ALL", reviewer_id=ids["soc_user_id"], status="COMPLETED", due_at=now - timedelta(days=10)))
+        await session.commit()
+
+    authenticate_as("AccessPilot.SoCAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        widget = {"id": "w1", "title": "Identity Risk Posture", "kind": "card", "source": "builtin", "builtin_id": "identity_risk_posture", "order": 0}
+        data = await client.post("/api/v1/soc/widget-data", json={"widgets": [widget]})
+        assert data.json()["results"]["w1"]["value"] == 2  # 1 dormant + 1 overdue review, 0 SoD violations, 0 outliers
+
+        drilldown = await client.post("/api/v1/soc/widget-drilldown", json={"widget": widget})
+    rows = drilldown.json()["rows"]
+    by_category = {r["category"]: r["count"] for r in rows}
+    assert by_category["Dormant access (90+ days)"] == 1
+    assert by_category["Overdue Access Reviews"] == 1
+    assert by_category["Open SoD violations"] == 0
+    assert by_category["Access outliers"] == 0
+
+
+@pytest.mark.asyncio
+async def test_access_outliers_flags_a_rare_department_holder_but_not_a_common_one(db_override):
+    """Peer-group outlier detection: Finance (10 real ACTIVE/NORMAL people) has exactly 1 holder of 'Rare Group' —
+    10% prevalence, at the threshold, so it's flagged. The same Finance group is 100% prevalent for 'Common Group'
+    (everyone holds it) — never flagged. A department with too few real people (under OUTLIER_MIN_DEPARTMENT_SIZE)
+    is skipped entirely even if one person there holds something nobody else does."""
+    ids = await _seed_directory(db_override.factory)
+    async with db_override.factory() as session:
+        finance_users = [User(provider_id=ids["provider_id"], external_id=f"fin-{i}", email=f"fin{i}@x.com", display_name=f"Finance {i}", status="ACTIVE", department="Finance") for i in range(10)]
+        tiny_dept_user = User(provider_id=ids["provider_id"], external_id="tiny-1", email="tiny1@x.com", display_name="Tiny Dept Person", status="ACTIVE", department="Tiny Team")
+        session.add_all(finance_users + [tiny_dept_user])
+        await session.flush()
+        # Common Group: every Finance person holds it (100% prevalence — never an outlier).
+        for u in finance_users:
+            session.add(AccessAssignment(provider_id=ids["provider_id"], user_id=u.id, resource_type="GROUP", resource_id=ids["target_user_id"], assignment_type="PERMANENT", status="ACTIVE"))
+        # Rare Group: only the first Finance person holds it (1/10 = 10% prevalence — at the flag threshold).
+        session.add(AccessAssignment(provider_id=ids["provider_id"], user_id=finance_users[0].id, resource_type="ROLE", resource_id=ids["target_user_id"], assignment_type="PERMANENT", status="ACTIVE"))
+        # Tiny Team has only 1 real person — skipped entirely regardless of how rare their access looks.
+        session.add(AccessAssignment(provider_id=ids["provider_id"], user_id=tiny_dept_user.id, resource_type="APPLICATION", resource_id=ids["target_user_id"], assignment_type="PERMANENT", status="ACTIVE"))
+        await session.commit()
+
+    authenticate_as("AccessPilot.SoCAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        widget = {"id": "w1", "title": "Access outliers", "kind": "card", "source": "builtin", "builtin_id": "access_outliers", "order": 0}
+        data = await client.post("/api/v1/soc/widget-data", json={"widgets": [widget]})
+        assert data.json()["results"]["w1"]["value"] == 1
+
+        drilldown = await client.post("/api/v1/soc/widget-drilldown", json={"widget": widget})
+    rows = drilldown.json()["rows"]
+    assert len(rows) == 1
+    assert rows[0]["resource_type"] == "ROLE" and rows[0]["department"] == "Finance" and rows[0]["department_prevalence_pct"] == 10.0
 
 
 @pytest.mark.asyncio
@@ -399,3 +462,33 @@ async def test_clicking_a_bar_or_list_widget_without_a_group_value_is_rejected(d
         widget = {"id": "w1", "title": "Revokes by resource type", "kind": "bar", "source": "assignments", "group_by": "resource_type", "order": 0}
         response = await client.post("/api/v1/soc/widget-drilldown", json={"widget": widget})
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_unclassified_entitlements_counts_only_untouched_catalog_entries(db_override):
+    """A catalog entry still sitting at its auto-created default (LOW, no description, no owner) is unclassified;
+    one an admin has set a description, risk tier, or owner on is not — regardless of what the risk tier ends up
+    being set to."""
+    ids = await _seed_directory(db_override.factory)
+    async with db_override.factory() as session:
+        untouched_group = Group(provider_id=ids["provider_id"], external_id="g-untouched", name="Untouched Group", status="ACTIVE", is_privileged=False)
+        classified_group = Group(provider_id=ids["provider_id"], external_id="g-classified", name="Classified Group", status="ACTIVE", is_privileged=False)
+        session.add_all([untouched_group, classified_group])
+        await session.commit()
+        classified_group_id = classified_group.id
+
+    authenticate_as("AccessPilot.Admin", subject="admin-oid")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        catalog = (await client.get("/api/v1/entitlement-catalog")).json()
+        classified_entry = next(e for e in catalog if e["resource_id"] == str(classified_group_id))
+        await client.patch(f"/api/v1/entitlement-catalog/{classified_entry['id']}", json={"description": "Grants something specific."})
+
+        authenticate_as("AccessPilot.SoCAdmin")
+        widget = {"id": "w1", "title": "Unclassified entitlements", "kind": "card", "source": "builtin", "builtin_id": "unclassified_entitlements", "order": 0}
+        data = await client.post("/api/v1/soc/widget-data", json={"widgets": [widget]})
+        assert data.json()["results"]["w1"]["value"] == 1
+
+        drilldown = await client.post("/api/v1/soc/widget-drilldown", json={"widget": widget})
+    rows = drilldown.json()["rows"]
+    assert len(rows) == 1
+    assert rows[0]["resource_display_name"] == "Untouched Group"

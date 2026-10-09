@@ -56,6 +56,16 @@ class SodPolicyUpdate(SodPolicyCreate):
     status: str = Field(default="ACTIVE", pattern="^(ACTIVE|DISABLED)$")
 
 
+class SodRuleTemplateResponse(BaseModel):
+    id: str
+    name: str
+    description: str
+    category: str
+    side_a_label: str
+    side_b_label: str
+    default_severity: str
+
+
 class SodPolicyEntityResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: UUID

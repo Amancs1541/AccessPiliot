@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import AccessPilotError
 from app.db.session import get_db
 from app.schemas.audit import AuditLogResponse
-from app.schemas.sod import SodCheckRequest, SodCheckResponse, SodExceptionCreate, SodExceptionRequestCreate, SodExceptionRequestDeny, SodExceptionRequestGrant, SodExceptionRequestResponse, SodExceptionResponse, SodNotificationResponse, SodNotificationSettingsResponse, SodNotificationSettingsUpdateRequest, SodPolicyCreate, SodPolicyResponse, SodPolicyUpdate, SodViolation
+from app.schemas.sod import SodCheckRequest, SodCheckResponse, SodExceptionCreate, SodExceptionRequestCreate, SodExceptionRequestDeny, SodExceptionRequestGrant, SodExceptionRequestResponse, SodExceptionResponse, SodNotificationResponse, SodNotificationSettingsResponse, SodNotificationSettingsUpdateRequest, SodPolicyCreate, SodPolicyResponse, SodPolicyUpdate, SodRuleTemplateResponse, SodViolation
 from app.security.auth import AuthenticatedUser, require_authenticated_user, require_permission
 from app.services import sod as sod_service
 from app.services.assignments import _resolve_internal_user_id
@@ -23,6 +23,14 @@ assignment_manage = require_permission("ASSIGNMENT_CREATE")
 @router.get("/policies", response_model=list[SodPolicyResponse])
 async def list_policies(_: AuthenticatedUser = Depends(sod_read), db: AsyncSession = Depends(get_db)):
     return [await sod_service.to_policy_response(db, policy) for policy in await sod_service.list_sod_policies(db)]
+
+
+@router.get("/rule-templates", response_model=list[SodRuleTemplateResponse])
+async def list_rule_templates(_: AuthenticatedUser = Depends(sod_read)):
+    """A curated starter library of recognizable SoD conflict shapes — static content, not real policies. The
+    frontend's "use this template" flow pre-fills a new policy's name/description/severity from one of these and
+    still walks the admin through picking real Groups/Roles/Applications for each side before it's ever saved."""
+    return sod_service.list_sod_rule_templates()
 
 
 @router.post("/policies", response_model=SodPolicyResponse, status_code=201)

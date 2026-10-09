@@ -800,3 +800,128 @@ async def test_keep_on_no_response_auto_approves_instead_of_revoking(db_override
         item = (await session.execute(select(AccessReviewItem).where(AccessReviewItem.campaign_id == UUID(created.json()["id"])))).scalars().one()
     assert assignment.status != "REVOKED" and item.decision == "APPROVED"
     assert bad.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_no_suggestion_for_a_fresh_compliant_item(db_override):
+    seeded = await _seed(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/access-reviews", json={
+            "name": "Fresh Item Test", "scope_type": "SPECIFIC_RESOURCE", "scope_resource_type": "GROUP", "scope_resource_id": str(seeded["group_id"]),
+            "reviewer_id": str(seeded["reviewer_id"]), "due_at": future(24),
+        })
+        items = await client.get(f"/api/v1/access-reviews/{created.json()['id']}/items")
+    assert items.json()[0]["suggested_decision"] is None and items.json()[0]["suggestion_reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_suggests_revoke_for_dormant_access(db_override):
+    seeded = await _seed(db_override.factory)
+    async with db_override.factory() as session:
+        assignment = await session.get(AccessAssignment, seeded["assignment_id"])
+        assignment.activated_at = datetime.now(timezone.utc) - timedelta(days=120)
+        await session.commit()
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/access-reviews", json={
+            "name": "Dormant Item Test", "scope_type": "SPECIFIC_RESOURCE", "scope_resource_type": "GROUP", "scope_resource_id": str(seeded["group_id"]),
+            "reviewer_id": str(seeded["reviewer_id"]), "due_at": future(24),
+        })
+        items = await client.get(f"/api/v1/access-reviews/{created.json()['id']}/items")
+    assert items.json()[0]["suggested_decision"] == "REVOKED"
+    assert "90" in items.json()[0]["suggestion_reason"]
+
+
+@pytest.mark.asyncio
+async def test_suggests_revoke_for_an_open_sod_conflict(db_override):
+    from app.models import SodPolicy, SodPolicyEntity
+    seeded = await _seed(db_override.factory)
+    async with db_override.factory() as session:
+        provider_id, member_id = seeded["provider_id"], seeded["member_id"]
+        other_group = Group(provider_id=provider_id, external_id="g2", name="Vendor Mgmt", status="ACTIVE", is_privileged=False)
+        session.add(other_group)
+        await session.flush()
+        conflicting = AccessAssignment(provider_id=provider_id, user_id=member_id, resource_type="GROUP", resource_id=other_group.id, assignment_type="PERMANENT", status="ACTIVE", justification="Other side of the conflict.")
+        session.add(conflicting)
+        policy = SodPolicy(name="Finance vs Vendor Mgmt", status="ACTIVE")
+        session.add(policy)
+        await session.flush()
+        session.add_all([
+            SodPolicyEntity(sod_policy_id=policy.id, conflict_side="A", entity_type="GROUP", entity_id=seeded["group_id"]),
+            SodPolicyEntity(sod_policy_id=policy.id, conflict_side="B", entity_type="GROUP", entity_id=other_group.id),
+        ])
+        await session.commit()
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/access-reviews", json={
+            "name": "SoD Item Test", "scope_type": "SPECIFIC_RESOURCE", "scope_resource_type": "GROUP", "scope_resource_id": str(seeded["group_id"]),
+            "reviewer_id": str(seeded["reviewer_id"]), "due_at": future(24),
+        })
+        items = await client.get(f"/api/v1/access-reviews/{created.json()['id']}/items")
+    assert items.json()[0]["suggested_decision"] == "REVOKED"
+    assert "Finance vs Vendor Mgmt" in items.json()[0]["suggestion_reason"]
+
+
+@pytest.mark.asyncio
+async def test_campaign_report_pdf_is_a_real_pdf_covering_the_decided_item(db_override):
+    seeded = await _seed(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/access-reviews", json={
+            "name": "Report Test Campaign", "scope_type": "SPECIFIC_RESOURCE", "scope_resource_type": "GROUP", "scope_resource_id": str(seeded["group_id"]),
+            "reviewer_id": str(seeded["reviewer_id"]), "due_at": future(24),
+        })
+        campaign_id = created.json()["id"]
+        item_id = (await client.get(f"/api/v1/access-reviews/{campaign_id}/items")).json()[0]["id"]
+        authenticate_as("AccessPilot.Admin", subject="reviewer-oid")
+        await client.post(f"/api/v1/access-reviews/items/{item_id}/decide", json={"decision": "APPROVED", "justification": "Still needed."})
+
+        report = await client.get(f"/api/v1/access-reviews/{campaign_id}/report.pdf")
+    assert report.status_code == 200
+    assert report.headers["content-type"] == "application/pdf"
+    assert "attachment" in report.headers["content-disposition"]
+    assert report.content[:4] == b"%PDF"  # a real PDF, not an error page
+    assert len(report.content) > 500
+
+
+@pytest.mark.asyncio
+async def test_campaign_export_csv_lists_the_decided_item(db_override):
+    seeded = await _seed(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/access-reviews", json={
+            "name": "CSV Test Campaign", "scope_type": "SPECIFIC_RESOURCE", "scope_resource_type": "GROUP", "scope_resource_id": str(seeded["group_id"]),
+            "reviewer_id": str(seeded["reviewer_id"]), "due_at": future(24),
+        })
+        campaign_id = created.json()["id"]
+        item_id = (await client.get(f"/api/v1/access-reviews/{campaign_id}/items")).json()[0]["id"]
+        authenticate_as("AccessPilot.Admin", subject="reviewer-oid")
+        await client.post(f"/api/v1/access-reviews/items/{item_id}/decide", json={"decision": "APPROVED", "justification": "Still needed."})
+
+        export = await client.get(f"/api/v1/access-reviews/{campaign_id}/export.csv")
+    assert export.status_code == 200
+    assert export.headers["content-type"].startswith("text/csv")
+    body = export.text
+    assert "Existing Member" in body
+    assert "APPROVED" in body
+    assert "Still needed." in body
+    header = body.splitlines()[0]
+    assert header == "User,Email,Resource Type,Resource,Granted Via,Decision,Decided By,Decided At,Justification"
+
+
+@pytest.mark.asyncio
+async def test_a_plain_user_cannot_export_or_report_on_a_campaign(db_override):
+    seeded = await _seed(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/access-reviews", json={
+            "name": "Gated Campaign", "scope_type": "SPECIFIC_RESOURCE", "scope_resource_type": "GROUP", "scope_resource_id": str(seeded["group_id"]),
+            "reviewer_id": str(seeded["reviewer_id"]), "due_at": future(24),
+        })
+        campaign_id = created.json()["id"]
+        authenticate_as("AccessPilot.User", subject="some-other-user")
+        report = await client.get(f"/api/v1/access-reviews/{campaign_id}/report.pdf")
+        export = await client.get(f"/api/v1/access-reviews/{campaign_id}/export.csv")
+    assert report.status_code == 403
+    assert export.status_code == 403

@@ -91,6 +91,10 @@ class Group(Base):
     # pattern it's supposed to follow. Directory sync's upsert_group() never writes either field, so a value here
     # survives every re-sync untouched with no extra override-flag needed.
     resource_code: Mapped[Optional[str]] = mapped_column(String(100), unique=True); naming_convention: Mapped[Optional[str]] = mapped_column(String(255))
+    # Admin-picked at creation time only (STANDARD/PRIVILEGED built-in, or a custom name from GroupLabel) — same
+    # "directory sync never writes this" guarantee as resource_code/naming_convention above, confirmed by
+    # upsert_group() only ever assigning name/description/is_privileged/status/last_synced_at.
+    group_label: Mapped[Optional[str]] = mapped_column(String(100))
     created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at(); last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     __table_args__ = (UniqueConstraint("provider_id", "external_id", name="uq_groups_provider_external"), Index("ix_groups_provider_external", "provider_id", "external_id"))
 
@@ -179,6 +183,10 @@ class AccessAssignment(Base):
     # AccessPackageAssignment.package_assignment_id, but kept as a column here instead of a second join table.
     business_role_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("business_roles.id"))
     role_assignment_id: Mapped[Optional[UUID]] = mapped_column(Uuid)
+    # Same provenance-tag idea again: set only when this assignment's approval was routed through the Workflow
+    # Engine (see app.services.workflows) instead of a single approver/fallback — approved_by/fallback_approver_id
+    # stay NULL in that case, since there is no single approver, the workflow's own stages are the approval.
+    workflow_instance_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("workflow_instances.id"))
     activated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at(); __table_args__ = (Index("ix_access_assignments_user", "user_id"), Index("ix_access_assignments_status", "status"), Index("ix_access_assignments_expiration", "expiration_time"), Index("ix_access_assignments_role_assignment", "role_assignment_id"))
 
 
@@ -224,7 +232,12 @@ class ProviderResource(Base):
 
 class AccessPackage(Base):
     __tablename__ = "access_packages"
-    id: Mapped[UUID] = uuid_pk(); name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True); description: Mapped[Optional[str]] = mapped_column(Text); status: Mapped[str] = mapped_column(String(50), nullable=False); default_approver_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); default_fallback_approver_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); fallback_unlock_hours: Mapped[Optional[int]] = mapped_column(Integer); created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at()
+    id: Mapped[UUID] = uuid_pk(); name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True); description: Mapped[Optional[str]] = mapped_column(Text); status: Mapped[str] = mapped_column(String(50), nullable=False); default_approver_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); default_fallback_approver_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); fallback_unlock_hours: Mapped[Optional[int]] = mapped_column(Integer)
+    # The default approval method for a self-service request (POST /packages/{id}/request) — mutually exclusive
+    # with default_approver_id/default_fallback_approver_id (see PackageCreate/PackageEligibilityUpdate's
+    # validator). An admin's own direct /assign call is unaffected: it picks its own approver/workflow per call.
+    workflow_definition_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("workflow_definitions.id"))
+    created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at()
 
 
 class LifecycleEvent(Base):
@@ -350,6 +363,23 @@ class LeaverRequest(Base):
     decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); outcome: Mapped[Optional[str]] = mapped_column(String(500))
     created_at: Mapped[datetime] = created_at()
     __table_args__ = (Index("ix_leaver_requests_user_status", "user_id", "status"),)
+
+
+class UserAttributeChangeRequest(Base):
+    """A department/job_title edit submitted on the User Detail page with a Workflow attached, instead of applying
+    instantly. Nothing about the real IdP record or the local User row changes until the workflow instance
+    resolves — see services.identity_attributes.apply_user_attribute_change (the same real-write + mover
+    reconciliation sequence the instant edit path already ran, just deferred until approval) and
+    services.workflows's USER_ATTRIBUTES completion branch. status: PENDING -> APPLIED | REJECTED."""
+    __tablename__ = "user_attribute_change_requests"
+    id: Mapped[UUID] = uuid_pk(); user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    previous_department: Mapped[Optional[str]] = mapped_column(String(200)); previous_job_title: Mapped[Optional[str]] = mapped_column(String(200))
+    requested_department: Mapped[Optional[str]] = mapped_column(String(200)); requested_job_title: Mapped[Optional[str]] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING", server_default="PENDING")
+    workflow_instance_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("workflow_instances.id"))
+    created_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); created_at: Mapped[datetime] = created_at()
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (Index("ix_user_attribute_change_requests_user_status", "user_id", "status"),)
 
 
 class IdentityAccount(Base):
@@ -655,6 +685,19 @@ class Department(Base):
     (e.g. one set before this list existed, or synced from Entra)."""
     __tablename__ = "departments"
     id: Mapped[UUID] = uuid_pk(); name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    # The one manager responsible for this department — a Joiner submission suggests this manager the moment the
+    # department is picked (admin can still override). Nullable: a department need not have one set yet.
+    manager_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = created_at()
+
+
+class GroupLabel(Base):
+    """A small, Admin-managed lookup list of custom Group classification names — same "picker convenience,
+    never blocks an out-of-list value" shape as Department (see app.services.group_labels). Sits alongside the
+    two built-in classifications (Standard/Privileged) a Group's own group_label column can also hold — this
+    table only ever supplies the admin-defined CUSTOM options."""
+    __tablename__ = "group_labels"
+    id: Mapped[UUID] = uuid_pk(); name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
     created_at: Mapped[datetime] = created_at()
 
 
@@ -837,8 +880,12 @@ class AccessReviewCampaign(Base):
     # (see app.services.access_reviews._resolve_inactive_user_ids); every other scope type leaves it NULL.
     scope_inactive_days: Mapped[Optional[int]] = mapped_column(Integer)
     scope_user_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); scope_account_type: Mapped[Optional[str]] = mapped_column(String(20))
-    reviewer_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    # Exactly one of reviewer_id / workflow_definition_id is set (see AccessReviewCampaignCreate's validator) — a
+    # campaign always needs something deciding it. When workflow-routed, fallback_reviewer_id/fallback_unlock_hours
+    # stay NULL (the workflow has its own per-stage fallback/escalation instead).
+    reviewer_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
     fallback_reviewer_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); fallback_unlock_hours: Mapped[Optional[int]] = mapped_column(Integer)
+    workflow_definition_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("workflow_definitions.id"))
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVE", server_default="ACTIVE")
     due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     # frequency_days: NULL means one-time. Set means "recurring" — when this campaign completes (manually, via
@@ -879,5 +926,120 @@ class AccessReviewItem(Base):
     decision: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING", server_default="PENDING")
     decided_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     justification: Mapped[Optional[str]] = mapped_column(Text)
+    # Set only when the owning campaign is workflow-routed — this item's own independent WorkflowInstance (one per
+    # item, not one shared per campaign), so each reviewed grant gets its own stage-by-stage decision.
+    workflow_instance_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("workflow_instances.id"))
     created_at: Mapped[datetime] = created_at()
     __table_args__ = (Index("ix_access_review_items_campaign", "campaign_id"), Index("ix_access_review_items_decision", "decision"))
+
+
+class WorkflowDefinition(Base):
+    """A named, admin-authored multi-stage approval workflow — see app.services.workflows for the full engine.
+    Deliberately standalone: nothing existing is wired to this (see WorkflowRequest, the one new 'thing a user
+    submits' that exercises it). status ACTIVE is required before a request can be submitted against it."""
+    __tablename__ = "workflow_definitions"
+    id: Mapped[UUID] = uuid_pk(); name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True); description: Mapped[Optional[str]] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="DRAFT", server_default="DRAFT")
+    created_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at()
+
+
+class WorkflowStageDefinition(Base):
+    """One ordered stage of a WorkflowDefinition. approver_user_ids/fallback_approver_ids are JSON arrays of UUID
+    strings — the same 'explicit array of equally-authorized deciders' shape LeaverRequest.approver_ids already
+    uses. condition_field/operator/value mirror BirthrightPolicy's condition shape exactly (field, EQUALS/
+    NOT_EQUALS, value) — a stage with no condition always activates; one with a condition only activates if the
+    owning WorkflowInstance's payload matches it, otherwise it's skipped (see services.workflows)."""
+    __tablename__ = "workflow_stage_definitions"
+    id: Mapped[UUID] = uuid_pk(); workflow_definition_id: Mapped[UUID] = mapped_column(ForeignKey("workflow_definitions.id"), nullable=False)
+    stage_number: Mapped[int] = mapped_column(Integer, nullable=False); name: Mapped[str] = mapped_column(String(255), nullable=False)
+    approval_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="ANY_OF", server_default="ANY_OF")
+    approver_user_ids: Mapped[list] = mapped_column(JSON, nullable=False)
+    fallback_approver_ids: Mapped[Optional[list]] = mapped_column(JSON)
+    escalate_after_hours: Mapped[Optional[int]] = mapped_column(Integer)
+    condition_field: Mapped[Optional[str]] = mapped_column(String(50)); condition_operator: Mapped[Optional[str]] = mapped_column(String(20)); condition_value: Mapped[Optional[str]] = mapped_column(String(255))
+    created_at: Mapped[datetime] = created_at()
+    __table_args__ = (Index("ix_workflow_stage_definitions_definition", "workflow_definition_id"), UniqueConstraint("workflow_definition_id", "stage_number", name="uq_workflow_stage_definitions_number"))
+
+
+class WorkflowInstance(Base):
+    """One running/completed workflow. subject_type/subject_id exist so a future feature could attach its own
+    instance without a schema change; everything built in this pass sets subject_type='WORKFLOW_REQUEST' and
+    subject_id = that WorkflowRequest's own id. payload is the arbitrary data a stage's condition evaluates
+    against. current_stage_number is the stage currently awaiting a decision (or the last one reached, once
+    completed) — stages are created lazily, see WorkflowStageInstance and services.workflows."""
+    __tablename__ = "workflow_instances"
+    id: Mapped[UUID] = uuid_pk(); workflow_definition_id: Mapped[UUID] = mapped_column(ForeignKey("workflow_definitions.id"), nullable=False)
+    subject_type: Mapped[str] = mapped_column(String(50), nullable=False); subject_id: Mapped[Optional[UUID]] = mapped_column(Uuid)
+    requested_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    payload: Mapped[Optional[dict]] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING", server_default="PENDING")
+    current_stage_number: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    started_at: Mapped[datetime] = created_at(); completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (Index("ix_workflow_instances_definition", "workflow_definition_id"), Index("ix_workflow_instances_status", "status"))
+
+
+class WorkflowStageInstance(Base):
+    """One per stage an instance actually reaches — created lazily (never all-upfront), so a stage never reached
+    (the instance was rejected/cancelled before it, or a later stage was skipped) simply has no row; that absence
+    IS the record, not a status value. name/approval_mode/required_approver_ids are snapshots taken at the moment
+    this stage was entered, so a later edit to the owning WorkflowDefinition never rewrites in-flight or historical
+    instances. escalates_at is the configured threshold; escalated_at is set once (and only once) the escalation
+    sweep actually acts on it — see app.workers.workflow_escalation."""
+    __tablename__ = "workflow_stage_instances"
+    id: Mapped[UUID] = uuid_pk(); workflow_instance_id: Mapped[UUID] = mapped_column(ForeignKey("workflow_instances.id"), nullable=False)
+    stage_number: Mapped[int] = mapped_column(Integer, nullable=False); name: Mapped[str] = mapped_column(String(255), nullable=False)
+    approval_mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    required_approver_ids: Mapped[list] = mapped_column(JSON, nullable=False)
+    fallback_approver_ids: Mapped[Optional[list]] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING", server_default="PENDING")
+    escalates_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); escalated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = created_at(); completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (Index("ix_workflow_stage_instances_instance", "workflow_instance_id"), Index("ix_workflow_stage_instances_status", "status"), Index("ix_workflow_stage_instances_escalation", "status", "escalates_at", "escalated_at"))
+
+
+class WorkflowStageDecision(Base):
+    """One row per individual approver's vote on a WorkflowStageInstance — needed so ALL_OF can require every
+    named approver and still show who voted which way. A unique constraint on (stage, decided_by) enforces one
+    decision per user per stage at the DB level; services.workflows separately enforces that once the stage
+    itself is no longer PENDING, no further decisions are accepted from anyone — there is no retraction/re-voting."""
+    __tablename__ = "workflow_stage_decisions"
+    id: Mapped[UUID] = uuid_pk(); workflow_stage_instance_id: Mapped[UUID] = mapped_column(ForeignKey("workflow_stage_instances.id"), nullable=False)
+    decided_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    decision: Mapped[str] = mapped_column(String(20), nullable=False); justification: Mapped[Optional[str]] = mapped_column(Text)
+    decided_at: Mapped[datetime] = created_at()
+    __table_args__ = (Index("ix_workflow_stage_decisions_stage", "workflow_stage_instance_id"), UniqueConstraint("workflow_stage_instance_id", "decided_by", name="uq_workflow_stage_decisions_once"))
+
+
+class WorkflowRequest(Base):
+    """The standalone 'thing a user submits' that exercises the workflow engine end to end — kept as its own
+    table (not folded into WorkflowInstance) so the engine's core tables stay generic and reusable while this one
+    stays obviously specific to this pilot entry point. 1:1 with the WorkflowInstance it drives."""
+    __tablename__ = "workflow_requests"
+    id: Mapped[UUID] = uuid_pk(); workflow_definition_id: Mapped[UUID] = mapped_column(ForeignKey("workflow_definitions.id"), nullable=False)
+    workflow_instance_id: Mapped[UUID] = mapped_column(ForeignKey("workflow_instances.id"), nullable=False, unique=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False); description: Mapped[Optional[str]] = mapped_column(Text); justification: Mapped[Optional[str]] = mapped_column(Text)
+    requested_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = created_at()
+    __table_args__ = (Index("ix_workflow_requests_requested_by", "requested_by"),)
+
+
+class EntitlementCatalogEntry(Base):
+    """A plain-English description, risk tier, and accountable owner for one real entitlement — a whole Group/
+    Role, or one specific AppRole on an Application — independent of whether it's bundled into a Package or
+    Business Role yet (see app.services.entitlement_catalog). Sits ALONGSIDE the existing per-resource-type owner
+    tables (GroupOwner/ApplicationOwner/BusinessRoleOwner/AccessPackageOwner): those answer "who's accountable for
+    this container," this answers "what does this specific entitlement mean and how risky is it." A dedicated
+    table (not columns bolted onto Group/Role) because an Application's AppRoles only exist as JSON on
+    Application.app_roles with no row of their own to extend — this is the only way to address one individually.
+    app_role_external_id is a non-nullable empty string (not NULL) when the entry describes a whole Group/Role/
+    Application rather than one specific AppRole, so the unique constraint below actually enforces one entry per
+    real entitlement — Postgres treats NULL <> NULL in a unique constraint, which would otherwise silently allow
+    duplicate rows for the same Group/Role."""
+    __tablename__ = "entitlement_catalog_entries"
+    id: Mapped[UUID] = uuid_pk(); resource_type: Mapped[str] = mapped_column(String(50), nullable=False); resource_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    app_role_external_id: Mapped[str] = mapped_column(String(100), nullable=False, default="", server_default="")
+    description: Mapped[Optional[str]] = mapped_column(Text); risk_tier: Mapped[str] = mapped_column(String(20), nullable=False, default="LOW", server_default="LOW")
+    owner_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at()
+    __table_args__ = (UniqueConstraint("resource_type", "resource_id", "app_role_external_id", name="uq_entitlement_catalog_resource"),)

@@ -16,6 +16,7 @@ from app.schemas.assignments import AssignmentCreate
 from app.schemas.business_roles import BusinessRoleAnalytics, BusinessRoleAssignCreate, BusinessRoleAssignItemResult, BusinessRoleAssignResponse, BusinessRoleCreate, BusinessRoleHolder, BusinessRoleItemResponse, BusinessRoleOwnerInfo, BusinessRoleResponse, BusinessRoleTally, BusinessRoleUpdate, ResourceReferenceUpdate, RoleAssignmentBatch
 from app.services.assignments import _app_role_name, _resolve_internal_user_id, _resolve_target, create_assignment, hydrate_display_fields, to_response
 from app.services.audit import record_audit
+from app.services.entitlement_catalog import require_workflow_for_high_risk_items
 
 _RESOURCE_MODELS = {"GROUP": Group, "ROLE": Role, "APPLICATION": Application}
 
@@ -320,6 +321,7 @@ async def assign_business_role(session: AsyncSession, role_id: UUID, data: Busin
     items = list((await session.scalars(select(BusinessRoleItem).where(BusinessRoleItem.role_id == role_id))).all())
     if not items:
         raise AccessPilotError("BUSINESS_ROLE_EMPTY", "This Business Role has no mapped entitlements.", 409)
+    await require_workflow_for_high_risk_items(session, [(item.resource_type, item.resource_id, item.app_role_external_id) for item in items], data.workflow_definition_id)
     if not await session.get(User, data.user_id):
         raise AccessPilotError("USER_NOT_FOUND", "The user was not found.", 404)
 
@@ -330,7 +332,7 @@ async def assign_business_role(session: AsyncSession, role_id: UUID, data: Busin
             user_id=data.user_id, resource_type=item.resource_type, resource_id=item.resource_id,
             app_role_external_id=item.app_role_external_id, assignment_type=data.assignment_type,
             start_time=data.start_time, expiration_time=data.expiration_time,
-            approver_id=data.approver_id, justification=data.justification,
+            approver_id=data.approver_id, workflow_definition_id=data.workflow_definition_id, justification=data.justification,
         )
         try:
             assignment, hydrated = await create_assignment(session, payload, actor_subject, request_id, check_sod_at_creation=True, business_role_id=role.id, role_assignment_id=batch_id)
