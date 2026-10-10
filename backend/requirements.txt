@@ -45,3 +45,5 @@ websockets==15.0.1
 reportlab==5.0.1
 pillow==11.3.0
 charset-normalizer==3.5.1
+ldap3==2.9.1
+pyasn1==0.6.4

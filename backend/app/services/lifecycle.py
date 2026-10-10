@@ -127,7 +127,7 @@ async def settings_response(session: AsyncSession) -> LifecycleSettingsResponse:
         user = await session.get(User, UUID(str(raw)))
         if user is not None:
             owners.append(LifecycleOwnerInfo(user_id=user.id, display_name=user.display_name, email=user.email))
-    return LifecycleSettingsResponse(mover_review_enabled=settings.mover_review_enabled, revoke_on_directory_disable=settings.revoke_on_directory_disable, review_due_days=settings.review_due_days, lifecycle_owners=owners)
+    return LifecycleSettingsResponse(mover_review_enabled=settings.mover_review_enabled, revoke_on_directory_disable=settings.revoke_on_directory_disable, review_due_days=settings.review_due_days, lifecycle_owners=owners, joiner_provisioning_delay_days=settings.joiner_provisioning_delay_days)
 
 
 async def update_settings(session: AsyncSession, data: LifecycleSettingsUpdate, request_id: str) -> LifecycleSettingsResponse:
@@ -144,7 +144,11 @@ async def update_settings(session: AsyncSession, data: LifecycleSettingsUpdate, 
             if await session.get(User, user_id) is None:
                 raise AccessPilotError("USER_NOT_FOUND", "One of the selected lifecycle owners was not found.", 404)
         settings.lifecycle_owner_ids = [str(user_id) for user_id in unique_ids]
-    await record_audit(session, action="LIFECYCLE_SETTINGS_UPDATED", target_type="LIFECYCLE_SETTINGS", target_id=settings.id, request_id=request_id, metadata={"mover_review_enabled": settings.mover_review_enabled, "review_due_days": settings.review_due_days, "owner_count": len(settings.lifecycle_owner_ids or [])})
+    if data.clear_joiner_provisioning_delay_days:
+        settings.joiner_provisioning_delay_days = None
+    elif data.joiner_provisioning_delay_days is not None:
+        settings.joiner_provisioning_delay_days = data.joiner_provisioning_delay_days
+    await record_audit(session, action="LIFECYCLE_SETTINGS_UPDATED", target_type="LIFECYCLE_SETTINGS", target_id=settings.id, request_id=request_id, metadata={"mover_review_enabled": settings.mover_review_enabled, "review_due_days": settings.review_due_days, "owner_count": len(settings.lifecycle_owner_ids or []), "joiner_provisioning_delay_days": settings.joiner_provisioning_delay_days})
     await session.commit()
     return await settings_response(session)
 

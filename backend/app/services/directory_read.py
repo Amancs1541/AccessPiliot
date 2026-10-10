@@ -10,7 +10,59 @@ from app.core.errors import AccessPilotError
 from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, AccessPackageItem, Application, BirthrightPolicy, Group, IdentityProvider, Role, SodPolicy, SodPolicyEntity, User, UserGroup
 from app.providers.entra import EntraProvider
 from app.providers.graph_client import GraphError
-from app.schemas.directory import GroupAccessSummary, NamedPolicyRef, UserAccessItem, UserAccessSummary, UserLicense
+from app.schemas.directory import ApplicationResponse, GroupAccessSummary, GroupResponse, NamedPolicyRef, RoleResponse, UserAccessItem, UserAccessSummary, UserLicense, UserResponse
+
+
+async def _provider_labels(session: AsyncSession) -> dict[UUID, tuple[str, str]]:
+    """A cheap lookup table (identity_providers is a tiny table) mapping provider_id -> (type, name), used to
+    label which connector a User/Group was actually synced from — e.g. distinguishing an on-prem Active
+    Directory identity from an Entra or Okta one at a glance."""
+    rows = (await session.execute(select(IdentityProvider.id, IdentityProvider.type, IdentityProvider.name))).all()
+    return {row.id: (row.type, row.name) for row in rows}
+
+
+def _label_user(row: User, labels: dict[UUID, tuple[str, str]]) -> UserResponse:
+    response = UserResponse.model_validate(row)
+    response.provider_type, response.provider_name = labels.get(row.provider_id, (None, None))
+    return response
+
+
+def _label_group(row: Group, labels: dict[UUID, tuple[str, str]]) -> GroupResponse:
+    response = GroupResponse.model_validate(row)
+    response.provider_type, response.provider_name = labels.get(row.provider_id, (None, None))
+    return response
+
+
+async def label_users_with_provider(session: AsyncSession, rows: list[User]) -> list[UserResponse]:
+    labels = await _provider_labels(session)
+    return [_label_user(row, labels) for row in rows]
+
+
+async def label_groups_with_provider(session: AsyncSession, rows: list[Group]) -> list[GroupResponse]:
+    labels = await _provider_labels(session)
+    return [_label_group(row, labels) for row in rows]
+
+
+def _label_role(row: Role, labels: dict[UUID, tuple[str, str]]) -> RoleResponse:
+    response = RoleResponse.model_validate(row)
+    response.provider_type, response.provider_name = labels.get(row.provider_id, (None, None))
+    return response
+
+
+def _label_application(row: Application, labels: dict[UUID, tuple[str, str]]) -> ApplicationResponse:
+    response = ApplicationResponse.model_validate(row)
+    response.provider_type, response.provider_name = labels.get(row.provider_id, (None, None))
+    return response
+
+
+async def label_roles_with_provider(session: AsyncSession, rows: list[Role]) -> list[RoleResponse]:
+    labels = await _provider_labels(session)
+    return [_label_role(row, labels) for row in rows]
+
+
+async def label_applications_with_provider(session: AsyncSession, rows: list[Application]) -> list[ApplicationResponse]:
+    labels = await _provider_labels(session)
+    return [_label_application(row, labels) for row in rows]
 
 
 async def list_users(session: AsyncSession, query: Optional[str] = None) -> list[User]:

@@ -8,11 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AccessPilotError
 from app.models import IdentityAccount, IdentityProvider, User
+from app.providers.base import NewUserRequest, ProviderConflictError
 from app.providers.graph_client import GraphError
 from app.schemas.accounts import AccountActionResult, IdentityAccountResponse, PersonAccountsActionResponse
 from app.services.assignments import _resolve_internal_user_id
 from app.services.audit import record_audit
 from app.services.provider_configuration import _connector
+from app.services.provisioning import username_for_provider
 
 
 async def _get_user(session: AsyncSession, user_id: UUID) -> User:
@@ -43,6 +45,39 @@ async def ensure_primary_account(session: AsyncSession, user: User) -> Optional[
 
 def _is_primary(user: User, account: IdentityAccount) -> bool:
     return account.provider_id == user.provider_id and account.external_id == user.external_id
+
+
+async def ensure_account_in_provider(session: AsyncSession, user: User, provider_id: UUID, actor_subject: str, request_id: str) -> IdentityAccount:
+    """Returns the person's account in `provider_id`, auto-provisioning a real one there on the spot if they don't
+    have one yet. This is what makes a grant land correctly when the resource being granted (a Group/Role/
+    Application) lives in a DIFFERENT directory than the person's primary account — e.g. an AD-sourced group
+    assigned to someone whose primary account is Entra. Without this, the grant would be attempted against the
+    wrong directory using the wrong external_id (see app.services.assignments, which calls this before every real
+    grant). Mirrors the (provider_id match -> else linked IdentityAccount) lookup
+    app.services.joiner._manager_external_id already does, but creates on miss instead of giving up."""
+    if user.provider_id == provider_id:
+        return await ensure_primary_account(session, user)
+    account = (await session.scalars(select(IdentityAccount).where(IdentityAccount.user_id == user.id, IdentityAccount.provider_id == provider_id))).first()
+    if account is not None:
+        return account
+    provider = await session.get(IdentityProvider, provider_id)
+    if provider is None or provider.type == "CSV":
+        raise AccessPilotError("PROVIDER_NOT_FOUND", "This directory has no real connector behind it.", 404)
+    if not provider.provision_joiners:
+        raise AccessPilotError("PROVIDER_PROVISIONING_DISABLED", f"{provider.name} is switched off for new-account provisioning (Providers page), so access there can't be auto-created for {user.display_name}.", 422)
+    username = username_for_provider(provider, user.given_name, user.surname, user.email)
+    try:
+        created = await _connector(provider).create_user(NewUserRequest(display_name=user.display_name, user_principal_name=username, mail_nickname=username.split("@")[0] or username, department=user.department, job_title=user.job_title, given_name=user.given_name, surname=user.surname, employee_id=user.employee_id, enabled=True))
+    except ProviderConflictError as exc:
+        raise AccessPilotError("ACCOUNT_USERNAME_TAKEN", f"An account with the username {username} already exists in {provider.name} ({exc}).", 409) from exc
+    except GraphError as exc:
+        raise AccessPilotError(exc.code, exc.message, exc.status_code) from exc
+    account = IdentityAccount(user_id=user.id, provider_id=provider.id, external_id=created.user.external_id, username=username, status="ACTIVE", provisioned_by="ASSIGNMENT")
+    session.add(account)
+    await session.flush()
+    actor_id = await _resolve_internal_user_id(session, actor_subject)
+    await record_audit(session, action="ACCOUNT_AUTO_PROVISIONED", target_type="USER", target_id=user.id, provider_id=provider.id, actor_user_id=actor_id, request_id=request_id, metadata={"provider": provider.name, "username": username, "reason": "assignment_activation"})
+    return account
 
 
 async def _account_responses(session: AsyncSession, user: User) -> list[IdentityAccountResponse]:

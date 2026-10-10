@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from uuid import UUID
 
-from app.schemas.lifecycle import LeaverOverviewResponse, LeaverRequestResponse, LeaverStartRequest, ReenableDecision, ReenableRequestCreate, ReenableRequestResponse, LeaverPolicyCreate, LeaverPolicyResponse, LeaverPolicyUpdate, PersonLifecycleResponse, PersonLifecycleUpdate, ScheduledLeaverResponse, LifecycleEventResponse, LifecycleSettingsResponse, LifecycleSettingsUpdate, MoveScheduleCreate, PendingMoveResponse
+from app.schemas.lifecycle import LeaverOverviewResponse, LeaverRequestResponse, LeaverStartRequest, ReenableDecision, ReenableRequestCreate, ReenableRequestResponse, LeaverPolicyCreate, LeaverPolicyResponse, LeaverPolicyUpdate, PersonLifecycleResponse, PersonLifecycleUpdate, ScheduledDeletionResponse, ScheduledLeaverResponse, LifecycleEventResponse, LifecycleSettingsResponse, LifecycleSettingsUpdate, MoveScheduleCreate, PendingMoveResponse
 from app.security.auth import AuthenticatedUser, require_permission
 from app.services import leaver_followup
 from app.services import lifecycle as lifecycle_service
@@ -90,6 +90,11 @@ async def delete_leaver_policy(policy_id: UUID, request: Request, _: Authenticat
 @router.get("/leavers/scheduled", response_model=list[ScheduledLeaverResponse])
 async def scheduled_leavers(_: AuthenticatedUser = Depends(leaver_read), db: AsyncSession = Depends(get_db)):
     return await lifecycle_service.list_scheduled_leavers(db)
+
+
+@router.get("/deletions/scheduled", response_model=list[ScheduledDeletionResponse])
+async def scheduled_deletions(_: AuthenticatedUser = Depends(leaver_read), db: AsyncSession = Depends(get_db)):
+    return await leaver_followup.list_scheduled_deletions(db)
 
 
 @router.patch("/people/{user_id}", response_model=PersonLifecycleResponse)

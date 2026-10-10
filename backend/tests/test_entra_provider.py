@@ -199,6 +199,30 @@ async def test_create_user_preserves_department_and_job_title_even_though_graph_
 
 
 @pytest.mark.asyncio
+async def test_create_user_applies_the_optional_profile_fields(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/oauth2/v2.0/token"):
+            return token_response()
+        if request.method == "GET":
+            return httpx.Response(200, json={"value": []})
+        import json
+        body = json.loads(request.content)
+        assert body["officeLocation"] == "HQ-4"
+        assert body["companyName"] == "Acme Corp"
+        assert body["mobilePhone"] == "+1-555-0100"
+        assert body["streetAddress"] == "1 Main St"
+        assert body["city"] == "Springfield"
+        assert body["state"] == "IL"
+        assert body["postalCode"] == "62701"
+        assert body["country"] == "USA"
+        assert "description" not in body  # no such field on a Graph user object — never silently pretended
+        return httpx.Response(201, json={"id": "new-id-3", "userPrincipalName": "new.user3@tenant.onmicrosoft.com", "mail": "new.user3@tenant.onmicrosoft.com", "displayName": "New User", "accountEnabled": True})
+
+    install_transport(monkeypatch, handler)
+    await EntraProvider(provider_row()).create_user(NewUserRequest(display_name="New User", user_principal_name="new.user3@tenant.onmicrosoft.com", mail_nickname="newuser3", office="HQ-4", company="Acme Corp", mobile_phone="+1-555-0100", street_address="1 Main St", city="Springfield", state="IL", postal_code="62701", country="USA", description="Should be ignored"))
+
+
+@pytest.mark.asyncio
 async def test_create_group_detects_duplicate(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/oauth2/v2.0/token"):

@@ -64,6 +64,7 @@ class LifecycleSettingsResponse(BaseModel):
     revoke_on_directory_disable: bool = True
     review_due_days: int
     lifecycle_owners: list[LifecycleOwnerInfo] = []
+    joiner_provisioning_delay_days: Optional[int] = None
 
 
 class LifecycleSettingsUpdate(BaseModel):
@@ -71,6 +72,8 @@ class LifecycleSettingsUpdate(BaseModel):
     revoke_on_directory_disable: Optional[bool] = None
     review_due_days: Optional[int] = Field(default=None, ge=1, le=365)
     lifecycle_owner_ids: Optional[list[UUID]] = None
+    joiner_provisioning_delay_days: Optional[int] = Field(default=None, ge=1, le=365)
+    clear_joiner_provisioning_delay_days: bool = False
 
 
 EMPLOYMENT_TYPES = ("EMPLOYEE", "CONTRACTOR", "INTERN", "OTHER")
@@ -136,6 +139,26 @@ class ScheduledLeaverResponse(BaseModel):
     policy_name: str
     due_at: datetime
     status: str  # SCHEDULED | DUE
+
+
+class ScheduledDeletionProvider(BaseModel):
+    provider_name: str
+    status: str  # DELETED | WAITING
+
+
+class ScheduledDeletionResponse(BaseModel):
+    """A person who is disabled and waiting out their leaver policy's retention period before their accounts are
+    deleted from every directory — the "disabled and waiting" view app.services.leaver_followup.sweep_account_
+    deletions() itself drives. `providers` shows each directory's own status so a provider stuck on a real
+    outage (e.g. the AD DC being unreachable) reads as "waiting", not as a silent failure."""
+    user_id: UUID
+    user_display_name: Optional[str] = None
+    user_email: Optional[str] = None
+    department: Optional[str] = None
+    leaver_processed_at: datetime
+    accounts_delete_at: datetime
+    status: str  # SCHEDULED | DUE
+    providers: list[ScheduledDeletionProvider] = []
 
 
 class PersonLifecycleResponse(BaseModel):

@@ -37,6 +37,41 @@ def build_username_local_part(convention: Optional[str], given_name: Optional[st
     return result or fallback
 
 
+_DC_RE = re.compile(r"DC=([^,]+)", re.IGNORECASE)
+
+
+def _domain_from_base_dn(base_dn: Optional[str]) -> Optional[str]:
+    """Active Directory's base DN already IS its real DNS domain name — "DC=TeamDEV,DC=local" literally means
+    the domain "TeamDEV.local". Used as AD's own default UPN suffix (see username_for_provider below) so a new AD
+    account gets a real AD-domain UPN out of the box, never silently inheriting the Entra tenant's cloud domain
+    just because nobody separately configured a "provisioning domain" for AD too — confirmed live this was
+    happening: a joiner's AD account was created with userPrincipalName ending in the Entra tenant's
+    onmicrosoft.com domain instead of the AD domain, which is wrong for an on-prem account."""
+    if not base_dn:
+        return None
+    parts = _DC_RE.findall(base_dn)
+    return ".".join(parts) if parts else None
+
+
+def username_for_provider(provider: IdentityProvider, given_name: Optional[str], surname: Optional[str], fallback_email: str, override: Optional[str] = None) -> str:
+    """The account's username in one IdP: an explicit override; else, when the IdP has a provisioning domain or
+    naming convention, the naming-convention local part at that domain; else — for Active Directory specifically —
+    the domain derived from its own base DN (see _domain_from_base_dn); else the fallback email as given (the
+    original behavior, still correct for Entra/Okta, which have no equivalent "this IS my domain" field to derive
+    from — a cloud tenant can have many verified domains, so borrowing the work email's own domain remains the
+    right default there). Shared by Joiner (app.services.joiner._username_for) and assignment-time
+    auto-provisioning (app.services.accounts.ensure_account_in_provider) so both pick the same username for the
+    same person+provider."""
+    if override and override.strip():
+        return override.strip()
+    ad_domain = _domain_from_base_dn(getattr(provider, "tenant_id", None)) if provider.type == "ACTIVE_DIRECTORY" else None
+    if provider.provisioning_domain or provider.username_convention or ad_domain:
+        domain = provider.provisioning_domain or ad_domain or (fallback_email.split("@", 1)[1] if "@" in fallback_email else "")
+        local = build_username_local_part(provider.username_convention, given_name, surname, fallback_email)
+        return f"{local}@{domain}" if domain else local
+    return fallback_email
+
+
 async def primary_identity_provider(session: AsyncSession) -> Optional[IdentityProvider]:
     """Same selection rule as the existing admin 'Add user' endpoint's `_primary_provider`
     (backend/app/api/v1/directory.py) — prefer the real ENTRA provider, else any other configured connector-backed

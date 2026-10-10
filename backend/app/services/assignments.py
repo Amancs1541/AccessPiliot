@@ -8,7 +8,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AccessPilotError
-from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, Application, Group, IdentityProvider, Role, User, UserGroup
+from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, Application, Group, IdentityAccount, IdentityProvider, Role, User, UserGroup
 from app.providers.graph_client import GraphError
 from app.schemas.assignments import AssignmentResponse
 from app.services.audit import record_audit
@@ -89,13 +89,23 @@ async def hydrate_display_fields(session: AsyncSession, assignment: AccessAssign
     return {"user_display_name": user.display_name if user else None, "resource_display_name": resource_name, "package_name": package_name, "business_role_name": business_role_name, "workflow_definition_name": workflow_definition_name, "sod_exception_expires_at": covering_exception.expires_at if covering_exception else None}
 
 
-async def _grant_provider_access(session: AsyncSession, provider_id: UUID, resource_type: str, target_external_id: str, user_external_id: str, app_role_external_id: Optional[str] = None) -> None:
-    """Performs the real Entra/Graph mutation. Raises AccessPilotError if it fails — callers must not mark ACTIVE on failure."""
+async def _grant_provider_access(session: AsyncSession, provider_id: UUID, resource_type: str, target_external_id: str, user: User, app_role_external_id: Optional[str] = None, *, actor_subject: str, request_id: str) -> None:
+    """Performs the real Entra/Graph mutation. Raises AccessPilotError if it fails — callers must not mark ACTIVE on failure.
+
+    Resolves (and, if necessary, auto-provisions) the person's account in THIS specific provider before granting —
+    not their primary account's external_id, which may belong to a different directory entirely than the one that
+    owns `resource_type`/`target_external_id` (e.g. an AD-sourced group granted to someone whose primary account is
+    Entra). See app.services.accounts.ensure_account_in_provider."""
     provider = await session.get(IdentityProvider, provider_id)
     if not provider:
         raise AccessPilotError("PROVIDER_NOT_FOUND", "The identity provider for this assignment was not found.", 404)
+    # Local import to dodge a circular import — app.services.accounts itself imports _resolve_internal_user_id from
+    # this module, so the reverse direction has to stay function-scoped, same convention as the sod.py/workflows.py
+    # imports elsewhere in this file.
+    from app.services.accounts import ensure_account_in_provider
+    account = await ensure_account_in_provider(session, user, provider_id, actor_subject, request_id)
     connector = _connector(provider)
-    request = {"resource_type": resource_type, "target_external_id": target_external_id, "user_external_id": user_external_id}
+    request = {"resource_type": resource_type, "target_external_id": target_external_id, "user_external_id": account.external_id}
     if app_role_external_id:
         request["app_role_external_id"] = app_role_external_id
     try:
@@ -140,8 +150,19 @@ async def revoke_provider_access(session: AsyncSession, assignment: AccessAssign
     user = await session.get(User, assignment.user_id)
     if not user:
         return False
+    # Read-only lookup — unlike the grant path, revoke never auto-provisions. If the person never had an account in
+    # THIS provider there is genuinely nothing to remove there (not an error).
+    if user.provider_id == assignment.provider_id:
+        account_external_id = user.external_id
+    else:
+        account = (await session.execute(select(IdentityAccount).where(IdentityAccount.user_id == user.id, IdentityAccount.provider_id == assignment.provider_id))).scalars().first()
+        account_external_id = account.external_id if account else None
+    if account_external_id is None:
+        if assignment.resource_type == "GROUP":
+            await _remove_local_group_membership(session, assignment.user_id, assignment.resource_id)
+        return True
     connector = _connector(provider)
-    request = {"resource_type": assignment.resource_type, "target_external_id": target_external_id, "user_external_id": user.external_id}
+    request = {"resource_type": assignment.resource_type, "target_external_id": target_external_id, "user_external_id": account_external_id}
     if assignment.app_role_external_id:
         request["app_role_external_id"] = assignment.app_role_external_id
     try:
@@ -160,7 +181,7 @@ async def grant_provider_access_for_assignment(session: AsyncSession, assignment
     if not user:
         return False
     try:
-        await _grant_provider_access(session, assignment.provider_id, assignment.resource_type, target_external_id, user.external_id, assignment.app_role_external_id)
+        await _grant_provider_access(session, assignment.provider_id, assignment.resource_type, target_external_id, user, assignment.app_role_external_id, actor_subject="system:activation-worker", request_id=f"activation-worker-{assignment.id}")
     except AccessPilotError:
         return False
     if assignment.resource_type == "GROUP":
@@ -322,7 +343,7 @@ async def create_assignment(session: AsyncSession, data, actor_subject: str, req
         await _supersede_existing_assignment(session, user_id=data.user_id, resource_type=data.resource_type, resource_id=data.resource_id, app_role_external_id=data.app_role_external_id, provider_id=provider_id, actor_id=requested_by, request_id=request_id, exclude_id=assignment.id)
         _, _, target_external_id = await _resolve_target(session, data.resource_type, data.resource_id)
         try:
-            await _grant_provider_access(session, provider_id, data.resource_type, target_external_id, target_user.external_id, data.app_role_external_id)
+            await _grant_provider_access(session, provider_id, data.resource_type, target_external_id, target_user, data.app_role_external_id, actor_subject=actor_subject, request_id=request_id)
         except AccessPilotError:
             await session.rollback()
             raise
@@ -454,7 +475,7 @@ async def activate_assignment(session: AsyncSession, assignment_id: UUID, actor_
         raise AccessPilotError("USER_NOT_FOUND", "The user was not found.", 404)
 
     try:
-        await _grant_provider_access(session, assignment.provider_id, assignment.resource_type, target_external_id, target_user.external_id, assignment.app_role_external_id)
+        await _grant_provider_access(session, assignment.provider_id, assignment.resource_type, target_external_id, target_user, assignment.app_role_external_id, actor_subject=actor_subject, request_id=request_id)
     except AccessPilotError as exc:
         await record_audit(session, action="ASSIGNMENT_ACTIVATED", target_type="ASSIGNMENT", target_id=assignment.id, provider_id=assignment.provider_id, actor_user_id=actor_id, request_id=request_id, result="FAILURE", metadata={"decision": "SELF_ACTIVATED", "error_code": exc.code, "justification": justification})
         await session.commit()

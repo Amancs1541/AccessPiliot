@@ -11,6 +11,7 @@ from app.db.session import get_db
 from app.main import app
 from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, AccessPackageItem, Application, Group, IdentityProvider, Role, User, UserGroup
 from app.providers.base import NormalizedGroup, NormalizedUser, ProviderConflictError
+from app.providers.graph_client import GraphError
 from app.security.auth import AuthenticatedUser, require_authenticated_user
 
 
@@ -420,6 +421,86 @@ async def test_updating_a_users_department_pushes_a_real_write_to_the_provider_f
     assert response.status_code == 200
     assert response.json()["department"] == "Sales"
     assert seen == {"external_id": "obj-1", "department": "Sales", "job_title": "Account Executive"}
+
+
+@pytest.mark.asyncio
+async def test_updating_department_also_mirrors_to_a_linked_second_directory_account(db_override, monkeypatch):
+    """Real bug found live: a person with accounts in TWO directories (e.g. a primary Entra account plus a linked
+    Active Directory account from Joiner) only ever had the primary one updated — the other directory silently
+    drifted out of sync forever. Editing department/job_title must push the same change to every connected
+    directory account, not just the primary one."""
+    from app.models import IdentityAccount
+
+    async with db_override.factory() as session:
+        entra = IdentityProvider(name="Entra", type="ENTRA", status="CONNECTED", tenant_id="tenant-1")
+        ad = IdentityProvider(name="Corporate AD", type="ACTIVE_DIRECTORY", status="CONNECTED", tenant_id="DC=example,DC=com")
+        session.add_all([entra, ad])
+        await session.flush()
+        target_user = User(provider_id=entra.id, external_id="obj-1", email="mover@x.com", display_name="Mover", status="ACTIVE", department="Engineering")
+        session.add(target_user)
+        await session.flush()
+        session.add(IdentityAccount(user_id=target_user.id, provider_id=ad.id, external_id="ad-obj-1", username="mover@ad.local", status="ACTIVE", provisioned_by="JOINER"))
+        await session.commit()
+        user_id = target_user.id
+
+    entra_seen, ad_seen = {}, {}
+
+    async def fake_entra_update_user(self, external_id, *, department, job_title):
+        entra_seen["external_id"], entra_seen["department"], entra_seen["job_title"] = external_id, department, job_title
+        return NormalizedUser(external_id=external_id, email="mover@x.com", display_name="Mover", department=department, job_title=job_title)
+
+    async def fake_ad_update_user(self, external_id, *, department, job_title):
+        ad_seen["external_id"], ad_seen["department"], ad_seen["job_title"] = external_id, department, job_title
+        return NormalizedUser(external_id=external_id, email="mover@ad.local", display_name="Mover", department=department, job_title=job_title)
+
+    monkeypatch.setattr("app.providers.entra.EntraProvider.update_user", fake_entra_update_user)
+    monkeypatch.setattr("app.providers.active_directory.ActiveDirectoryProvider.update_user", fake_ad_update_user)
+
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.patch(f"/api/v1/users/{user_id}/attributes", json={"department": "Sales", "job_title": "Account Executive"})
+    assert response.status_code == 200 and response.json()["department"] == "Sales"
+    assert entra_seen == {"external_id": "obj-1", "department": "Sales", "job_title": "Account Executive"}
+    assert ad_seen == {"external_id": "ad-obj-1", "department": "Sales", "job_title": "Account Executive"}
+
+
+@pytest.mark.asyncio
+async def test_a_second_directory_failing_to_update_never_blocks_the_primary_change(db_override, monkeypatch):
+    """The primary write is authoritative and already succeeded by the time the secondary directories are
+    attempted — a secondary directory being unreachable must be recorded, never undo or block the real change
+    that already landed on the person's primary account."""
+    from app.models import IdentityAccount
+
+    async with db_override.factory() as session:
+        entra = IdentityProvider(name="Entra", type="ENTRA", status="CONNECTED", tenant_id="tenant-1")
+        ad = IdentityProvider(name="Corporate AD", type="ACTIVE_DIRECTORY", status="CONNECTED", tenant_id="DC=example,DC=com")
+        session.add_all([entra, ad])
+        await session.flush()
+        target_user = User(provider_id=entra.id, external_id="obj-1", email="mover@x.com", display_name="Mover", status="ACTIVE", department="Engineering")
+        session.add(target_user)
+        await session.flush()
+        session.add(IdentityAccount(user_id=target_user.id, provider_id=ad.id, external_id="ad-obj-1", username="mover@ad.local", status="ACTIVE", provisioned_by="JOINER"))
+        await session.commit()
+        user_id = target_user.id
+
+    async def fake_entra_update_user(self, external_id, *, department, job_title):
+        return NormalizedUser(external_id=external_id, email="mover@x.com", display_name="Mover", department=department, job_title=job_title)
+
+    async def failing_ad_update_user(self, external_id, *, department, job_title):
+        raise GraphError("PROVIDER_UNAVAILABLE", "directory unreachable", 502)
+
+    monkeypatch.setattr("app.providers.entra.EntraProvider.update_user", fake_entra_update_user)
+    monkeypatch.setattr("app.providers.active_directory.ActiveDirectoryProvider.update_user", failing_ad_update_user)
+
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.patch(f"/api/v1/users/{user_id}/attributes", json={"department": "Sales"})
+    assert response.status_code == 200 and response.json()["department"] == "Sales"
+
+    async with db_override.factory() as session:
+        from app.models import AuditLog
+        entry = (await session.scalars(select(AuditLog).where(AuditLog.action == "USER_ATTRIBUTES_UPDATED", AuditLog.target_id == user_id))).first()
+    assert entry.metadata_json["other_directories"] == [{"provider": "Corporate AD", "ok": False, "error": "directory unreachable"}]
 
 
 @pytest.mark.asyncio

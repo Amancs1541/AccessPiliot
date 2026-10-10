@@ -41,7 +41,7 @@ async def _primary_provider(db: AsyncSession):
 
 @router.get("/users", response_model=list[UserResponse])
 async def users(q: str | None = Query(default=None), _: AuthenticatedUser = Depends(user_read), db: AsyncSession = Depends(get_db)):
-    return await directory_read.list_users(db, q)
+    return await directory_read.label_users_with_provider(db, await directory_read.list_users(db, q))
 
 
 @router.get("/users/hierarchy-tree", response_model=list[UserHierarchyNode])
@@ -53,7 +53,8 @@ async def users_hierarchy_tree(_: AuthenticatedUser = Depends(user_read), db: As
 
 @router.get("/users/{user_id}", response_model=UserResponse)
 async def user_detail(user_id: UUID, _: AuthenticatedUser = Depends(user_read), db: AsyncSession = Depends(get_db)):
-    return await directory_read.get_user(db, user_id)
+    labeled = await directory_read.label_users_with_provider(db, [await directory_read.get_user(db, user_id)])
+    return labeled[0]
 
 
 @router.get("/users/{user_id}/access-summary", response_model=UserAccessSummary)
@@ -132,7 +133,7 @@ async def update_user_hierarchy(user_id: UUID, data: UserHierarchyUpdate, reques
 
 @router.get("/groups", response_model=list[GroupResponse])
 async def groups(q: str | None = Query(default=None), _: AuthenticatedUser = Depends(group_read), db: AsyncSession = Depends(get_db)):
-    return await directory_read.list_groups(db, q)
+    return await directory_read.label_groups_with_provider(db, await directory_read.list_groups(db, q))
 
 
 @router.get("/groups/owned", response_model=list[GroupResponse])
@@ -152,7 +153,8 @@ async def owner_update_group(group_id: UUID, data: GroupOwnerSelfServiceUpdate, 
 
 @router.get("/groups/{group_id}", response_model=GroupResponse)
 async def group_detail(group_id: UUID, _: AuthenticatedUser = Depends(group_read), db: AsyncSession = Depends(get_db)):
-    return await directory_read.get_group(db, group_id)
+    labeled = await directory_read.label_groups_with_provider(db, [await directory_read.get_group(db, group_id)])
+    return labeled[0]
 
 
 @router.get("/groups/{group_id}/owners", response_model=list[GroupOwnerInfo])
@@ -168,7 +170,7 @@ async def set_group_owners(group_id: UUID, data: GroupOwnersUpdate, request: Req
 
 @router.get("/groups/{group_id}/members", response_model=list[UserResponse])
 async def group_members(group_id: UUID, _: AuthenticatedUser = Depends(group_read), db: AsyncSession = Depends(get_db)):
-    return await directory_read.list_group_members(db, group_id)
+    return await directory_read.label_users_with_provider(db, await directory_read.list_group_members(db, group_id))
 
 
 @router.get("/groups/{group_id}/access-summary", response_model=GroupAccessSummary)
@@ -198,12 +200,12 @@ async def create_group(data: GroupCreate, request: Request, _: AuthenticatedUser
 
 @router.get("/roles", response_model=list[RoleResponse])
 async def roles(q: str | None = Query(default=None), _: AuthenticatedUser = Depends(role_read), db: AsyncSession = Depends(get_db)):
-    return await directory_read.list_roles(db, q)
+    return await directory_read.label_roles_with_provider(db, await directory_read.list_roles(db, q))
 
 
 @router.get("/applications", response_model=list[ApplicationResponse])
 async def applications(q: str | None = Query(default=None), _: AuthenticatedUser = Depends(role_read), db: AsyncSession = Depends(get_db)):
-    return await directory_read.list_applications(db, q)
+    return await directory_read.label_applications_with_provider(db, await directory_read.list_applications(db, q))
 
 
 @router.get("/dashboard/admin")

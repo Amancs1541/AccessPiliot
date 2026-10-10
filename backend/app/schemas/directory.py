@@ -30,6 +30,11 @@ class UserResponse(BaseModel):
     employment_type: Optional[str] = None
     last_synced_at: Optional[datetime]
     pending_attribute_change: bool = False
+    # Which connector this identity actually came from (ENTRA/OKTA/ACTIVE_DIRECTORY/MOCK) — not a stored column,
+    # hydrated from the provider_id FK at read time (see directory_read.label_with_provider). Distinct from
+    # `source` above, which is about the ONBOARDING mechanism (CSV vs directory-synced), not the connector.
+    provider_type: Optional[str] = None
+    provider_name: Optional[str] = None
 
 
 class UserAttributeUpdate(BaseModel):
@@ -53,6 +58,10 @@ class GroupResponse(BaseModel):
     status: str
     group_label: Optional[str] = None
     last_synced_at: Optional[datetime]
+    # Same "which connector" label as UserResponse — distinct from group_label above, which is an admin-set
+    # classification (Standard/Privileged/custom), not the sync source.
+    provider_type: Optional[str] = None
+    provider_name: Optional[str] = None
 
 
 class GroupCreate(BaseModel):
@@ -75,6 +84,9 @@ class RoleResponse(BaseModel):
     role_type: str
     is_privileged: bool
     status: str
+    # Same "which connector" label as UserResponse/GroupResponse.
+    provider_type: Optional[str] = None
+    provider_name: Optional[str] = None
 
 
 class ApplicationResponse(BaseModel):
@@ -85,6 +97,8 @@ class ApplicationResponse(BaseModel):
     status: str
     app_roles: Optional[list[dict[str, Any]]]
     last_synced_at: Optional[datetime]
+    provider_type: Optional[str] = None
+    provider_name: Optional[str] = None
 
 
 class UserAccessItem(BaseModel):

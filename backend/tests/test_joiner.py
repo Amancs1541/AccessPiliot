@@ -1,5 +1,6 @@
 from datetime import date, datetime, timedelta, timezone
 from itertools import count
+from uuid import UUID
 
 import pytest
 import pytest_asyncio
@@ -337,3 +338,216 @@ def test_username_follows_the_provider_policy_at_creation_time():
     assert _username_for(convention_only, "Nina", "Newhire", email, None) == "nnewhire@company.com"                # convention + the work email's own domain
     assert _username_for(neither, "Nina", "Newhire", email, None) == email
     assert _username_for(both, "Nina", "Newhire", email, "custom@x.com") == "custom@x.com"                       # an explicit admin override still wins
+
+
+@pytest.mark.asyncio
+async def test_a_second_directory_is_auto_detected_when_the_department_has_birthright_access_there(db_override):
+    """Account mapping: the admin only picked Entra as a target, but Design's birthright policy grants a group
+    that lives in a THIRD, never-explicitly-picked provider — that directory's account must still be created,
+    auto-detected from what the person's own department would be granted."""
+    async with db_override.factory() as session:
+        ids = await _seed(session)
+        ad = IdentityProvider(name="Active Directory", type="ACTIVE_DIRECTORY", status="CONNECTED", tenant_id="t3")
+        session.add(ad)
+        await session.flush()
+        ad_group = Group(provider_id=ad.id, external_id="ad-design", name="Design Team (AD)", status="ACTIVE", is_privileged=False)
+        session.add(ad_group)
+        await session.flush()
+        session.add(BirthrightPolicy(name="Design", match_field="department", match_value="Design", resource_type="GROUP", resource_id=ad_group.id))
+        await session.commit()
+        ids["ad"] = ad.id
+
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/lifecycle/joiners", json=body(ids, start=future(), targets=[{"provider_id": str(ids["entra"])}], department="Design"))
+    assert response.status_code == 201
+    by_name = {t["provider_name"]: t["status"] for t in response.json()["targets"]}
+    assert by_name == {"Entra": "CREATED", "Active Directory": "CREATED"}  # AD was never explicitly picked
+    assert any(name == "Active Directory" for name, _ in FakeConnector.created)
+
+
+@pytest.mark.asyncio
+async def test_auto_detected_directory_is_skipped_silently_when_provisioning_is_switched_off(db_override):
+    """Unlike an explicitly picked, switched-off provider (which is a hard 422), an auto-DETECTED one that's
+    switched off is just skipped — it was never something the admin actually asked for."""
+    async with db_override.factory() as session:
+        ids = await _seed(session)
+        ad = IdentityProvider(name="Active Directory", type="ACTIVE_DIRECTORY", status="CONNECTED", tenant_id="t3", provision_joiners=False)
+        session.add(ad)
+        await session.flush()
+        ad_group = Group(provider_id=ad.id, external_id="ad-design", name="Design Team (AD)", status="ACTIVE", is_privileged=False)
+        session.add(ad_group)
+        await session.flush()
+        session.add(BirthrightPolicy(name="Design", match_field="department", match_value="Design", resource_type="GROUP", resource_id=ad_group.id))
+        await session.commit()
+        ids["ad"] = ad.id
+
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/lifecycle/joiners", json=body(ids, start=future(), targets=[{"provider_id": str(ids["entra"])}], department="Design"))
+    assert response.status_code == 201
+    by_name = {t["provider_name"]: t["status"] for t in response.json()["targets"]}
+    assert by_name == {"Entra": "CREATED"}  # AD silently skipped, not an error
+
+
+@pytest.mark.asyncio
+async def test_optional_profile_fields_reach_the_connectors_create_user_call(db_override):
+    async with db_override.factory() as session:
+        ids = await _seed(session)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/lifecycle/joiners", json=body(ids, start=future(), targets=[{"provider_id": str(ids["entra"])}], office="HQ-4", company="Acme Corp", mobile_phone="+1-555-0100", street_address="1 Main St", city="Springfield", state="IL", postal_code="62701", country="USA", description="A note"))
+    assert response.status_code == 201
+    request = next(r for name, r in FakeConnector.created if name == "Entra")
+    assert request.office == "HQ-4" and request.company == "Acme Corp" and request.mobile_phone == "+1-555-0100"
+    assert request.street_address == "1 Main St" and request.city == "Springfield" and request.state == "IL"
+    assert request.postal_code == "62701" and request.country == "USA" and request.description == "A note"
+
+
+@pytest.mark.asyncio
+async def test_a_connector_that_cannot_create_accounts_yet_fails_that_one_target_cleanly(db_override, monkeypatch):
+    """A provider whose connector doesn't support create_user yet (e.g. Active Directory's today) must report a
+    clean FAILED target with an explanatory error, never an unhandled 500 — regardless of whether it was
+    explicitly picked or auto-detected."""
+    async def not_implemented_create_user(self, request):
+        raise NotImplementedError("create_user is not yet implemented for this connector")
+    monkeypatch.setattr(FakeConnector, "create_user", not_implemented_create_user, raising=False)
+
+    async with db_override.factory() as session:
+        ids = await _seed(session)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/lifecycle/joiners", json=body(ids, start=future(), targets=[{"provider_id": str(ids["entra"])}]))
+    assert response.status_code == 502  # no directory could create the account
+    assert "does not support creating accounts yet" in response.json()["error"]["message"]
+
+
+def test_active_directory_defaults_its_username_to_its_own_domain_not_the_work_emails():
+    """Real bug found live: an AD provider with no provisioning_domain/username_convention configured fell back
+    to the work email AS GIVEN — meaning a joiner's real AD account ended up with a userPrincipalName on the
+    Entra tenant's own cloud domain (…@tenant.onmicrosoft.com) instead of the AD domain. AD's base DN already IS
+    its real domain name, so that's the correct default, not the work email's domain."""
+    from app.services.joiner import _username_for
+    ad_no_domain_configured = IdentityProvider(name="Corporate AD", type="ACTIVE_DIRECTORY", tenant_id="DC=TeamDEV,DC=local")
+    assert _username_for(ad_no_domain_configured, "Hardeep", "Zanzmera", "hardeep.zanzmera@workamanvgmail.onmicrosoft.com", None) == "hardeep.zanzmera@TeamDEV.local"
+
+    # An explicit provisioning_domain still wins over the derived one.
+    ad_explicit_domain = IdentityProvider(name="Corporate AD", type="ACTIVE_DIRECTORY", tenant_id="DC=TeamDEV,DC=local", provisioning_domain="other.local")
+    assert _username_for(ad_explicit_domain, "Hardeep", "Zanzmera", "hardeep.zanzmera@workamanvgmail.onmicrosoft.com", None) == "hardeep.zanzmera@other.local"
+
+    # Unchanged for Entra/Okta: no base-DN concept to derive from, so the work email's own domain stays the default.
+    entra_no_domain_configured = IdentityProvider(name="Entra", type="ENTRA", tenant_id="tenant-id-not-a-dn")
+    assert _username_for(entra_no_domain_configured, "Hardeep", "Zanzmera", "hardeep.zanzmera@workamanvgmail.onmicrosoft.com", None) == "hardeep.zanzmera@workamanvgmail.onmicrosoft.com"
+
+
+# ---------------------------------------------------------------- global provisioning delay
+
+
+async def _set_provisioning_delay(client, days):
+    response = await client.put("/api/v1/lifecycle/settings", json={"joiner_provisioning_delay_days": days})
+    assert response.status_code == 200
+    return response
+
+
+@pytest.mark.asyncio
+async def test_a_global_delay_defers_account_creation_until_the_sweep_runs(db_override):
+    async with db_override.factory() as session:
+        ids = await _seed(session)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await _set_provisioning_delay(client, 5)
+        response = await client.post("/api/v1/lifecycle/joiners", json=body(ids, start=future(30)))
+    assert response.status_code == 201
+    data = response.json()
+    assert data["status"] == "PENDING_PROVISIONING" and data["targets"] == [] and data["user_id"] is None
+    assert FakeConnector.created == []  # nothing created yet — this is the actual bug the delay fixes
+
+    from app.services.joiner import sweep_pending_provisioning
+    async with db_override.factory() as session:
+        stored = (await session.scalars(select(JoinerRequest).where(JoinerRequest.id == UUID(data["id"])))).one()
+        stored.provision_at = datetime.now(timezone.utc) - timedelta(minutes=1)  # simulate the delay having elapsed
+        await session.commit()
+        provisioned = await sweep_pending_provisioning(session)
+    assert provisioned == 1
+    async with db_override.factory() as session:
+        stored = (await session.scalars(select(JoinerRequest).where(JoinerRequest.id == UUID(data["id"])))).one()
+        assert stored.status == "SCHEDULED" and stored.user_id is not None
+        assert sorted(t["provider_name"] for t in stored.targets) == ["Entra", "Okta"]
+    assert sorted(name for name, _ in FakeConnector.created) == ["Entra", "Okta"]
+
+
+@pytest.mark.asyncio
+async def test_the_delay_never_pushes_provisioning_past_the_start_date(db_override):
+    """A joiner starting soon must still get real accounts right away, exactly as before this feature existed —
+    the global delay can only ever make creation earlier-relative-to-start, never later than the start date."""
+    async with db_override.factory() as session:
+        ids = await _seed(session)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await _set_provisioning_delay(client, 30)
+        response = await client.post("/api/v1/lifecycle/joiners", json=body(ids, start=future(1)))
+    assert response.status_code == 201
+    data = response.json()
+    assert data["status"] == "SCHEDULED"  # NOT deferred — created immediately despite the 30-day setting
+    assert sorted(t["status"] for t in data["targets"]) == ["CREATED", "CREATED"]
+
+
+@pytest.mark.asyncio
+async def test_start_immediately_is_never_affected_by_the_delay(db_override):
+    async with db_override.factory() as session:
+        ids = await _seed(session)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await _set_provisioning_delay(client, 14)
+        response = await client.post("/api/v1/lifecycle/joiners", json=body(ids, start=datetime.now(timezone.utc)))
+    assert response.status_code == 201
+    data = response.json()
+    assert data["status"] == "ACTIVE"  # created AND enabled immediately, exactly as if no delay were configured
+    assert sorted(t["status"] for t in data["targets"]) == ["ENABLED", "ENABLED"]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_pending_provisioning_joiner_stops_the_sweep_from_touching_it(db_override):
+    async with db_override.factory() as session:
+        ids = await _seed(session)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await _set_provisioning_delay(client, 5)
+        created = await client.post("/api/v1/lifecycle/joiners", json=body(ids, start=future(30)))
+        joiner_id = created.json()["id"]
+        cancelled = await client.delete(f"/api/v1/lifecycle/joiners/{joiner_id}")
+    assert cancelled.status_code == 200 and cancelled.json()["status"] == "CANCELLED"
+
+    from app.services.joiner import sweep_pending_provisioning
+    async with db_override.factory() as session:
+        stored = (await session.scalars(select(JoinerRequest).where(JoinerRequest.id == UUID(joiner_id)))).one()
+        stored.provision_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        await session.commit()
+        provisioned = await sweep_pending_provisioning(session)
+    assert provisioned == 0 and FakeConnector.created == []
+
+
+@pytest.mark.asyncio
+async def test_sweep_also_activates_immediately_if_the_start_date_has_passed_by_the_time_it_runs(db_override):
+    """A short delay relative to a near-term start date: by the time the sweep actually provisions the accounts,
+    the start date may already be behind — the sweep must activate in the same pass, not leave it SCHEDULED
+    waiting for sweep_joiners to notice on some later tick."""
+    async with db_override.factory() as session:
+        ids = await _seed(session)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await _set_provisioning_delay(client, 2)
+        response = await client.post("/api/v1/lifecycle/joiners", json=body(ids, start=future(3)))
+    assert response.json()["status"] == "PENDING_PROVISIONING"
+    joiner_id = response.json()["id"]
+
+    from app.services.joiner import sweep_pending_provisioning
+    async with db_override.factory() as session:
+        stored = (await session.scalars(select(JoinerRequest).where(JoinerRequest.id == UUID(joiner_id)))).one()
+        stored.provision_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        stored.start_at = datetime.now(timezone.utc) - timedelta(minutes=1)  # the start date has ALSO already passed
+        await session.commit()
+        await sweep_pending_provisioning(session)
+    async with db_override.factory() as session:
+        stored = (await session.scalars(select(JoinerRequest).where(JoinerRequest.id == UUID(joiner_id)))).one()
+        assert stored.status == "ACTIVE"

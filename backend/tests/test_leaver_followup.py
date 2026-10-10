@@ -382,6 +382,7 @@ async def test_a_reactivated_leaver_can_be_sent_through_the_process_again(db_ove
 
 @pytest.mark.asyncio
 async def test_deletion_sweep_never_deletes_a_person_who_is_active_again(db_override):
+    from app.models import LifecycleEvent
     async with db_override.factory() as session:
         ids = await _seed(session, delete_after_days=1)
     authenticate_as("AccessPilot.Admin")
@@ -390,12 +391,74 @@ async def test_deletion_sweep_never_deletes_a_person_who_is_active_again(db_over
     async with db_override.factory() as session:
         person = await session.get(User, ids["person"])
         person.status = "ACTIVE"                                            # reactivated outside AccessPilot
-        person.accounts_delete_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        scheduled_for = datetime.now(timezone.utc) - timedelta(minutes=1)
+        person.accounts_delete_at = scheduled_for
         await session.commit()
         assert await sweep_account_deletions(session) == 0
         person = await session.get(User, ids["person"])
+        cancelled = list((await session.scalars(select(LifecycleEvent).where(LifecycleEvent.event_type == "DELETION_CANCELLED"))).all())
     assert person.accounts_delete_at is None and person.accounts_deleted_at is None and person.status == "ACTIVE"
     assert not [c for c in FakeConnector.calls if c[0] == "deleted"]
+    # The "leaver process must not break on a re-enable" behavior is now VISIBLE, not just true: a clearly
+    # separate, non-alarming log entry records that a scheduled deletion was cancelled and why.
+    assert len(cancelled) == 1 and cancelled[0].user_id == ids["person"]
+    assert cancelled[0].changes["reason"] == "account re-enabled before the scheduled deletion"
+    assert cancelled[0].changes["scheduled_for"] == scheduled_for.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_completed_deletion_is_logged_as_its_own_event_type(db_override):
+    from app.models import LifecycleEvent
+    async with db_override.factory() as session:
+        ids = await _seed(session, delete_after_days=1)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await _leave(db_override, ids["person"])
+    async with db_override.factory() as session:
+        person = await session.get(User, ids["person"])
+        person.accounts_delete_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        await session.commit()
+        completed = await sweep_account_deletions(session)
+        events = list((await session.scalars(select(LifecycleEvent).where(LifecycleEvent.event_type == "ACCOUNTS_DELETED"))).all())
+        leaver_events = list((await session.scalars(select(LifecycleEvent).where(LifecycleEvent.event_type == "LEAVER"))).all())
+    assert completed == 1
+    # The deletion is its own distinct event — separate from the original "LEAVER" disable event, so an admin can
+    # filter the log to see only who was actually deleted vs. only who was disabled.
+    assert len(events) == 1 and events[0].user_id == ids["person"]
+    assert {a["provider"] for a in events[0].changes["accounts"]} == {"Entra", "Okta"}
+    assert all(a["ok"] for a in events[0].changes["accounts"])
+    assert events[0].changes["scheduled_for"] is not None and events[0].changes["deleted_at"] is not None
+    assert len(leaver_events) == 1  # unchanged — the original disable event is still there, untouched
+
+
+@pytest.mark.asyncio
+async def test_scheduled_deletions_endpoint_shows_who_is_disabled_and_waiting(db_override):
+    from app.services.leaver_followup import list_scheduled_deletions
+    async with db_override.factory() as session:
+        ids = await _seed(session, delete_after_days=1)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await _leave(db_override, ids["person"])
+    async with db_override.factory() as session:
+        rows = await list_scheduled_deletions(session)
+    assert len(rows) == 1
+    assert rows[0].user_id == ids["person"] and rows[0].status == "SCHEDULED"
+    assert {p.provider_name for p in rows[0].providers} == {"Entra", "Okta"}
+    assert all(p.status == "WAITING" for p in rows[0].providers)
+
+    # Once deletion partially fails (one directory unreachable), the live view shows exactly which directory is
+    # still waiting — not a silent, unexplained stall.
+    FakeConnector.fail_delete = {"okta-1"}
+    async with db_override.factory() as session:
+        person = await session.get(User, ids["person"])
+        person.accounts_delete_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        await session.commit()
+        completed = await sweep_account_deletions(session)
+        rows = await list_scheduled_deletions(session)
+    assert completed == 0  # partial failure — never falsely marked complete
+    assert len(rows) == 1
+    by_provider = {p.provider_name: p.status for p in rows[0].providers}
+    assert by_provider == {"Entra": "DELETED", "Okta": "WAITING"}
 
 
 @pytest.mark.asyncio

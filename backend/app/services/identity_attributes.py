@@ -3,10 +3,11 @@ from __future__ import annotations
 from typing import Optional
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AccessPilotError
-from app.models import IdentityProvider, User
+from app.models import IdentityAccount, IdentityProvider, User
 from app.providers.graph_client import GraphError
 from app.services.audit import record_audit
 from app.services.birthright import reconcile_birthright_policies_for_user
@@ -14,8 +15,15 @@ from app.services.provider_configuration import _connector
 
 
 async def apply_user_attribute_change(session: AsyncSession, user_id: UUID, department: Optional[str], job_title: Optional[str], actor_subject: str, request_id: str, *, via_workflow: bool = False) -> User:
-    """The real write: pushes department/job_title to the identity's own provider (Entra/Okta stays the source of
-    truth, never just a local-only edit), updates the local row, audits it, then runs the same birthright mover
+    """The real write: pushes department/job_title to the identity's own (primary) provider first (Entra/Okta/AD
+    stays the source of truth, never just a local-only edit) — that write is authoritative: its result is what
+    gets stored locally and what birthright matching uses. The SAME change is then mirrored, best-effort, to
+    every OTHER real directory account this person holds (e.g. a linked Active Directory account alongside a
+    primary Entra one — see app.services.accounts/joiner for how a person ends up with more than one). Real bug
+    found live: a person with accounts in two directories only ever had the primary one updated, so department/
+    job title silently drifted out of sync in the other directory forever. A secondary directory being
+    unreachable or rejecting the write is recorded (audit metadata + logged) but never blocks or undoes the
+    primary write, which already succeeded. Updates the local row, audits it, then runs the same birthright mover
     reconciliation a directory sync would trigger for the same change arriving from the other direction. Shared by
     the instant admin-edit path (api.v1.directory.update_user_attributes) and the workflow-approved path
     (services.workflows's USER_ATTRIBUTES completion branch) so both apply the exact same sequence."""
@@ -33,7 +41,20 @@ async def apply_user_attribute_change(session: AsyncSession, user_id: UUID, depa
     attributes_changed = user.department != updated.department or user.job_title != updated.job_title
     previous_attributes = {"department": user.department, "job_title": user.job_title}
     user.department, user.job_title = updated.department, updated.job_title
-    await record_audit(session, action="USER_ATTRIBUTES_UPDATED", target_type="USER", target_id=user.id, provider_id=provider.id, request_id=request_id, metadata={"department": updated.department, "job_title": updated.job_title, "via_workflow": via_workflow})
+
+    other_accounts = (await session.scalars(select(IdentityAccount).where(IdentityAccount.user_id == user.id, IdentityAccount.provider_id != user.provider_id))).all()
+    other_directory_results = []
+    for account in other_accounts:
+        account_provider = await session.get(IdentityProvider, account.provider_id)
+        if account_provider is None or account_provider.type == "CSV":
+            continue
+        try:
+            await _connector(account_provider).update_user(account.external_id, department=department, job_title=job_title)
+            other_directory_results.append({"provider": account_provider.name, "ok": True})
+        except (GraphError, NotImplementedError) as exc:
+            other_directory_results.append({"provider": account_provider.name, "ok": False, "error": getattr(exc, "message", str(exc))})
+
+    await record_audit(session, action="USER_ATTRIBUTES_UPDATED", target_type="USER", target_id=user.id, provider_id=provider.id, request_id=request_id, metadata={"department": updated.department, "job_title": updated.job_title, "via_workflow": via_workflow, "other_directories": other_directory_results})
     await session.commit()
     await session.refresh(user)
     if attributes_changed:

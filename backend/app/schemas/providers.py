@@ -19,7 +19,7 @@ def _validate_username_convention(value: Optional[str]) -> Optional[str]:
 
 class ProviderCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
-    provider_type: str = Field(pattern="^(ENTRA|OKTA|MOCK)$")
+    provider_type: str = Field(pattern="^(ENTRA|OKTA|MOCK|ACTIVE_DIRECTORY)$")
     tenant_id: str = Field(min_length=1, max_length=200)
     organization_url: Optional[str] = Field(default=None, max_length=500)
     client_id: Optional[str] = None
@@ -78,9 +78,22 @@ class ProviderResponse(BaseModel):
     provisioning_domain: Optional[str] = None
     username_convention: Optional[str] = None
     last_sync_at: Optional[datetime]
+    # AD agent connectivity (Phase 1 — see app.services.agent). None/False for every ENTRA/OKTA/MOCK provider,
+    # which never have an agent at all. agent_connected is a plain recency check (heartbeat seen within the last
+    # few missed-heartbeat intervals), not a stored status — matches this app's "recomputed on read, never
+    # cached" convention for anything that's just a view of current state.
+    agent_configured: bool = False
+    agent_last_seen_at: Optional[datetime] = None
+    agent_connected: bool = False
 
 
 class DomainResponse(BaseModel):
     name: str
     is_verified: bool
     is_default: bool
+
+
+class AgentKeyResponse(BaseModel):
+    """The agent's plaintext API key — returned exactly once, at generation time, never stored or shown again
+    (only its PBKDF2 hash is kept). Same one-time-reveal convention as the bootstrap admin credential."""
+    api_key: str

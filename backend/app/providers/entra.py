@@ -448,6 +448,24 @@ class EntraProvider(IdentityProvider):
                 body["surname"] = request.surname
             if request.employee_id:
                 body["employeeId"] = request.employee_id
+            if request.office:
+                body["officeLocation"] = request.office
+            if request.company:
+                body["companyName"] = request.company
+            if request.mobile_phone:
+                body["mobilePhone"] = request.mobile_phone
+            if request.street_address:
+                body["streetAddress"] = request.street_address
+            if request.city:
+                body["city"] = request.city
+            if request.state:
+                body["state"] = request.state
+            if request.postal_code:
+                body["postalCode"] = request.postal_code
+            if request.country:
+                body["country"] = request.country
+            # No "description" field exists on a Graph user object (that's a Group/App concept) — request.description
+            # is simply not applicable here, never silently dropped-and-pretended-set.
             response = await client.request("POST", "/users", json=body)
         # Graph's POST /users response does NOT include `department`/`jobTitle` unless explicitly $select'd — they
         # ARE saved on the real object (we just set them above), just not echoed back. Trust what we sent rather

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AccessPilotError
 from app.models import AuditLog, IdentityProvider, SyncError, SyncRun
+from app.providers.active_directory import ActiveDirectoryProvider
 from app.providers.base import NormalizedDomain
 from app.providers.entra import EntraProvider
 from app.providers.graph_client import GraphError
@@ -23,6 +24,8 @@ def _connector(provider: IdentityProvider):
         return MockProvider()
     if provider.type == "OKTA":
         return OktaProvider(provider)
+    if provider.type == "ACTIVE_DIRECTORY":
+        return ActiveDirectoryProvider(provider)
     return EntraProvider(provider)
 
 async def list_providers(session: AsyncSession) -> list[IdentityProvider]:

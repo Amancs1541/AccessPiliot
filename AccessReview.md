@@ -462,3 +462,144 @@ A new built-in SoC widget, "Identity Risk Posture," rolls up every open risk sig
 The Entitlement Catalog page now shows a banner when entitlements are still sitting at their auto-created default (Low risk, no description, no owner) — "N entitlements still unclassified" — with a one-click toggle to filter the table down to just those. Without this, the catalog could look complete at a glance while almost nothing in it had actually been reviewed by anyone.
 
 A matching "Unclassified entitlements" widget is also available on the Security Operations dashboard, for governance-health visibility alongside the other SoC signals.
+
+## 44. Active Directory connector — Phase 1: agent connectivity
+
+The first piece of a new on-premises Active Directory connector, scoped deliberately: **this phase does not read or write anything in Active Directory yet.** It proves the one thing every later phase depends on — that a small on-prem agent can reach AccessPilot at all.
+
+**Why an agent, when Entra/Okta don't need one:** both of those are cloud APIs AccessPilot calls directly. On-prem AD's LDAP port is normally only reachable from inside the customer's own network, so instead of AccessPilot reaching in, a small agent process runs inside that network and calls **out** to AccessPilot over plain HTTPS — no inbound firewall rule ever needed on the customer's side. Same pattern Entra Connect and Okta's own AD agent use.
+
+**What's there today:**
+- A new **"Active Directory"** card on the Providers page. Adding one just needs a name — no LDAP configuration exists yet, since there's nothing to connect to in this phase.
+- **"Generate agent key"** — a one-time-shown credential (never stored or shown again, only its hash is kept) the agent authenticates with. Regenerating it immediately invalidates whatever key an already-running agent is using.
+- **"Download agent script"** — a single, dependency-free Python file (standard library only, works out of the box on Windows Server or Linux) that heartbeats AccessPilot every 60 seconds once given the provider's URL, id, and key as environment variables. A `--once` flag sends a single heartbeat and exits, for a quick connectivity test.
+- A live **"Agent connected"** / **"Agent not responding"** badge, based on whether a heartbeat has landed in the last few minutes — not a one-time confirmation, a continuous recency check.
+
+**What's explicitly not built yet** (later phases): LDAP configuration (server address, base DN, bind credentials), reading real users/groups, group membership writes, user provisioning. Those all build on this same agent process once it's proven it can reach AccessPilot reliably.
+
+## 45. Active Directory connector — dynamic LDAP configuration + Phase 2: real read-only sync
+
+Two more pieces landed on top of Phase 1, against a real test Active Directory domain controller:
+
+**Dynamic configuration.** The Active Directory provider card now has a real **"LDAP connection"** panel — LDAP URL, base DN, bind username/DN, and bind password, all entered and saved from the Providers page itself (no config files, no environment variables). The password is Fernet-encrypted the exact same way Entra's own Graph client secret already is. A **"Test connection"** button performs a real LDAPS bind with whatever is currently saved.
+
+**Phase 2: real read-only sync.** The connector now actually reads your directory — real users (with department/title/enabled-or-disabled state) and real groups (with direct membership), flowing through the exact same sync pipeline Entra/Okta already use, with zero changes to that pipeline. A few honest, deliberate scope boundaries for this pass:
+- **Direct group membership only** — not nested/transitive ("is this person in this group via another group"), which needs a different, more expensive query and is a clearly-flagged later phase.
+- **No "roles" or "applications" yet** — plain on-premises Active Directory has no native equivalent to Entra's directory roles or enterprise applications. Rather than guess at a mapping (e.g. treating certain privileged groups as "roles"), this returns empty for now; a few well-known privileged groups (Domain Admins, Enterprise Admins, Schema Admins, Administrators) are still flagged on the Group itself.
+- **No writes yet** — group membership changes, enabling/disabling a user, and provisioning a new account in Active Directory are all still ahead.
+
+Verified for real against a live test domain: a real sync run correctly created real User and Group rows (including a disabled `krbtgt`/`Guest` correctly recognized as disabled, and `Administrators`' real members correctly resolved) — then fully cleaned up afterward.
+
+## 46. Active Directory: a "Sync now" button, and a Source label on every User/Group
+
+Two more pieces, closing the loop on Phase 2:
+
+- **"Sync now" directly on the Active Directory provider card** — the existing Sync page only ever shows one provider (Entra, or the first one if Entra isn't configured), so a second directory had no way to trigger a sync. Rather than change that shared page, the Active Directory card now has its own "Sync now" button and a plain summary of the last run (users/groups/roles processed, any errors).
+- **Every User and Group now shows which connector it actually came from.** The Groups list and detail page gained a new **Source** column/field (Groups never had this at all before); Users already showed this on the list and detail pages, unchanged. An Active Directory-sourced group gets a visually distinct badge, so it's easy to tell apart from an Entra- or Okta-synced one at a glance — useful once more than one directory is connected.
+
+Verified for real: ran a real sync against the test domain, confirmed every synced user and group came back correctly labeled `ACTIVE_DIRECTORY`, then fully cleaned up.
+
+## 47. Active Directory connector — Phase 3: writes, and every User-page button checked for real
+
+Phase 3 makes Active Directory a two-way connector instead of read-only, and closes out a full audit of "does every button on the User page actually work for an AD-sourced person."
+
+**What was built:**
+- Editing a person's **Department**/**Job title**, enabling/disabling their account, setting their **manager**, and deleting a user all now perform a real write against the directory for AD, matching what Entra/Okta already do.
+- Adding/removing someone from a group now really happens in AD — and critically, this is also what makes the **Activate / Deactivate / Revoke** buttons on Assignments and My Access work for AD-backed group access. That wiring was missing even after the underlying group-membership code was written; it's fixed now, verified against the real test domain.
+- Every write was checked against real AD behavior first rather than guessed — for example, AD doesn't raise an error when you ask it to do something that's already true (add someone already in a group, disable an already-disabled account); that's treated as success, the same convention already used for Entra and Okta.
+- Fixed a real bug where a directory write that failed (person not found, directory rejected the change) would have surfaced as a raw server error instead of a clean message — confirmed fixed by deliberately triggering that failure against the real test domain and watching it come back clean.
+
+**What this means for the User page**: Department, Job title, and Enable/Disable now work for AD users exactly as they do for Entra/Okta users. Activate/Deactivate/Revoke (reached from Assignments/My Access) now work for AD-backed group access too. No existing attribute was missing — Department, Job title, status, email, name, and manager already covered everything the buttons needed.
+
+**Still not built** (Phase 4, a separate future step): creating brand-new AD users or groups from AccessPilot. Nested/transitive group membership and multi-domain support also remain out of scope.
+
+Verified: 3 new tests confirming the error-handling fix, 771 tests passing total, zero regressions. Live-verified against the real test domain — deliberately triggered a "not found" write and confirmed a clean error, and separately confirmed real AD group membership is granted and revoked correctly through the real Activate/Deactivate buttons' own code path. Backend restarted, no migration needed.
+
+## 48. Cross-provider account mapping
+
+With two real directories now connected (Entra and Active Directory), a real question came up: if someone's main account is in Entra but they get assigned a group that lives in AD, does it actually work? The honest answer, before this round, was **no** — every grant/revoke in the system quietly used the person's *main* account's ID no matter which directory the group actually belonged to. It happened to work until now only because every resource had always lived in the same directory as a person's main account.
+
+**What changed:**
+- A grant or revoke now looks up the person's own account in the **resource's own directory**, not their main one. If they don't have one there yet, AccessPilot creates it automatically, right then, using the same username rules Joiner already uses — no separate manual step needed.
+- When someone is submitted through Joiner, AccessPilot now also looks at what their department's birthright policies would grant them and automatically creates accounts in **every** directory those policies touch — not just the directories someone manually checked a box for.
+- A directory that can't create accounts yet (Active Directory provisioning is still a later step) fails that one target cleanly with a clear message, instead of crashing the whole submission.
+- Groups already showed which directory they came from; Roles and Applications now show the same thing too, right in the picker when building an Access Package or Business Role — so it's clear at a glance whether an entitlement is an Entra one or an AD one.
+
+Verified with 9 new tests (779 total passing, zero regressions) and live, twice, against the real tenant and the real test Active Directory server: a real cross-directory grant correctly used the right account and was fully revoked, and the auto-detection correctly identified a real Active Directory group's policy as needing a real AD account. Everything created for testing was cleaned up afterward. No migration needed; backend restarted.
+
+## 49. Active Directory connector — Phase 4: creating real accounts and groups
+
+The last piece of the original four-phase plan: AccessPilot can now actually create a new account or a new group in Active Directory, not just read from it or change existing ones.
+
+- **Creating a person**: a brand-new AD account is created safely disabled first, given a real one-time password, and only switched on once that password is in place — the same sequence any careful AD administrator follows, done automatically.
+- **Creating a group**: a real, proper security group, ready to have members added to it.
+- A duplicate username or group name is caught cleanly with a clear message, the same way it already works for Entra and Okta.
+
+This was the missing piece behind the account-mapping work from the previous round: before today, telling Joiner "this person needs an Active Directory account too" could correctly figure out that they needed one, but couldn't actually create it — it would fail with "doesn't support creating accounts yet." That gap is now closed.
+
+Verified with 6 new tests (785 total passing, zero regressions) and live against the real test Active Directory server: created a real enabled account and confirmed its one-time password genuinely works to sign in, created a real disabled account, confirmed a duplicate is rejected, and created a real security group. Then, as the real end-to-end proof, submitted a real new-hire through Joiner with only Microsoft Entra picked by hand — and confirmed Active Directory was still detected automatically and a real, working AD account was created for them too, exactly as designed. Everything created during testing (including a real Entra account the test itself triggered, since Joiner genuinely provisions for real) was fully cleaned up and independently re-confirmed gone. No migration needed; backend restarted.
+
+**The Active Directory connector is now complete across all four original phases**: connect, read, write, and create.
+
+## 51. Leaver account deletion: a save bug fixed, and the log now shows what's waiting, deleted, or cancelled
+
+A screenshot from the real Leaver Policy screen showed "The request contains invalid data" when trying to save a deletion schedule — a real bug, now fixed. The built-in Default policy carries an internal priority value the save screen was quietly re-sending even though its own priority field is hidden for that policy; it no longer does.
+
+The Leaver log also now shows three things that used to be invisible:
+- **Accounts deleted** — only the people whose accounts were actually removed from every directory, with when that was originally scheduled for.
+- **Scheduled deletion cancelled** — someone who came back before their waiting period ended. Nothing was deleted, and now there's a record saying so, instead of it just quietly not happening.
+- A new **"Scheduled account deletions"** list on the Leavers page shows everyone currently disabled and waiting it out, with each connected directory's own status — so if one directory is slow or temporarily unreachable, that shows as "waiting", not as a silent gap.
+
+Verified with real accounts: a deletion that completes is logged correctly with the right timing; a person re-enabled mid-wait is logged as cancelled with their account genuinely untouched. Also confirmed, live, that the background process which performs these deletions runs entirely on its own — a real pending deletion on a real account finished automatically within a minute of the directory coming back online, with no one needing to click anything.
+
+One thing to decide: the Default policy's real "delete after" setting is currently 30 days (set while confirming the fix), not the 90 chosen earlier — let me know which you'd like kept.
+
+## 52. Editing someone's department or job title now updates every directory they're in
+
+Found from a real screenshot of "Aman Sign," a person with both a Microsoft Entra ID and an Active Directory
+account: changing their department on the User Detail page was only ever reaching Entra. The Active Directory
+side silently kept whatever it had before — in this real case, it was still showing "Finance" days after the
+department had actually been changed to "AppDev" in Entra.
+
+Editing department or job title now pushes the same change to **every** directory the person has an account in,
+not just the primary one. If a second directory happens to be unreachable at that moment, the main change still
+goes through — it isn't held hostage by one directory being briefly unavailable — and that one gets recorded so
+it's not silently missed.
+
+Verified with 2 new tests and live on the real account from the report: pushed a real change through and confirmed
+it landed in both Entra and Active Directory. As a direct result, Aman Sign's Active Directory record — which had
+genuinely drifted out of sync before this fix — is now correctly back in step with Entra. 793 backend tests
+passing, zero regressions, no migration. Backend restarted.
+
+## 53. A global policy for when Joiner accounts actually get created
+
+Until now, submitting a new hire through Joiner created their real account in every chosen directory **the
+instant the form was submitted** — disabled until their start date, but the account itself already existed from
+day one, no matter how far out that start date was.
+
+There's now a single admin setting, on the Movers page: **"Create joiner accounts (days after submission)."**
+Leave it blank and nothing changes. Set it to, say, 14, and a new hire submitted a month early won't get a real
+account in Entra or Active Directory until 14 days after their submission — not the moment someone fills in the
+form.
+
+One deliberate guarantee: this setting can never get in its own way. If someone's start date is sooner than the
+delay would allow — including a "start immediately" new hire — their account is still created right away, exactly
+as it always has been. The delay only ever applies when there's genuine room for it.
+
+A joiner waiting on this shows up in the Joiners list clearly labeled "Pending provisioning," and can still be
+cancelled at that stage like any other joiner that hasn't started yet.
+
+Verified with 5 new tests — including one that caught a real bug in the first version of this logic, where a
+near-term joiner was incorrectly deferred instead of created immediately, fixed before anything shipped — plus a
+full live run against the real tenant: a real account provably did not exist, then was provably created only once
+the delay had elapsed. 798 backend tests passing, zero regressions. Migrated live, backend restarted.
+
+## 50. Sync scheduling, more account fields at creation, and a full system check
+
+Three more pieces closing out this arc, plus a full re-test of everything built so far.
+
+- **Sync on a schedule**: the Active Directory provider card now has a "Sync automatically every (minutes)" field. Leave it blank and nothing changes — sync stays manual. Set a number and AccessPilot keeps that directory current on its own.
+- **More fields when creating someone**: Joiner's "New joiner" form has a new, optional section — office, company, mobile phone, address, and (for Active Directory) a description. These apply once, at creation, to whichever directories the person gets an account in.
+- **A full check of everything**: all four Active Directory phases were re-tested against the real tenant and the real test server, plus two new combined tests — one Access Package holding both an Entra group and an Active Directory group assigned to a single person, and one new-hire created with accounts in both directories from a single Joiner submission. Every check passed. One Microsoft-side delay (a group-membership check reading stale for a few seconds right after a real change) was investigated and confirmed to be Microsoft's own normal behavior, not an AccessPilot issue.
+
+A full written report of this check — what was tested, how the account-mapping actually works, a self-test walkthrough, and the handful of known limits that remain — was delivered separately.

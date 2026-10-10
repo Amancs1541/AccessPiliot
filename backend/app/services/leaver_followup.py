@@ -11,9 +11,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AccessPilotError
-from app.models import IdentityAccount, IdentityProvider, ReenableRequest, User
+from app.models import IdentityAccount, IdentityProvider, LifecycleEvent, ReenableRequest, User
 from app.providers.graph_client import GraphError
-from app.schemas.lifecycle import ReenableRequestCreate, ReenableRequestResponse
+from app.schemas.lifecycle import ReenableRequestCreate, ReenableRequestResponse, ScheduledDeletionProvider, ScheduledDeletionResponse
 from app.services.accounts import ensure_primary_account, set_account_enabled, set_person_enabled
 from app.services.assignments import _resolve_internal_user_id
 from app.services.audit import record_audit
@@ -198,8 +198,13 @@ async def decide(session: AsyncSession, request_row_id: UUID, approve: bool, not
 
 async def sweep_account_deletions(session: AsyncSession) -> int:
     """Worker entry point: deletes the accounts of every leaver whose policy's delete_after_days has elapsed, in every
-    IdP (each attempted independently; a failed one is retried on the next tick). The person's row is kept, labelled
-    DELETED, and an audit entry records who/what was deleted. Skipped while a re-enable request is pending."""
+    IdP (each attempted independently; a failed one is retried on the next tick — e.g. a directory being briefly
+    unreachable never loses the attempt, it just stays WAITING for the next pass). The person's row is kept,
+    labelled DELETED, and an audit entry + a LifecycleEvent (event_type=ACCOUNTS_DELETED) record who/what was
+    deleted, so it shows up in the Leaver log as its own, clearly separate section from the original disable.
+    Skipped while a re-enable request is pending. A deletion that gets CANCELLED because the person was
+    reactivated during the waiting period is also recorded (event_type=DELETION_CANCELLED) — previously this was
+    silent, so a re-enable during the retention window looked exactly like nothing having happened at all."""
     from app.services.lifecycle import _notify_lifecycle, get_lifecycle_settings
 
     now = datetime.now(timezone.utc)
@@ -211,8 +216,12 @@ async def sweep_account_deletions(session: AsyncSession) -> int:
         user = await session.get(User, user_id)
         if user.status != "DISABLED":
             # Reactivated since the leaver process ran (approved re-enable, or a direct change in the directory) --
-            # never delete a currently-active person's accounts. Cancel the scheduled deletion.
+            # never delete a currently-active person's accounts. Cancel the scheduled deletion — and record that
+            # this happened, so "the leaver process must not break" on a re-enable is visible, not just true.
+            scheduled_for = user.accounts_delete_at
             user.accounts_delete_at = None
+            session.add(LifecycleEvent(user_id=user_id, event_type="DELETION_CANCELLED", source="SYSTEM", changes={"scheduled_for": scheduled_for.isoformat() if scheduled_for else None, "reason": "account re-enabled before the scheduled deletion"}))
+            await record_audit(session, action="LEAVER_ACCOUNT_DELETION_CANCELLED", target_type="USER", target_id=user_id, request_id=f"account-deletion-cancelled-{user_id}", metadata={"scheduled_for": scheduled_for.isoformat() if scheduled_for else None})
             await session.commit()
             continue
         await ensure_primary_account(session, user)
@@ -239,13 +248,39 @@ async def sweep_account_deletions(session: AsyncSession) -> int:
             continue
         user = await session.get(User, user_id)
         record = {"display_name": user.display_name, "email": user.email, "employee_id": user.employee_id, "department": user.department, "job_title": user.job_title, "leaver_processed_at": user.leaver_processed_at.isoformat() if user.leaver_processed_at else None}
+        scheduled_for = user.accounts_delete_at
         user.accounts_deleted_at, user.status = now, "DELETED"
         await record_audit(session, action="LEAVER_ACCOUNTS_DELETED", target_type="USER", target_id=user_id, request_id=f"account-deletion-{user_id}", metadata={"person": record, "accounts": results})
+        session.add(LifecycleEvent(user_id=user_id, event_type="ACCOUNTS_DELETED", source="SYSTEM", changes={"scheduled_for": scheduled_for.isoformat() if scheduled_for else None, "deleted_at": now.isoformat(), "accounts": results}))
         settings = await get_lifecycle_settings(session)
         await _notify_lifecycle(session, user, settings, "LIFECYCLE_ACCOUNTS_DELETED", f"{record['display_name']}'s accounts were deleted from {', '.join(r['provider'] for r in results) or 'no directory'} (leaver policy retention ended). The record is kept as Deleted for audit.")
         await session.commit()
         completed += 1
     return completed
+
+
+async def list_scheduled_deletions(session: AsyncSession) -> list[ScheduledDeletionResponse]:
+    """Every person disabled and waiting out their leaver policy's retention period — mirrors
+    app.services.lifecycle.list_scheduled_leavers' shape for the leaver DATE itself. Shown separately from the
+    Leaver log's historical events because this is current STATE ("still waiting, not stuck"), not something
+    that already happened. Each provider's own status is included so a directory that's unreachable right now
+    (e.g. the AD DC being down) reads as a real, explained "waiting" rather than looking identical to a person
+    who simply hasn't reached their deletion date yet."""
+    now = datetime.now(timezone.utc)
+    rows: list[ScheduledDeletionResponse] = []
+    for user in (await session.scalars(select(User).where(User.accounts_delete_at.is_not(None), User.accounts_deleted_at.is_(None), User.leaver_processed_at.is_not(None)).order_by(User.accounts_delete_at))).all():
+        accounts = (await session.scalars(select(IdentityAccount).where(IdentityAccount.user_id == user.id))).all()
+        providers: list[ScheduledDeletionProvider] = []
+        for account in accounts:
+            provider = await session.get(IdentityProvider, account.provider_id)
+            providers.append(ScheduledDeletionProvider(provider_name=provider.name if provider else "Unknown", status="DELETED" if account.status == "DELETED" else "WAITING"))
+        delete_at = user.accounts_delete_at if user.accounts_delete_at.tzinfo else user.accounts_delete_at.replace(tzinfo=timezone.utc)  # SQLite hands back naive values
+        rows.append(ScheduledDeletionResponse(
+            user_id=user.id, user_display_name=user.display_name, user_email=user.email, department=user.department,
+            leaver_processed_at=user.leaver_processed_at, accounts_delete_at=delete_at,
+            status="DUE" if delete_at <= now else "SCHEDULED", providers=providers,
+        ))
+    return rows
 
 
 # ---------------------------------------------------------------- manual leaver: justification -> disable -> approval

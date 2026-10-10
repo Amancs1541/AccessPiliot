@@ -147,6 +147,42 @@ def _policy_action_specs(policy: BirthrightPolicy) -> list[dict]:
     return [{"resource_type": policy.resource_type, "resource_id": str(policy.resource_id), "app_role_external_id": policy.app_role_external_id, "assignment_type": policy.assignment_type}]
 
 
+async def required_providers_for_profile(session: AsyncSession, *, department: Optional[str], job_title: Optional[str] = None, status: str = "ACTIVE", email: Optional[str] = None) -> set[UUID]:
+    """Which real directories a NOT-YET-CREATED person with this profile would need an account in, based on which
+    ACTIVE birthright policies their attributes would match once they exist — e.g. a department whose birthright
+    policy grants an AD-sourced group needs an Active Directory account even if nobody explicitly picked it as a
+    Joiner target. Used by app.services.joiner.create_joiner to auto-detect extra targets on top of whatever was
+    explicitly picked, so 'account mapping' doesn't rely on an admin remembering every directory an entitlement
+    happens to live in. A plain, never-persisted User stands in for the not-yet-created person so this reuses
+    _policy_matches_user/_policy_action_specs exactly, with zero duplicated matching logic."""
+    candidate = User(department=department, job_title=job_title, status=status, email=email or "")
+    active_policies = (await session.execute(select(BirthrightPolicy).where(BirthrightPolicy.status == "ACTIVE"))).scalars().all()
+    provider_ids: set[UUID] = set()
+    for policy in active_policies:
+        if not _policy_matches_user(candidate, policy):
+            continue
+        for spec in _policy_action_specs(policy):
+            resource_type = spec["resource_type"]
+            resource_id = spec["resource_id"] if isinstance(spec["resource_id"], UUID) else UUID(str(spec["resource_id"]))
+            if resource_type == "PACKAGE":
+                items = list((await session.scalars(select(AccessPackageItem).where(AccessPackageItem.package_id == resource_id))).all())
+                for item in items:
+                    provider_id, _, _ = await _resolve_target(session, item.resource_type, item.resource_id)
+                    provider_ids.add(provider_id)
+            elif resource_type == "BUSINESS_ROLE":
+                role = await session.get(BusinessRole, resource_id)
+                if role is None or role.status != "ACTIVE":
+                    continue
+                items = list((await session.scalars(select(BusinessRoleItem).where(BusinessRoleItem.role_id == resource_id))).all())
+                for item in items:
+                    provider_id, _, _ = await _resolve_target(session, item.resource_type, item.resource_id)
+                    provider_ids.add(provider_id)
+            else:
+                provider_id, _, _ = await _resolve_target(session, resource_type, resource_id)
+                provider_ids.add(provider_id)
+    return provider_ids
+
+
 async def evaluate_birthright_policies(session: AsyncSession, user_id: UUID, actor_subject: str, request_id: str, *, bypass_activation: bool = False) -> list[UUID]:
     """Mover/joiner step of the CSV lifecycle: 'Identity -> Birthright Policy -> Role/Group determination'. Reuses
     create_assignment() UNMODIFIED. Idempotent: running this twice for the same identity never creates a

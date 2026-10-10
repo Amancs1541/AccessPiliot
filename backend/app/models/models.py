@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 from typing import Optional
@@ -35,11 +35,34 @@ class IdentityProvider(Base):
     provisioning_domain: Mapped[Optional[str]] = mapped_column(String(255)); username_convention: Mapped[Optional[str]] = mapped_column(String(100))
     # Joiner process: is this IdP a default target when a new joiner's accounts are created? (per-IdP switch, default on)
     provision_joiners: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
+    # ACTIVE_DIRECTORY connectivity agent (see app.services.agent): a small on-prem process that calls OUT to
+    # AccessPilot over HTTPS (never the reverse — no inbound port needed on the customer's network), since
+    # on-prem AD's LDAP port is normally unreachable from outside the corporate network, unlike Entra/Okta's
+    # directly-reachable cloud APIs. agent_api_key_hash is PBKDF2-hashed, same as every other credential this app
+    # only ever needs to verify, never read back (see security.credential_hashing) — the plaintext key is shown to
+    # the admin exactly once, at generation time, never stored. agent_last_seen_at is a plain heartbeat timestamp,
+    # not a sync result — this phase only proves the agent can reach AccessPilot, no LDAP/AD work happens yet.
+    agent_api_key_hash: Mapped[Optional[str]] = mapped_column(String(255))
+    agent_last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at()
 
     @property
     def credential_configured(self) -> bool:
         return bool(self.graph_client_secret_encrypted)
+
+    @property
+    def agent_configured(self) -> bool:
+        return bool(self.agent_api_key_hash)
+
+    @property
+    def agent_connected(self) -> bool:
+        """A plain recency check, not a stored status — "connected" means a heartbeat landed within the last 3
+        missed-interval windows (matches the agent's own 60s heartbeat loop, see app.services.agent), tolerating
+        one or two missed beats before flagging it as down."""
+        if self.agent_last_seen_at is None:
+            return False
+        last_seen = self.agent_last_seen_at if self.agent_last_seen_at.tzinfo else self.agent_last_seen_at.replace(tzinfo=timezone.utc)
+        return last_seen >= datetime.now(timezone.utc) - timedelta(seconds=180)
 
 
 class User(Base):
@@ -287,6 +310,12 @@ class LifecycleSettings(Base):
     # (and disable their linked PU/TU accounts), exactly like the CSV leaver path. Off = only record the event.
     revoke_on_directory_disable: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
     lifecycle_owner_ids: Mapped[Optional[list]] = mapped_column("lifecycle_owner_ids", JSON)
+    # NULL (default) = unchanged behavior: a Joiner's real directory accounts are created the instant the form is
+    # submitted (disabled, then enabled on start_at), no matter how far out the start date is. Set to N = accounts
+    # aren't created until N days after submission — UNLESS that would push creation past the person's own start
+    # date, in which case they're still created immediately (an account can never be enabled on a start date it
+    # doesn't exist yet on) — see app.services.joiner.create_joiner for exactly where this is applied.
+    joiner_provisioning_delay_days: Mapped[Optional[int]] = mapped_column(Integer)
     updated_at: Mapped[datetime] = updated_at()
 
 
@@ -294,8 +323,13 @@ class JoinerRequest(Base):
     """A joiner submitted through the New joiner form: the person's details, when they start, and — per connected
     IdP — the account that was created (disabled) for them. `targets` is a list of {provider_id, provider_name,
     username, external_id, account_id, status (CREATED / ENABLED / FAILED), error}; temporary passwords are NEVER
-    stored, they are shown once when the accounts are created. status: SCHEDULED (accounts exist, disabled, waiting
-    for start_at) -> ACTIVE (all enabled) | PARTIAL (some accounts could not be created/enabled) | CANCELLED."""
+    stored, they are shown once when the accounts are created. status: PENDING_PROVISIONING (submitted, accounts
+    not created yet — only reached when a global provisioning delay is configured, see LifecycleSettings.
+    joiner_provisioning_delay_days) -> SCHEDULED (accounts exist, disabled, waiting for start_at) -> ACTIVE (all
+    enabled) | PARTIAL (some accounts could not be created/enabled) | CANCELLED. requested_targets/profile_extra
+    are the resolved target list (explicit picks + auto-detected providers) and optional profile fields from the
+    original submission — persisted so a deferred (PENDING_PROVISIONING) joiner can be provisioned later with
+    exactly what was originally requested; unused once accounts are actually created."""
     __tablename__ = "joiner_requests"
     id: Mapped[UUID] = uuid_pk(); user_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
     first_name: Mapped[str] = mapped_column(String(120), nullable=False); last_name: Mapped[str] = mapped_column(String(120), nullable=False)
@@ -305,6 +339,9 @@ class JoinerRequest(Base):
     start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False); leaver_date: Mapped[Optional[date]] = mapped_column(Date)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="SCHEDULED", server_default="SCHEDULED")
     targets: Mapped[Optional[list]] = mapped_column("targets", JSON)
+    provision_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    requested_targets: Mapped[Optional[list]] = mapped_column("requested_targets", JSON)
+    profile_extra: Mapped[Optional[dict]] = mapped_column("profile_extra", JSON)
     created_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); created_at: Mapped[datetime] = created_at(); activated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     __table_args__ = (Index("ix_joiner_requests_status_start", "status", "start_at"),)
 

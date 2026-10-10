@@ -10,15 +10,15 @@ import { BreakGlassDashboard } from './BreakGlassDashboard';
 import { IdleGuard, useRefreshSecuritySettings, useAppTimezone } from './IdleGuard';
 import logo from './assets/logo.png';
 
-interface ApiUser { id: string; provider_id: string; external_id: string; email: string; display_name: string; given_name: string | null; surname: string | null; department: string | null; job_title: string | null; status: string; employee_id: string | null; source: string | null; account_type: string; linked_user_id: string | null; employee_category: string | null; manager_id: string | null; start_date: string | null; leaver_date: string | null; employment_type: string | null; last_synced_at: string | null; pending_attribute_change?: boolean; }
+interface ApiUser { id: string; provider_id: string; external_id: string; email: string; display_name: string; given_name: string | null; surname: string | null; department: string | null; job_title: string | null; status: string; employee_id: string | null; source: string | null; account_type: string; linked_user_id: string | null; employee_category: string | null; manager_id: string | null; start_date: string | null; leaver_date: string | null; employment_type: string | null; last_synced_at: string | null; pending_attribute_change?: boolean; provider_type?: string | null; provider_name?: string | null; }
 interface ApiHierarchyNode { id: string; display_name: string; email: string; status: string; employee_category: string | null; manager_id: string | null; }
 interface ApiLinkedAccount { id: string; display_name: string; email: string; account_type: string; status: string; }
 interface ApiPrivilegedAccountPolicy { account_type: string; default_approver_id: string | null; default_approver_display_name: string | null; approval_required: boolean; }
 interface ApiPrivilegedAccountRequest { id: string; requester_id: string; requester_display_name: string | null; account_type: string; status: string; approver_id: string | null; approver_display_name: string | null; justification: string | null; provisioned_user_id: string | null; provisioned_user_display_name: string | null; failure_reason: string | null; created_at: string; decided_at: string | null; }
-interface ApiGroup { id: string; external_id: string; name: string; description: string | null; is_privileged: boolean; status: string; group_label?: string | null; last_synced_at: string | null; }
-interface ApiRole { id: string; external_id: string; name: string; description: string | null; role_type: string; is_privileged: boolean; status: string; }
+interface ApiGroup { id: string; external_id: string; name: string; description: string | null; is_privileged: boolean; status: string; group_label?: string | null; last_synced_at: string | null; provider_type?: string | null; provider_name?: string | null; }
+interface ApiRole { id: string; external_id: string; name: string; description: string | null; role_type: string; is_privileged: boolean; status: string; provider_type?: string | null; provider_name?: string | null; }
 interface ApiApplicationRole { id: string; name: string; description: string | null; }
-interface ApiApplication { id: string; external_id: string; name: string; status: string; app_roles: ApiApplicationRole[] | null; last_synced_at: string | null; }
+interface ApiApplication { id: string; external_id: string; name: string; status: string; app_roles: ApiApplicationRole[] | null; last_synced_at: string | null; provider_type?: string | null; provider_name?: string | null; }
 interface ApiPackageItem { id: string; resource_type: string; resource_id: string; resource_display_name: string | null; app_role_external_id: string | null; }
 interface ApiPackageEligiblePrincipal { principal_type: string; principal_id: string; display_name: string | null; }
 interface ApiPackage { id: string; name: string; description: string | null; status: string; items: ApiPackageItem[]; default_approver_id: string | null; default_fallback_approver_id: string | null; workflow_definition_id?: string | null; workflow_definition_name?: string | null; eligible_principals: ApiPackageEligiblePrincipal[]; owners: { user_id: string; display_name: string | null; email: string | null }[]; created_at: string; }
@@ -1565,6 +1565,16 @@ function sourceLabel(user: ApiUser, providers: ApiProvider[] | null): { label: s
   if (user.source === 'CSV_ONBOARDING') return { label: 'CSV Onboarding', detail: `Employee ID ${user.employee_id} — ${connector}` };
   return { label: provider?.provider_type === 'ENTRA' ? 'Microsoft Entra ID' : provider?.provider_type === 'OKTA' ? 'Okta' : provider?.name || 'Connector', detail: connector };
 }
+// Groups/Roles/Applications never had a client-side provider join the way users' sourceLabel() does — the
+// backend labels provider_type/provider_name directly on each response instead (see
+// directory_read.label_groups_with_provider / label_roles_with_provider / label_applications_with_provider), so
+// this stays a plain formatter, not a providers-list lookup. Shared by every resource type that carries these
+// two fields (Group, Role, Application).
+function resourceSourceLabel(resource: { provider_type?: string | null; provider_name?: string | null }): string {
+  if (resource.provider_type === 'ENTRA') return 'Microsoft Entra ID';
+  if (resource.provider_type === 'OKTA') return 'Okta';
+  return resource.provider_name || 'Connector';
+}
 function UsersPage() {
   const timezone = useAppTimezone();
   const { data: users, error, loading } = useApiResource<ApiUser[]>('/api/v1/users');
@@ -2680,7 +2690,7 @@ function AccessPackagesInteractive() {
           const selectedApp = item.resource_type === 'APPLICATION' ? (applications || []).find(a => a.id === item.resource_id) : undefined;
           return <div key={index} style={{display:'flex',gap:10,alignItems:'flex-end',marginBottom:10}}>
             <label className="key" style={{flex:1}}><span>Target type</span><select className="select" style={{width:'100%'}} value={item.resource_type} onChange={event => updateItem(index, { resource_type: event.target.value, resource_id: '', app_role_external_id: '' })}><option value="GROUP">Group</option><option value="ROLE">Role</option><option value="APPLICATION">Application</option></select></label>
-            <label className="key" style={{flex:1}}><span>{item.resource_type === 'GROUP' ? 'Group' : item.resource_type === 'ROLE' ? 'Role' : 'Application'}</span><select className="select" style={{width:'100%'}} value={item.resource_id} onChange={event => updateItem(index, { resource_id: event.target.value, app_role_external_id: '' })}><option value="">Select...</option>{itemTargets.map((t: ApiGroup | ApiRole | ApiApplication) => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
+            <label className="key" style={{flex:1}}><span>{item.resource_type === 'GROUP' ? 'Group' : item.resource_type === 'ROLE' ? 'Role' : 'Application'}</span><select className="select" style={{width:'100%'}} value={item.resource_id} onChange={event => updateItem(index, { resource_id: event.target.value, app_role_external_id: '' })}><option value="">Select...</option>{itemTargets.map((t: ApiGroup | ApiRole | ApiApplication) => <option key={t.id} value={t.id}>{t.name} ({resourceSourceLabel(t)})</option>)}</select></label>
             {item.resource_type === 'APPLICATION' && <label className="key" style={{flex:1}}><span>Application role</span><select className="select" style={{width:'100%'}} value={item.app_role_external_id} onChange={event => updateItem(index, { app_role_external_id: event.target.value })} disabled={!selectedApp}><option value="">Select a role</option>{(selectedApp?.app_roles || []).map(r => <option key={r.id} value={r.id}>{r.name}</option>)}</select></label>}
             <button type="button" className="btn" aria-label="Remove item" onClick={() => removeItem(index)}><X size={14}/></button>
           </div>;
@@ -3070,7 +3080,7 @@ function BusinessRolesPage() {
           return <div key={index} style={{display:'flex',gap:10,alignItems:'flex-end',marginBottom:10,flexWrap:'wrap'}}>
             <label className="key" style={{flex:'1 1 140px'}}><span>IT Role label</span><input className="select" style={{width:'100%'}} value={item.it_role_label} onChange={event => updateItem(index, { it_role_label: event.target.value })} placeholder="e.g. Finance-L2-ReadWrite"/></label>
             <label className="key" style={{flex:'1 1 110px'}}><span>Type</span><select className="select" style={{width:'100%'}} value={item.resource_type} onChange={event => updateItem(index, { resource_type: event.target.value, resource_id: '', app_role_external_id: '' })}><option value="GROUP">Group</option><option value="ROLE">Role</option><option value="APPLICATION">Application</option></select></label>
-            <label className="key" style={{flex:'1 1 160px'}}><span>{item.resource_type === 'GROUP' ? 'Group' : item.resource_type === 'ROLE' ? 'Role' : 'Application'} (available IdP entitlement)</span><select className="select" style={{width:'100%'}} value={item.resource_id} onChange={event => updateItem(index, { resource_id: event.target.value, app_role_external_id: '' })}><option value="">Select...</option>{itemTargets.map((t: ApiGroup | ApiRole | ApiApplication) => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
+            <label className="key" style={{flex:'1 1 160px'}}><span>{item.resource_type === 'GROUP' ? 'Group' : item.resource_type === 'ROLE' ? 'Role' : 'Application'} (available IdP entitlement)</span><select className="select" style={{width:'100%'}} value={item.resource_id} onChange={event => updateItem(index, { resource_id: event.target.value, app_role_external_id: '' })}><option value="">Select...</option>{itemTargets.map((t: ApiGroup | ApiRole | ApiApplication) => <option key={t.id} value={t.id}>{t.name} ({resourceSourceLabel(t)})</option>)}</select></label>
             {item.resource_type === 'APPLICATION' && <label className="key" style={{flex:'1 1 140px'}}><span>Application role</span><select className="select" style={{width:'100%'}} value={item.app_role_external_id} onChange={event => updateItem(index, { app_role_external_id: event.target.value })} disabled={!selectedApp}><option value="">Select a role</option>{(selectedApp?.app_roles || []).map(r => <option key={r.id} value={r.id}>{r.name}</option>)}</select></label>}
             <button type="button" className="btn" aria-label="Remove item" onClick={() => removeItem(index)}><X size={14}/></button>
           </div>;
@@ -3193,7 +3203,7 @@ function GroupsPage() {
   };
   return <Page eyebrow="ADMINISTRATION" title="Groups" subtitle="Directory groups and membership governance." action={<button className="btn btn-primary" onClick={() => { setOpen(true); setFormMessage(''); }}><Plus size={14}/> Add group</button>}>
     {open && <form role="dialog" aria-modal="true" className="panel" style={{maxWidth:640,marginBottom:18}} onSubmit={submit}><div className="panel-head"><h2>Add group</h2><button type="button" className="btn" aria-label="Close" onClick={() => setOpen(false)}><X size={14}/></button></div><div className="detail-section"><label className="key" style={{display:'block'}}><span>Group name</span><input className="select" style={{width:'100%'}} value={form.display_name} onChange={event => setForm({...form, display_name: event.target.value})}/></label><label className="key" style={{display:'block',marginTop:14}}><span>Description</span><input className="select" style={{width:'100%'}} value={form.description} onChange={event => setForm({...form, description: event.target.value})}/></label><label className="key" style={{display:'block',marginTop:14}}><span>Label (optional) — AccessPilot governance classification, not written to Entra</span><select className="select" style={{width:'100%'}} value={form.group_label} onChange={event => setForm({...form, group_label: event.target.value})}><option value="">No label</option><option value="STANDARD">Standard</option><option value="PRIVILEGED">Privileged</option>{(groupLabels || []).map(l => <option key={l.id} value={l.name}>{l.name}</option>)}</select></label>{formMessage && <div className="notice" style={{marginTop:14}}>{formMessage}</div>}</div><div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setOpen(false)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Creating...' : 'Create group'}</button></div></form>}
-    <TablePanel toolbar={<Toolbar placeholder="Search groups" searchValue={search} onSearchChange={setSearch} filterLabel="All groups" filterValue={privilegedFilter} onFilterChange={setPrivilegedFilter} filterOptions={[{value:'true',label:'Privileged'},{value:'false',label:'Standard'}]}/>}>{loading ? <div className="empty">Loading groups...</div> : error ? <div className="empty">{error}</div> : !groups || groups.length === 0 ? <div className="empty">No groups found.</div> : filteredGroups.length === 0 ? <div className="empty">No groups match this filter.</div> : <table><thead><tr><th>Name</th><th>Description</th><th>Privileged</th><th>Label</th><th>Status</th><th>Last synced</th><th></th></tr></thead><tbody>{filteredGroups.map(g => <tr key={g.id}><td><Link to={`/admin/groups/${g.id}`} className="user-name">{g.name}</Link></td><td>{g.description || '—'}</td><td><span className={`risk ${g.is_privileged ? 'risk-high' : 'risk-low'}`}>{g.is_privileged ? 'Privileged' : 'Standard'}</span></td><td>{g.group_label || '—'}</td><td><StatusBadge status={g.status}/></td><td>{g.last_synced_at ? formatDateTime(g.last_synced_at, timezone) : 'Never'}</td><td><Link to={`/admin/groups/${g.id}`}><ChevronRight size={15} color="#829198"/></Link></td></tr>)}</tbody></table>}</TablePanel>
+    <TablePanel toolbar={<Toolbar placeholder="Search groups" searchValue={search} onSearchChange={setSearch} filterLabel="All groups" filterValue={privilegedFilter} onFilterChange={setPrivilegedFilter} filterOptions={[{value:'true',label:'Privileged'},{value:'false',label:'Standard'}]}/>}>{loading ? <div className="empty">Loading groups...</div> : error ? <div className="empty">{error}</div> : !groups || groups.length === 0 ? <div className="empty">No groups found.</div> : filteredGroups.length === 0 ? <div className="empty">No groups match this filter.</div> : <table><thead><tr><th>Name</th><th>Description</th><th>Privileged</th><th>Label</th><th>Source</th><th>Status</th><th>Last synced</th><th></th></tr></thead><tbody>{filteredGroups.map(g => <tr key={g.id}><td><Link to={`/admin/groups/${g.id}`} className="user-name">{g.name}</Link></td><td>{g.description || '—'}</td><td><span className={`risk ${g.is_privileged ? 'risk-high' : 'risk-low'}`}>{g.is_privileged ? 'Privileged' : 'Standard'}</span></td><td>{g.group_label || '—'}</td><td><span className={`badge ${g.provider_type === 'ACTIVE_DIRECTORY' ? 'warning' : 'neutral'}`}>{resourceSourceLabel(g)}</span></td><td><StatusBadge status={g.status}/></td><td>{g.last_synced_at ? formatDateTime(g.last_synced_at, timezone) : 'Never'}</td><td><Link to={`/admin/groups/${g.id}`}><ChevronRight size={15} color="#829198"/></Link></td></tr>)}</tbody></table>}</TablePanel>
   </Page>;
 }
 
@@ -3272,6 +3282,7 @@ function GroupDetail() {
           <div className="key-grid">
             <div className="key"><span>Privileged</span><strong>{group.is_privileged ? 'Yes — assignable to a directory role' : 'No'}</strong></div>
             <div className="key"><span>Label</span><strong>{group.group_label || '—'}</strong></div>
+            <div className="key"><span>Source</span><strong><span className={`badge ${group.provider_type === 'ACTIVE_DIRECTORY' ? 'warning' : 'neutral'}`}>{resourceSourceLabel(group)}</span></strong></div>
             <div className="key"><span>External ID</span><strong>{group.external_id}</strong></div>
             <div className="key"><span>Members</span><strong>{summary ? summary.member_count : '…'}</strong></div>
             <div className="key"><span>Active AccessPilot grants</span><strong>{summary ? summary.active_assignment_count : '…'}</strong></div>
@@ -3333,7 +3344,7 @@ function RolesPage() {
   const setSearch = (value: string) => setSearchParams(prev => { const next = new URLSearchParams(prev); if (value) next.set('q', value); else next.delete('q'); return next; });
   const setPrivilegedFilter = (value: string) => setSearchParams(prev => { const next = new URLSearchParams(prev); if (value) next.set('privileged', value); else next.delete('privileged'); return next; });
   const filteredRoles = (roles || []).filter(r => (!privilegedFilter || String(r.is_privileged) === privilegedFilter) && (!search || r.name.toLowerCase().includes(search.toLowerCase())));
-  return <Page eyebrow="ADMINISTRATION" title="Directory roles" subtitle="Privileged and standard roles available through AccessPilot."><TablePanel toolbar={<Toolbar placeholder="Search roles" searchValue={search} onSearchChange={setSearch} filterLabel="All roles" filterValue={privilegedFilter} onFilterChange={setPrivilegedFilter} filterOptions={[{value:'true',label:'Privileged'},{value:'false',label:'Standard'}]}/>}>{loading ? <div className="empty">Loading roles...</div> : error ? <div className="empty">{error}</div> : !roles || roles.length === 0 ? <div className="empty">No roles found.</div> : filteredRoles.length === 0 ? <div className="empty">No roles match this filter.</div> : <table><thead><tr><th>Role</th><th>Description</th><th>Provider</th><th>Privileged</th><th>Status</th></tr></thead><tbody>{filteredRoles.map(r => <tr key={r.id}><td className="user-name">{r.name}</td><td>{r.description || '—'}</td><td>Microsoft Entra ID</td><td><span className={`risk ${r.is_privileged ? 'risk-high' : 'risk-low'}`}>{r.is_privileged ? 'Yes' : 'No'}</span></td><td><StatusBadge status={r.status}/></td></tr>)}</tbody></table>}</TablePanel></Page>;
+  return <Page eyebrow="ADMINISTRATION" title="Directory roles" subtitle="Privileged and standard roles available through AccessPilot."><TablePanel toolbar={<Toolbar placeholder="Search roles" searchValue={search} onSearchChange={setSearch} filterLabel="All roles" filterValue={privilegedFilter} onFilterChange={setPrivilegedFilter} filterOptions={[{value:'true',label:'Privileged'},{value:'false',label:'Standard'}]}/>}>{loading ? <div className="empty">Loading roles...</div> : error ? <div className="empty">{error}</div> : !roles || roles.length === 0 ? <div className="empty">No roles found.</div> : filteredRoles.length === 0 ? <div className="empty">No roles match this filter.</div> : <table><thead><tr><th>Role</th><th>Description</th><th>Provider</th><th>Privileged</th><th>Status</th></tr></thead><tbody>{filteredRoles.map(r => <tr key={r.id}><td className="user-name">{r.name}</td><td>{r.description || '—'}</td><td>{resourceSourceLabel(r)}</td><td><span className={`risk ${r.is_privileged ? 'risk-high' : 'risk-low'}`}>{r.is_privileged ? 'Yes' : 'No'}</span></td><td><StatusBadge status={r.status}/></td></tr>)}</tbody></table>}</TablePanel></Page>;
 }
 interface ApiBirthrightPolicy { id: string; name: string; match_field: string | null; match_value: string | null; resource_type: string | null; resource_id: string | null; app_role_external_id: string | null; assignment_type: string; status: string; external_policy_id: string | null; is_advanced: boolean; conditions_count: number; actions_count: number; reconciliation_enabled: boolean; created_at: string; }
 interface ApiBirthrightActionResolution { resourceType: string; resource: string; found: boolean; resolvedId: string | null; resolvedName: string | null; error: string | null; }
@@ -4798,6 +4809,32 @@ function WorkflowRequestsPage() {
 }
 interface ApiLeaverPolicy { id: string; name: string; priority: number; delete_after_days: number | null; scope_type: string; scope_value: string | null; effective_time: string; notify_days_before: number[]; revoke_access: boolean; disable_accounts: boolean; disable_privileged_accounts: boolean; remove_group_memberships: boolean; status: string; is_default: boolean; }
 interface ApiScheduledLeaver { user_id: string; user_display_name: string | null; user_email: string | null; department: string | null; employment_type: string | null; leaver_date: string; policy_name: string; due_at: string; status: string; }
+interface ApiScheduledDeletionProvider { provider_name: string; status: string; }
+interface ApiScheduledDeletion { user_id: string; user_display_name: string | null; user_email: string | null; department: string | null; leaver_processed_at: string; accounts_delete_at: string; status: string; providers: ApiScheduledDeletionProvider[]; }
+// Disabled leavers waiting out their policy's retention period before deletion — a live snapshot of CURRENT
+// state, not a history log, so it belongs next to Scheduled leavers rather than mixed into the Leaver log below.
+// Read-only: there's no admin action here (re-enabling the person is what cancels a scheduled deletion, and
+// that already happens through the normal re-enable request flow).
+function ScheduledDeletionsPanel() {
+  const timezone = useAppTimezone();
+  const { data: rows, reload } = useApiResource<ApiScheduledDeletion[]>('/api/v1/lifecycle/deletions/scheduled');
+  useEffect(() => { const timer = setInterval(() => reload(), 30000); return () => clearInterval(timer); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  return <section className="panel" style={{marginBottom:18}}>
+    <div className="panel-head"><h2>Scheduled account deletions</h2></div>
+    <div className="detail-section">
+      <p className="subtitle" style={{marginTop:0,marginBottom:12}}>Disabled people waiting out their leaver policy's retention period before their accounts are deleted from every directory. Re-enabling someone (via a re-enable request) cancels their scheduled deletion automatically — nothing breaks, it's just logged below as cancelled instead of completed.</p>
+      {!rows || rows.length === 0 ? <p className="subtitle" style={{margin:0}}>No account deletions are scheduled.</p> : <div className="table-wrap"><table><thead><tr><th>Person</th><th>Disabled on</th><th>Accounts deleted on</th><th>Status</th><th>Directories</th></tr></thead><tbody>
+        {rows.map(row => <tr key={row.user_id}>
+          <td><Link to={`/admin/users/${row.user_id}`} className="user-cell"><span className="avatar">{initialsFor(row.user_display_name || '?')}</span><span><span className="user-name">{row.user_display_name || row.user_id}</span>{row.user_email && <span className="user-email">{row.user_email}</span>}</span></Link></td>
+          <td>{formatDateTime(row.leaver_processed_at, timezone)}</td>
+          <td>{formatDateTime(row.accounts_delete_at, timezone)}</td>
+          <td><StatusBadge status={row.status === 'DUE' ? 'PENDING' : 'SCHEDULED'}/></td>
+          <td style={{whiteSpace:'normal'}}>{row.providers.map(p => <span key={p.provider_name} className={`badge ${p.status === 'DELETED' ? 'success' : 'neutral'}`} style={{marginRight:6}}>{p.provider_name}: {p.status === 'DELETED' ? 'deleted' : 'waiting'}</span>)}</td>
+        </tr>)}
+      </tbody></table></div>}
+    </div>
+  </section>;
+}
 // People with a leaver date that has not run yet. "Run now" starts the leaver process immediately; "Cancel" clears the date.
 function ScheduledLeaversPanel() {
   const auth = useAuth();
@@ -4874,7 +4911,7 @@ function LeaverPoliciesPanel() {
     if (days.some(d => !Number.isInteger(d) || d < 0 || d > 90)) { setMessage('Reminders must be whole numbers of days between 0 and 90, e.g. 7, 1.'); return; }
     setSaving(true); setMessage('');
     try {
-      const payload = { name: form.name.trim(), priority: Number(form.priority) || 100, scope_type: form.scope_type, scope_value: form.scope_type === 'ALL' ? null : form.scope_value, effective_time: form.effective_time, notify_days_before: days, revoke_access: form.revoke_access, disable_accounts: form.disable_accounts, disable_privileged_accounts: form.disable_privileged_accounts, remove_group_memberships: form.remove_group_memberships, ...(form.delete_after_days.trim() ? { delete_after_days: Number(form.delete_after_days) } : { clear_delete_after_days: true }), status: form.status };
+      const payload = { name: form.name.trim(), ...(editing?.is_default ? {} : { priority: Number(form.priority) || 100, scope_type: form.scope_type, scope_value: form.scope_type === 'ALL' ? null : form.scope_value }), effective_time: form.effective_time, notify_days_before: days, revoke_access: form.revoke_access, disable_accounts: form.disable_accounts, disable_privileged_accounts: form.disable_privileged_accounts, remove_group_memberships: form.remove_group_memberships, ...(form.delete_after_days.trim() ? { delete_after_days: Number(form.delete_after_days) } : { clear_delete_after_days: true }), status: form.status };
       const response = editingId ? await auth.apiRequest(`/api/v1/lifecycle/leaver-policies/${editingId}`, { method: 'PATCH', body: JSON.stringify(payload) }) : await auth.apiRequest('/api/v1/lifecycle/leaver-policies', { method: 'POST', body: JSON.stringify(payload) });
       if (response.ok) { setOpen(false); setEditingId(null); reload(); }
       else setMessage((await response.json().catch(() => null))?.error?.message || 'Unable to save this policy.');
@@ -4930,7 +4967,7 @@ function LeaverPoliciesPanel() {
 }
 interface ApiLifecycleEvent { id: string; event_type: string; source: string; created_at: string; user_id: string; user_display_name: string | null; user_email: string | null; changes: Record<string, { from: string | null; to: string | null }>; revoked_count: number; granted_count: number; privileged_flagged_count: number; review_campaign_id: string | null; review_campaign_name: string | null; review_status: string | null; review_reviewer_name: string | null; review_item_count: number; review_decided_count: number; review_note: string | null; notified: string[]; }
 interface ApiPendingMove { id: string; user_id: string; user_display_name: string | null; user_email: string | null; current_department: string | null; current_job_title: string | null; new_department: string | null; new_job_title: string | null; effective_at: string; source: string; status: string; failure_reason: string | null; created_at: string; applied_at: string | null; }
-interface ApiLifecycleSettings { mover_review_enabled: boolean; revoke_on_directory_disable: boolean; review_due_days: number; lifecycle_owners: { user_id: string; display_name: string | null; email: string | null }[]; }
+interface ApiLifecycleSettings { mover_review_enabled: boolean; revoke_on_directory_disable: boolean; review_due_days: number; lifecycle_owners: { user_id: string; display_name: string | null; email: string | null }[]; joiner_provisioning_delay_days: number | null; }
 const MOVER_NOTES: Record<string, string> = {
   NO_LEFTOVER_ACCESS: 'Nothing else to review',
   AUTO_REVOKE_OFF: 'Automatic revocation is switched off — access was kept',
@@ -5079,11 +5116,13 @@ function MoversPage() {
   const [revokeOnDisable, setRevokeOnDisable] = useState(true);
   const [dueDays, setDueDays] = useState('14');
   const [ownerIds, setOwnerIds] = useState<string[]>([]);
+  const [provisioningDelayDays, setProvisioningDelayDays] = useState('');
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   useEffect(() => {
     if (!settings) return;
     setEnabled(settings.mover_review_enabled); setRevokeOnDisable(settings.revoke_on_directory_disable); setDueDays(String(settings.review_due_days)); setOwnerIds(settings.lifecycle_owners.map(o => o.user_id));
+    setProvisioningDelayDays(settings.joiner_provisioning_delay_days ? String(settings.joiner_provisioning_delay_days) : '');
   }, [settings]);
   useEffect(() => {
     const timer = setInterval(() => { reload(); reloadMoves(); }, 30000);
@@ -5094,7 +5133,7 @@ function MoversPage() {
     if (!dueDays || Number(dueDays) < 1) { setMessage('Enter a due window of at least 1 day.'); return; }
     setSaving(true); setMessage('');
     try {
-      const response = await auth.apiRequest('/api/v1/lifecycle/settings', { method: 'PUT', body: JSON.stringify({ mover_review_enabled: enabled, revoke_on_directory_disable: revokeOnDisable, review_due_days: Number(dueDays), lifecycle_owner_ids: ownerIds }) });
+      const response = await auth.apiRequest('/api/v1/lifecycle/settings', { method: 'PUT', body: JSON.stringify({ mover_review_enabled: enabled, revoke_on_directory_disable: revokeOnDisable, review_due_days: Number(dueDays), lifecycle_owner_ids: ownerIds, ...(provisioningDelayDays.trim() ? { joiner_provisioning_delay_days: Number(provisioningDelayDays) } : { clear_joiner_provisioning_delay_days: true }) }) });
       if (response.ok) { setMessage('Saved.'); reloadSettings(); }
       else setMessage((await response.json().catch(() => null))?.error?.message || 'Unable to save these settings.');
     } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
@@ -5111,7 +5150,9 @@ function MoversPage() {
           <label className="key"><span>Review is due in (days)</span><input className="select" type="number" min={1} max={365} value={dueDays} onChange={event => setDueDays(event.target.value)}/></label>
           <label className="key"><span>Lifecycle owners (notified about every move; review it when there is no manager)</span>
             <select className="select" value="" onChange={event => { const id = event.target.value; if (id && !ownerIds.includes(id)) setOwnerIds([...ownerIds, id]); }}><option value="">Add an owner…</option>{(users || []).filter(u => !ownerIds.includes(u.id)).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
+          <label className="key"><span>Create joiner accounts (days after submission, blank = immediately)</span><input className="select" type="number" min={1} max={365} value={provisioningDelayDays} onChange={event => setProvisioningDelayDays(event.target.value)} placeholder="e.g. 14"/></label>
         </div>
+        <p className="subtitle" style={{marginTop:0,marginBottom:12}}>By default a Joiner's real accounts are created in Entra/AD the instant the form is submitted (disabled until the start date). Setting this delays that creation — unless the person's start date is sooner than the delay would allow, in which case accounts are still created right away, exactly as if this were blank. A joiner waiting on this shows as "Pending provisioning" below.</p>
         {ownerIds.length > 0 && <div style={{display:'flex',flexWrap:'wrap',gap:8,marginBottom:12}}>{ownerIds.map((id, index) => <span key={id} className="badge neutral" style={{display:'inline-flex',alignItems:'center',gap:6}}>{index === 0 ? '1st · ' : ''}{(users || []).find(u => u.id === id)?.display_name || id}<button type="button" className="btn" aria-label="Remove owner" onClick={() => setOwnerIds(ownerIds.filter(x => x !== id))} style={{padding:'0 6px',minWidth:0}}><X size={11}/></button></span>)}</div>}
         {message && <div className="notice" style={{marginBottom:12}}>{message}</div>}
         <button className="btn btn-primary" disabled={saving} onClick={() => void save()}>{saving ? 'Saving...' : 'Save mover setup'}</button>
@@ -5167,23 +5208,44 @@ function MoversPage() {
 // leaver dates, the leaver policies that decide what happens and when, and the log of every leaver run.
 function LeaversPage() {
   const timezone = useAppTimezone();
-  const { data: events, loading, error, reload } = useApiResource<ApiLifecycleEvent[]>('/api/v1/lifecycle/events?event_type=LEAVER');
+  const [eventType, setEventType] = useState('LEAVER');
+  const { data: events, loading, error, reload } = useApiResource<ApiLifecycleEvent[]>(`/api/v1/lifecycle/events?event_type=${eventType}`);
   useEffect(() => { const timer = setInterval(() => reload(), 30000); return () => clearInterval(timer); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const changesOf = (event: ApiLifecycleEvent) => event.changes as unknown as Record<string, unknown>;
+  const accountsOf = (event: ApiLifecycleEvent): { provider: string; ok: boolean; already?: boolean; error?: string }[] => (changesOf(event).accounts as { provider: string; ok: boolean; already?: boolean; error?: string }[] | undefined) || [];
   return <Page eyebrow="JOINER · MOVER · LEAVER" title="Leavers" subtitle="People who left, or are about to — manual start requests waiting on a manager, scheduled leaver dates, the policies that decide what happens, and the log of every run. Global settings (revoke access when a directory shows someone disabled, lifecycle owners) are on the Movers page." action={<button className="btn" aria-label="Refresh" onClick={() => reload()}><RefreshCw size={14}/></button>}>
     <JmlReportButton/>
     <LeaverRequestsPanel scope="admin"/>
     <ReenableRequestsPanel scope="admin"/>
     <ScheduledLeaversPanel/>
+    <ScheduledDeletionsPanel/>
     <LeaverPoliciesPanel/>
-    <TablePanel toolbar={<div className="panel-head" style={{border:'none',padding:0,marginBottom:0}}><h2 style={{fontSize:15}}>Leaver log</h2></div>}>
-      {loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : !events || events.length === 0 ? <div className="empty">No leavers recorded yet. A leaver shows up here after their leaver date runs, a manual request is approved, a CSV termination, or a directory disable.</div> : <table><thead><tr><th>Person</th><th>What changed</th><th>Source</th><th>Access removed</th><th>Note</th><th>Notified</th><th>When</th></tr></thead><tbody>
+    <TablePanel toolbar={<div className="toolbar"><div className="toolbar-left"><h2 style={{fontSize:15,margin:0}}>Leaver log</h2></div><div className="toolbar-left"><select className="select" aria-label="Log section" value={eventType} onChange={event => setEventType(event.target.value)}><option value="LEAVER">Disabled</option><option value="ACCOUNTS_DELETED">Accounts deleted</option><option value="DELETION_CANCELLED">Scheduled deletion cancelled</option></select></div></div>}>
+      {loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : !events || events.length === 0 ? <div className="empty">{eventType === 'LEAVER' ? 'No leavers recorded yet. A leaver shows up here after their leaver date runs, a manual request is approved, a CSV termination, or a directory disable.' : eventType === 'ACCOUNTS_DELETED' ? 'No accounts have been deleted yet.' : 'No scheduled deletion has ever been cancelled.'}</div> :
+      eventType === 'LEAVER' ? <table><thead><tr><th>Person</th><th>What changed</th><th>Source</th><th>Access removed</th><th>Note</th><th>Notified</th><th>When</th></tr></thead><tbody>
         {events.map(event => <tr key={event.id}>
           <td><Link to={`/admin/users/${event.user_id}`} className="user-cell"><span className="avatar">{initialsFor(event.user_display_name || '?')}</span><span><span className="user-name">{event.user_display_name || event.user_id}</span>{event.user_email && <span className="user-email">{event.user_email}</span>}</span></Link></td>
-          <td style={{whiteSpace:'normal'}}><strong>Disabled in the directory</strong>{Number((event.changes as Record<string, unknown>).linked_accounts_disabled) > 0 && <div className="user-email">{String((event.changes as Record<string, unknown>).linked_accounts_disabled)} linked PU/TU account(s) disabled</div>}{Number((event.changes as Record<string, unknown>).groups_removed) > 0 && <div className="user-email">removed from {String((event.changes as Record<string, unknown>).groups_removed)} group(s)</div>}</td>
+          <td style={{whiteSpace:'normal'}}><strong>Disabled in the directory</strong>{Number(changesOf(event).linked_accounts_disabled) > 0 && <div className="user-email">{String(changesOf(event).linked_accounts_disabled)} linked PU/TU account(s) disabled</div>}{Number(changesOf(event).groups_removed) > 0 && <div className="user-email">removed from {String(changesOf(event).groups_removed)} group(s)</div>}</td>
           <td>{SOURCE_LABELS[event.source] || event.source}</td>
           <td>{event.revoked_count > 0 ? <span className="badge danger">{event.revoked_count}</span> : '0'}</td>
-          <td style={{whiteSpace:'normal'}}><span className="user-email" style={{margin:0}}>{(event.review_note && MOVER_NOTES[event.review_note]) || ((event.changes as Record<string, unknown>).policy ? `Policy: ${(event.changes as Record<string, unknown>).policy}` : '—')}</span></td>
+          <td style={{whiteSpace:'normal'}}><span className="user-email" style={{margin:0}}>{(event.review_note && MOVER_NOTES[event.review_note]) || (changesOf(event).policy ? `Policy: ${changesOf(event).policy}` : '—')}</span></td>
           <td style={{whiteSpace:'normal'}}>{event.notified.length > 0 ? event.notified.join(', ') : '—'}</td>
+          <td>{formatDateTime(event.created_at, timezone)}</td>
+        </tr>)}
+      </tbody></table> :
+      eventType === 'ACCOUNTS_DELETED' ? <table><thead><tr><th>Person</th><th>Directories</th><th>Scheduled for</th><th>Deleted</th></tr></thead><tbody>
+        {events.map(event => <tr key={event.id}>
+          <td><Link to={`/admin/users/${event.user_id}`} className="user-cell"><span className="avatar">{initialsFor(event.user_display_name || '?')}</span><span><span className="user-name">{event.user_display_name || event.user_id}</span>{event.user_email && <span className="user-email">{event.user_email}</span>}</span></Link></td>
+          <td style={{whiteSpace:'normal'}}>{accountsOf(event).map(a => <span key={a.provider} className="badge success" style={{marginRight:6}}>{a.provider}: deleted</span>)}</td>
+          <td>{changesOf(event).scheduled_for ? formatDateTime(String(changesOf(event).scheduled_for), timezone) : '—'}</td>
+          <td>{formatDateTime(event.created_at, timezone)}</td>
+        </tr>)}
+      </tbody></table> :
+      <table><thead><tr><th>Person</th><th>Note</th><th>Was scheduled for</th><th>Cancelled</th></tr></thead><tbody>
+        {events.map(event => <tr key={event.id}>
+          <td><Link to={`/admin/users/${event.user_id}`} className="user-cell"><span className="avatar">{initialsFor(event.user_display_name || '?')}</span><span><span className="user-name">{event.user_display_name || event.user_id}</span>{event.user_email && <span className="user-email">{event.user_email}</span>}</span></Link></td>
+          <td style={{whiteSpace:'normal'}}><span className="user-email" style={{margin:0}}>Re-enabled before the scheduled deletion — nothing was deleted.</span></td>
+          <td>{changesOf(event).scheduled_for ? formatDateTime(String(changesOf(event).scheduled_for), timezone) : '—'}</td>
           <td>{formatDateTime(event.created_at, timezone)}</td>
         </tr>)}
       </tbody></table>}
@@ -5204,7 +5266,7 @@ function joinerUsernamePreview(t: { provisioning_domain: string | null; username
   const domain = t.provisioning_domain || (workEmail.includes('@') ? workEmail.split('@')[1] : '');
   return domain ? `${local}@${domain}` : local;
 }
-const emptyJoinerForm = { first_name: '', last_name: '', work_email: '', employee_id: '', department: '', job_title: '', manager_id: '', employee_category: 'EMPLOYEE', employment_type: 'EMPLOYEE', start_now: false, start_at: '', leaver_date: '' };
+const emptyJoinerForm = { first_name: '', last_name: '', work_email: '', employee_id: '', department: '', job_title: '', manager_id: '', employee_category: 'EMPLOYEE', employment_type: 'EMPLOYEE', start_now: false, start_at: '', leaver_date: '', office: '', company: '', mobile_phone: '', street_address: '', city: '', state: '', postal_code: '', country: '', description: '' };
 // The joiner process: fill in the person once, choose the IdPs, and AccessPilot creates their account in each one
 // DISABLED, shows each one-time temporary password, and enables everything (and grants their birthright access) on the
 // start date. A leaver date entered here is picked up by the leaver process later.
@@ -5260,6 +5322,9 @@ function JoinersPage() {
         employee_category: form.employee_category || undefined, employment_type: form.employment_type || undefined,
         start_at: form.start_now ? new Date().toISOString() : new Date(form.start_at).toISOString(), leaver_date: form.leaver_date || undefined,
         targets: chosen.map(([provider_id, v]) => ({ provider_id, username: v.username.trim() || undefined })),
+        office: form.office.trim() || undefined, company: form.company.trim() || undefined, mobile_phone: form.mobile_phone.trim() || undefined,
+        street_address: form.street_address.trim() || undefined, city: form.city.trim() || undefined, state: form.state.trim() || undefined,
+        postal_code: form.postal_code.trim() || undefined, country: form.country.trim() || undefined, description: form.description.trim() || undefined,
       };
       const response = await auth.apiRequest('/api/v1/lifecycle/joiners', { method: 'POST', body: JSON.stringify(payload) });
       const body = await response.json().catch(() => null);
@@ -5281,7 +5346,7 @@ function JoinersPage() {
     reload();
   };
   const copy = async (key: string, text: string) => { try { await navigator.clipboard.writeText(text); setCopied(key); setTimeout(() => setCopied(null), 1500); } catch { /* clipboard unavailable */ } };
-  const statusBadge = (status: string) => <StatusBadge status={status === 'ACTIVE' ? 'ACTIVE' : status === 'CANCELLED' ? 'REJECTED' : status === 'PARTIAL' ? 'PARTIAL' : 'SCHEDULED'}/>;
+  const statusBadge = (status: string) => <StatusBadge status={status === 'ACTIVE' ? 'ACTIVE' : status === 'CANCELLED' ? 'REJECTED' : status === 'PARTIAL' ? 'PARTIAL' : status === 'PENDING_PROVISIONING' ? 'PENDING' : 'SCHEDULED'}/>;
   return <Page eyebrow="JOINER · MOVER · LEAVER" title="Joiners" subtitle="Onboard a new person once — accounts are created in every chosen IdP and switched on for their start date." action={<button className="btn btn-primary" onClick={openForm}><Plus size={14}/> New joiner</button>}>
     {result && <section className="panel" style={{marginBottom:18,borderColor:'#e0a24d'}}>
       <div className="panel-head"><h2>Accounts for {result.display_name}</h2><button className="btn" aria-label="Dismiss" onClick={() => setResult(null)}><X size={14}/></button></div>
@@ -5317,6 +5382,21 @@ function JoinersPage() {
           <label className="key"><span>Employment type</span><select className="select" value={form.employment_type} onChange={event => setForm({...form, employment_type: event.target.value})}>{EMPLOYMENT_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></label>
           <label className="key"><span>Leaver date (optional — known end of contract)</span><input className="select" type="date" value={form.leaver_date} onChange={event => setForm({...form, leaver_date: event.target.value})}/></label>
         </div>
+        <details style={{marginBottom:14}}>
+          <summary style={{cursor:'pointer',fontSize:13,fontWeight:600,color:'#4a5a60'}}>Additional profile fields (optional)</summary>
+          <p className="footer-note" style={{margin:'6px 0 10px'}}>Set once at account creation, passed straight to each directory (Entra and Active Directory both support these) — not stored in AccessPilot and not editable afterward.</p>
+          <div className="key-grid">
+            <label className="key"><span>Office</span><input className="select" value={form.office} onChange={event => setForm({...form, office: event.target.value})}/></label>
+            <label className="key"><span>Company</span><input className="select" value={form.company} onChange={event => setForm({...form, company: event.target.value})}/></label>
+            <label className="key"><span>Mobile phone</span><input className="select" value={form.mobile_phone} onChange={event => setForm({...form, mobile_phone: event.target.value})}/></label>
+            <label className="key"><span>Street address</span><input className="select" value={form.street_address} onChange={event => setForm({...form, street_address: event.target.value})}/></label>
+            <label className="key"><span>City</span><input className="select" value={form.city} onChange={event => setForm({...form, city: event.target.value})}/></label>
+            <label className="key"><span>State</span><input className="select" value={form.state} onChange={event => setForm({...form, state: event.target.value})}/></label>
+            <label className="key"><span>Postal code</span><input className="select" value={form.postal_code} onChange={event => setForm({...form, postal_code: event.target.value})}/></label>
+            <label className="key"><span>Country</span><input className="select" value={form.country} onChange={event => setForm({...form, country: event.target.value})}/></label>
+            <label className="key"><span>Description (Active Directory only)</span><input className="select" value={form.description} onChange={event => setForm({...form, description: event.target.value})}/></label>
+          </div>
+        </details>
         <label style={{display:'flex',alignItems:'center',gap:8,fontWeight:600,fontSize:13,marginBottom:8}}><input type="checkbox" checked={form.start_now} onChange={event => setForm({...form, start_now: event.target.checked})}/> Start immediately (accounts are enabled right away)</label>
         {!form.start_now && <label className="key" style={{display:'block',marginBottom:12,maxWidth:340}}><span>Starts (your device's local time) — accounts stay disabled until then</span><input className="select" style={{width:'100%'}} type="datetime-local" value={form.start_at} onChange={event => setForm({...form, start_at: event.target.value})}/></label>}
         <div className="key" style={{marginBottom:6}}><span>Create accounts in</span></div>
@@ -5336,9 +5416,9 @@ function JoinersPage() {
           <td style={{whiteSpace:'normal'}}>{joiner.department || '—'}<div className="user-email">{joiner.job_title || ''}</div></td>
           <td>{formatDateTime(joiner.start_at, timezone)}</td>
           <td>{joiner.leaver_date || '—'}</td>
-          <td style={{whiteSpace:'normal'}}>{joiner.targets.map(t => <div key={t.provider_id} title={t.error || undefined}><span className={`badge ${t.status === 'ENABLED' ? 'success' : t.status === 'FAILED' ? 'danger' : 'neutral'}`}>{t.provider_name}: {t.status === 'ENABLED' ? 'enabled' : t.status === 'FAILED' ? 'failed' : 'created, disabled'}</span></div>)}</td>
+          <td style={{whiteSpace:'normal'}}>{joiner.status === 'PENDING_PROVISIONING' ? <span className="footer-note">Waiting on the global provisioning delay — no accounts created yet</span> : joiner.targets.map(t => <div key={t.provider_id} title={t.error || undefined}><span className={`badge ${t.status === 'ENABLED' ? 'success' : t.status === 'FAILED' ? 'danger' : 'neutral'}`}>{t.provider_name}: {t.status === 'ENABLED' ? 'enabled' : t.status === 'FAILED' ? 'failed' : 'created, disabled'}</span></div>)}</td>
           <td>{statusBadge(joiner.status)}</td>
-          <td><span style={{display:'flex',gap:6}}>{joiner.targets.some(t => t.status === 'FAILED') && joiner.status !== 'CANCELLED' && <button className="btn" onClick={() => void retry(joiner)}>Retry failed</button>}{joiner.status === 'SCHEDULED' && <button className="btn" onClick={() => void cancel(joiner)}>Cancel</button>}</span></td>
+          <td><span style={{display:'flex',gap:6}}>{joiner.targets.some(t => t.status === 'FAILED') && joiner.status !== 'CANCELLED' && <button className="btn" onClick={() => void retry(joiner)}>Retry failed</button>}{(joiner.status === 'SCHEDULED' || joiner.status === 'PENDING_PROVISIONING') && <button className="btn" onClick={() => void cancel(joiner)}>Cancel</button>}</span></td>
         </tr>)}
       </tbody></table>}
     </TablePanel>

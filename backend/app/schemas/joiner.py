@@ -25,6 +25,17 @@ class JoinerCreate(BaseModel):
     start_at: datetime
     leaver_date: Optional[date] = None
     targets: list[JoinerTargetInput] = Field(min_length=1)
+    # Optional profile fields, passed straight through to each target connector's create_user — settable at
+    # creation time only (see app.providers.base.NewUserRequest), never stored on the User row or editable later.
+    office: Optional[str] = Field(default=None, max_length=200)
+    company: Optional[str] = Field(default=None, max_length=200)
+    mobile_phone: Optional[str] = Field(default=None, max_length=50)
+    street_address: Optional[str] = Field(default=None, max_length=255)
+    city: Optional[str] = Field(default=None, max_length=100)
+    state: Optional[str] = Field(default=None, max_length=100)
+    postal_code: Optional[str] = Field(default=None, max_length=20)
+    country: Optional[str] = Field(default=None, max_length=100)
+    description: Optional[str] = Field(default=None, max_length=500)
 
     @field_validator("work_email")
     @classmethod

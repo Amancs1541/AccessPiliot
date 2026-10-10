@@ -102,6 +102,19 @@ class NewUserRequest:
     surname: str | None = None
     employee_id: str | None = None
     enabled: bool = True  # False = create the account disabled (pre-boarding; enabled on the start date)
+    # Optional profile fields settable at creation time only (Entra + Active Directory both support them; neither
+    # is stored as a User column or editable afterward — purely a pass-through to the connector, same scope as
+    # every other create-time-only field above). Entra has no native "description" concept for a user object, so
+    # EntraProvider.create_user ignores it; every other field maps to a real attribute on both connectors.
+    office: str | None = None
+    company: str | None = None
+    mobile_phone: str | None = None
+    street_address: str | None = None
+    city: str | None = None
+    state: str | None = None
+    postal_code: str | None = None
+    country: str | None = None
+    description: str | None = None
 
 
 @dataclass(frozen=True)
