@@ -340,7 +340,12 @@ function AuthState({ children, authConfigured, apiScope }: { children: ReactNode
         setIdpUnreachable(true);
         return;
       }
-      await instance.loginRedirect({ scopes: [apiScope!] });
+      // Mirrors SetupWizard.tsx's own loginPopup() fallback: when the admin left the (optional) API scope blank
+      // during setup, apiScope is genuinely undefined, not just TypeScript being overly cautious — passing
+      // `scopes: [undefined]` crashes deep inside MSAL's own code (it calls .trim() on every scope string)
+      // instead of raising anything this file can catch and handle.
+      const loginScopes = apiScope ? [apiScope] : ['openid', 'profile'];
+      await instance.loginRedirect({ scopes: loginScopes });
       authDebug('loginRedirect() returned without an immediate error.');
     } catch (error) {
       authDebug('loginRedirect() error:', authDebugError(error));
@@ -352,7 +357,8 @@ function AuthState({ children, authConfigured, apiScope }: { children: ReactNode
         authDebug('Clearing stale msal.interaction.status and retrying loginRedirect() once.');
         try {
           sessionStorage.removeItem('msal.interaction.status');
-          await instance.loginRedirect({ scopes: [apiScope!] });
+          const loginScopes = apiScope ? [apiScope] : ['openid', 'profile'];
+          await instance.loginRedirect({ scopes: loginScopes });
           return;
         } catch (retryError) {
           authDebug('Retry after clearing interaction_in_progress also failed:', authDebugError(retryError));
@@ -404,7 +410,9 @@ function AuthState({ children, authConfigured, apiScope }: { children: ReactNode
       headers.set('Authorization', `Bearer ${breakglassToken}`);
     } else if (authConfigured) {
       if (!accounts[0]) throw new Error('AUTHENTICATION_REQUIRED');
-      const result = await instance.acquireTokenSilent({ account: accounts[0], scopes: [apiScope!] });
+      // Same blank-scope fallback as signIn() above — apiScope is genuinely undefined when the admin left the
+      // (optional) API scope blank during setup.
+      const result = await instance.acquireTokenSilent({ account: accounts[0], scopes: apiScope ? [apiScope] : ['openid', 'profile'] });
       headers.set('Authorization', `Bearer ${result.accessToken}`);
     }
     return fetch(`${apiBaseUrl}${path}`, { ...init, headers });
