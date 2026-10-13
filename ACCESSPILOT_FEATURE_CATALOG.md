@@ -1,7 +1,7 @@
 # AccessPilot — Feature Catalog
 
-**What this document is for**: a complete, current inventory of every feature in AccessPilot, written to be fed into
-another AI tool to generate architecture diagrams, flowcharts, entity-relationship diagrams, or lifecycle diagrams.
+**What this document is for**: a complete, current inventory of every feature in AccessPilot, written as source
+material for generating architecture diagrams, flowcharts, entity-relationship diagrams, or lifecycle diagrams.
 Organized by feature domain, with explicit state machines and data relationships called out wherever a diagram
 would naturally represent them. As of 2026-10-10.
 

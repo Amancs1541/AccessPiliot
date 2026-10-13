@@ -1,0 +1,11 @@
+# Claude Code's own local config/state — never belongs in the repo
+.claude/
+
+# Frontend build output / dependencies — rebuilt from source, shouldn't be committed
+node_modules/
+dist/
+
+# Backend virtualenv / caches (kept here too in case something is ever run from the repo root)
+.venv/
+__pycache__/
+*.py[cod]

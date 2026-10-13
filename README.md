@@ -1,3 +1,11 @@
+## Getting started
+
+Want to run AccessPilot yourself? See **[docker/README.md](docker/README.md)** — one command
+(`docker compose up -d --build`) builds the database, backend, and frontend straight from this repo's `main`
+branch. No Python, Node, or Postgres install needed, and nothing to configure by hand.
+
+---
+
 AccessPilotArchitecture
 
 Start here

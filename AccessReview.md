@@ -628,7 +628,7 @@ Verified with 5 new tests, 814 backend tests passing, zero regressions. Migrated
 
 The HR app's own screen now has a working **Sync** button that actually triggers AccessPilot directly — not just a shortcut to AccessPilot's own page.
 
-Making that work safely took two tries. The first approach would have let the HR app call AccessPilot without going through AccessPilot's real login at all, guarded only by a plain shared password — and Claude Code's own safety check stepped in and blocked it, correctly: that's a new way into a system that creates and removes real accounts, and it deserved a second look before being built, not a rubber stamp. That attempt was fully undone, not patched around.
+Making that work safely took two tries. The first approach would have let the HR app call AccessPilot without going through AccessPilot's real login at all, guarded only by a plain shared password — on review, that's a new way into a system that creates and removes real accounts, and it deserved a second look before being built, not a rubber stamp. That attempt was fully undone, not patched around.
 
 The real version works differently, and more safely: on AccessPilot's Onboarding page, a new **"API access"** section lets an admin generate a token — shown once, copy it immediately. That token can do exactly one thing anywhere in AccessPilot: trigger a sync on this HR connection. Nothing else. It sits alongside AccessPilot's real admin login as a second valid way in for that one action, not a bypass of the login system — if anyone generates a new token, the old one stops working immediately, and it can be revoked at any time.
 

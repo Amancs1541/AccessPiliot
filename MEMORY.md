@@ -128,7 +128,7 @@ Status:
 - Existing UI design/layout untouched — only the Providers page's credential fields (added earlier this phase) remain.
 - Tests: 57/57 backend passing. Frontend `npm run build` passing.
 
-Remaining live-environment blocker: the actual browser walkthrough (login → Providers page → Add Provider → Save → reload → Test Connection → Sync) has NOT been performed — that requires a real interactive login and is the user's next step. Separately, this session repeatedly found that the user's `--reload` backend process gets silently respawned under the wrong Python interpreter on this machine (a Windows venv/uvicorn interaction, not a code bug), freezing it on stale code after any edit; running without `--reload` was recommended as the workaround but not yet confirmed adopted.
+Remaining live-environment blocker: the actual browser walkthrough (login → Providers page → Add Provider → Save → reload → Test Connection → Sync) has NOT been performed — that requires a real interactive login and is the user's next step. Separately, it was repeatedly found that the `--reload` backend process gets silently respawned under the wrong Python interpreter on this machine (a Windows venv/uvicorn interaction, not a code bug), freezing it on stale code after any edit; running without `--reload` was recommended as the workaround but not yet confirmed adopted.
 
 ## Phase 4 — Recurring Sync Scheduler
 
