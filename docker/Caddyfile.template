@@ -1,3 +1,9 @@
+{
+	# Browsers/curl never send SNI when connecting to a bare IP literal (SNI is only defined for hostnames),
+	# so without this, Caddy has nothing to match the certificate against and fails the handshake outright.
+	default_sni {{HOST}}
+}
+
 {{HOST}} {
 	{{TLS_DIRECTIVE}}
 	encode gzip

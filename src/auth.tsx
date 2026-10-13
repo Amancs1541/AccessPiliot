@@ -361,6 +361,10 @@ function AuthState({ children, authConfigured, apiScope }: { children: ReactNode
       // A failure here means the redirect to the IDP couldn't even be initiated (e.g. no network route to it) —
       // the clearest possible "the IDP is unreachable" signal. Surfaced only as a generic notice on the sign-in
       // screen — never a hint that Break-Glass exists (see src/App.tsx's SignInScreen).
+      // Unlike the rest of this function's logging, this line is NOT gated behind authDebugEnabled (dev-mode
+      // only) — same reasoning as the "Refresh my access" failure above: this needs to be diagnosable against a
+      // real production build, not just `npm run dev`.
+      console.error('AccessPilot: loginRedirect() failed —', authDebugError(error));
       setIdpUnreachable(true);
     } finally {
       if (authDebugEnabled) console.groupEnd();
