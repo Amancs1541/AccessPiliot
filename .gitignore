@@ -9,3 +9,6 @@ dist/
 .venv/
 __pycache__/
 *.py[cod]
+
+# run.ps1's own local marker — not repo content, just "has this machine already installed it"
+docker/.accesspilot-installed

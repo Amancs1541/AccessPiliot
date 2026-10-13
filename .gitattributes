@@ -1,0 +1,8 @@
+# Shell scripts must stay LF, regardless of any contributor's own git/core.autocrlf setting - a CRLF shebang
+# line ("#!/usr/bin/env bash\r") fails to run on Linux with "bad interpreter: ... no such file or directory".
+docker/*.sh text eol=lf
+*.sh text eol=lf
+
+# Windows-only scripts: keep CRLF so Notepad and double-click behave normally.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf

@@ -2,7 +2,35 @@
 
 Everything (database, backend, frontend) starts with one command. The code is **downloaded from GitHub during the build**, so you only need this folder and Docker — no Python, Node or Postgres, and no config files to edit.
 
-## Quick start
+## Easiest: one script
+
+Download just this `docker/` folder (or the whole repo) and run it.
+
+**Windows:**
+```powershell
+./run.ps1
+```
+(or double-click `run.cmd` in File Explorer). Installs Docker Desktop for you if missing (via `winget`), waits for
+it to start, builds and starts AccessPilot, then prints your one-time admin password and opens the dashboard.
+Options: `./run.ps1 -Rebuild`, `./run.ps1 -Stop`, `./run.ps1 -Reset`.
+
+**Ubuntu / Debian-family Linux (including a headless server):**
+```bash
+chmod +x run.sh    # first time only
+./run.sh
+```
+Installs Docker via the official convenience script if missing. On a real server (not your own desktop), it asks
+once for the IP address or domain name you'll reach it at — the frontend needs that baked in at build time, since
+it can't be changed afterward without rebuilding. Leave it blank only if you'll browse to the server from itself.
+Options: `./run.sh --rebuild`, `./run.sh --host=NEW_ADDRESS` (change the address later), `./run.sh --stop`,
+`./run.sh --reset`.
+
+**Either script**: the first run does the full install + build; every run after that just starts the already-built
+app — fast, no rebuild, unless you explicitly ask for one.
+
+macOS: use the manual steps below — Docker Desktop's installer isn't scriptable the same way there.
+
+## Quick start (manual, any OS)
 
 1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Windows/Mac) or Docker Engine + Compose v2 (Linux).
 2. In this folder run:
