@@ -2,6 +2,7 @@
 # line ("#!/usr/bin/env bash\r") fails to run on Linux with "bad interpreter: ... no such file or directory".
 docker/*.sh text eol=lf
 *.sh text eol=lf
+docker/Caddyfile.template text eol=lf
 
 # Windows-only scripts: keep CRLF so Notepad and double-click behave normally.
 *.ps1 text eol=crlf

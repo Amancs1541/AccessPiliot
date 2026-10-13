@@ -22,7 +22,19 @@ chmod +x run.sh    # first time only
 Installs Docker via the official convenience script if missing. On a real server (not your own desktop), it asks
 once for the IP address or domain name you'll reach it at — the frontend needs that baked in at build time, since
 it can't be changed afterward without rebuilding. Leave it blank only if you'll browse to the server from itself.
-Options: `./run.sh --rebuild`, `./run.sh --host=NEW_ADDRESS` (change the address later), `./run.sh --stop`,
+
+Give it a real address and it **also sets up HTTPS automatically**, via [Caddy](https://caddyserver.com/) as a
+reverse proxy in front of everything on that one address:
+- A **domain name** (DNS already pointing at this server, ports 80+443 reachable from the internet) gets a real,
+  trusted, free certificate from Let's Encrypt — fully automatic, nothing to generate or renew yourself.
+- A **bare IP address** gets a self-signed certificate instead (Let's Encrypt cannot issue a trusted certificate
+  for an IP) — still fully encrypted, just with a one-time "not trusted" browser warning to click through.
+
+This isn't optional cosmetics: browsers only allow the cryptographic functions Microsoft sign-in needs
+(`crypto.subtle`, used for PKCE) on `https://` or `http://localhost` — sign-in fails with *"The crypto object or
+function is not available"* on a plain `http://` IP or domain, by browser design, not an AccessPilot bug.
+
+Options: `./run.sh --rebuild`, `./run.sh --host=NEW_ADDRESS` (change the address later, rebuilds), `./run.sh --stop`,
 `./run.sh --reset`.
 
 **Either script**: the first run does the full install + build; every run after that just starts the already-built
@@ -54,6 +66,7 @@ macOS: use the manual steps below — Docker Desktop's installer isn't scriptabl
 | `backend` | API + background workers (FastAPI) | http://localhost:8000 (API docs at `/docs`) |
 | `db` | PostgreSQL 16 (not exposed) | internal only |
 | `init` | One-shot: creates the random DB password | exits immediately |
+| `caddy` *(only when given a real address)* | Reverse proxy + automatic HTTPS in front of `frontend`/`backend` | https://your-address |
 
 Secrets (DB password, credential-encryption key) are generated on first start and stored in the `appdata` volume. The database lives in `pgdata`.
 
@@ -79,9 +92,9 @@ Also back up the `appdata` volume — it holds the key that decrypts saved provi
 
 ## Things to know
 
-- **Localhost defaults.** The dashboard expects the API at `http://localhost:8000` and is served at `http://localhost:5173`. To host it on another address, set before building:
-  `VITE_API_BASE_URL=https://api.example.com FRONTEND_URL=https://app.example.com docker compose up -d --build`
-  (the API address is compiled into the frontend, so changing it needs a rebuild). Put HTTPS in front for anything beyond your own machine.
+- **Localhost defaults.** The dashboard expects the API at `http://localhost:8000` and is served at `http://localhost:5173`. `run.sh` handles another address (and HTTPS) for you automatically — see above. Doing it by hand instead: set, before building,
+  `VITE_API_BASE_URL=https://your-address FRONTEND_URL=https://your-address docker compose -f docker-compose.yml -f docker-compose.https.yml up -d --build`
+  (the API address is compiled into the frontend, so changing it needs a rebuild), and write `docker/Caddyfile` yourself from `Caddyfile.template` (replace `{{HOST}}` with your address, `{{TLS_DIRECTIVE}}` with `tls internal` for a bare IP or leave it blank for a real domain). Put HTTPS in front for anything beyond your own machine — see the crypto-availability note above for why it's not optional.
 - **Only one backend container.** Sync, expiry and activation workers run inside it; never scale it above 1.
 - **The build uses whatever is on GitHub.** Push your latest commits (including database migrations) before building, or the container will run the older code.
 - **Troubleshooting:** `docker compose logs backend` shows migration and startup errors. If the dashboard loads but requests fail, check that the address in your browser matches `FRONTEND_URL` (CORS).

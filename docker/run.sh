@@ -3,8 +3,9 @@
 # Works on Ubuntu/Debian-family Linux (uses Docker's official install script + apt-family package names).
 #
 # First run:  checks for Docker (installs it via the official convenience script if missing), asks how you'll
-#             reach the app (its own localhost, or a real IP/domain for remote access), builds everything fresh
-#             from GitHub, waits for the backend, then prints the one-time admin password.
+#             reach the app (its own localhost, or a real IP/domain for remote access - setting up HTTPS
+#             automatically via Caddy if so, since browsers require it for Microsoft sign-in off localhost),
+#             builds everything fresh from GitHub, waits for the backend, then prints the one-time admin password.
 # Later runs: skips all of that and just starts the already-built containers - fast.
 #
 # Usage:
@@ -40,7 +41,21 @@ ok()   { echo "    [OK] $1"; }
 warn() { echo "    [!]  $1"; }
 err()  { echo "    [ERROR] $1" >&2; }
 
-# ---------------------------------------------------------------- shortcuts: stop / reset
+# ---------------------------------------------------------------- 0. Remember the address from last time
+
+ACCESS_HOST=""
+if [ -f "$CONFIG_FILE" ]; then
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+fi
+if [ -n "$HOST_ARG" ]; then
+  ACCESS_HOST="$HOST_ARG"
+fi
+
+COMPOSE_FILES=(-f docker-compose.yml)
+if [ -n "$ACCESS_HOST" ]; then
+  COMPOSE_FILES+=(-f docker-compose.https.yml)
+fi
 
 DOCKER="docker"
 if ! docker info >/dev/null 2>&1; then
@@ -50,7 +65,9 @@ if ! docker info >/dev/null 2>&1; then
     DOCKER="sudo docker"
   fi
 fi
-compose() { $DOCKER compose "$@"; }
+compose() { $DOCKER compose "${COMPOSE_FILES[@]}" "$@"; }
+
+# ---------------------------------------------------------------- shortcuts: stop / reset
 
 if [ "$DO_STOP" = "1" ]; then
   step "Stopping AccessPilot (data kept)"
@@ -63,7 +80,7 @@ if [ "$DO_RESET" = "1" ]; then
   read -rp "Type YES to continue: " CONFIRM
   if [ "$CONFIRM" != "YES" ]; then info "Cancelled - nothing changed."; exit 0; fi
   compose down -v
-  rm -f "$MARKER_FILE" "$CONFIG_FILE"
+  rm -f "$MARKER_FILE" "$CONFIG_FILE" Caddyfile
   ok "Stopped and wiped. Run this script again to start fresh."
   exit 0
 fi
@@ -104,31 +121,44 @@ ok "Docker Compose is available"
 
 # ---------------------------------------------------------------- 3. How will this be reached?
 
-ACCESS_HOST=""
-if [ -f "$CONFIG_FILE" ]; then
-  # shellcheck disable=SC1090
-  source "$CONFIG_FILE"
-fi
-if [ -n "$HOST_ARG" ]; then
-  ACCESS_HOST="$HOST_ARG"
-elif [ -z "${ACCESS_HOST:-}" ] && [ ! -f "$CONFIG_FILE" ]; then
+if [ -z "$ACCESS_HOST" ] && [ ! -f "$CONFIG_FILE" ]; then
   step "How will you reach AccessPilot?"
   info "This is a server, so the frontend needs to know its own real address up front - it gets baked in"
   info "when it's built and can't be changed later without rebuilding."
   info "Enter the IP address or domain name you'll type into your browser (e.g. 192.168.1.50 or"
   info "accesspilot.example.com). Leave this blank ONLY if you'll browse to this server from itself."
   read -rp "Server address (blank = localhost only): " ACCESS_HOST
+  if [ -n "$ACCESS_HOST" ]; then
+    COMPOSE_FILES+=(-f docker-compose.https.yml)
+  fi
 fi
 printf 'ACCESS_HOST="%s"\n' "$ACCESS_HOST" > "$CONFIG_FILE"
 
 if [ -n "$ACCESS_HOST" ]; then
-  export VITE_API_BASE_URL="http://${ACCESS_HOST}:8000"
-  export FRONTEND_URL="http://${ACCESS_HOST}:5173"
+  export VITE_API_BASE_URL="https://${ACCESS_HOST}"
+  export FRONTEND_URL="https://${ACCESS_HOST}"
+
+  step "Setting up HTTPS for $ACCESS_HOST"
+  if [[ "$ACCESS_HOST" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+    TLS_DIRECTIVE="tls internal"
+    info "That's a bare IP address - Let's Encrypt cannot issue a trusted certificate for an IP, so a"
+    info "self-signed one will be used instead. Your browser will show a one-time warning to accept it;"
+    info "the connection is still fully encrypted, just not from a publicly trusted certificate authority."
+  else
+    TLS_DIRECTIVE=""
+    info "Caddy will automatically obtain a free, trusted HTTPS certificate from Let's Encrypt for"
+    info "$ACCESS_HOST. This needs: its DNS already pointing at this server's public IP, and ports 80"
+    info "and 443 reachable from the internet (check any cloud firewall / security group too). If that"
+    info "isn't ready yet, Caddy serves a temporary self-signed certificate and keeps retrying in the"
+    info "background - nothing else is blocked meanwhile."
+  fi
+  sed -e "s|{{HOST}}|$ACCESS_HOST|" -e "s|{{TLS_DIRECTIVE}}|$TLS_DIRECTIVE|" Caddyfile.template > Caddyfile
+  ok "Caddyfile generated"
 else
   export VITE_API_BASE_URL="http://localhost:8000"
   export FRONTEND_URL="http://localhost:5173"
 fi
-info "Will be reachable at: $FRONTEND_URL  (API at $VITE_API_BASE_URL)"
+info "Will be reachable at: $FRONTEND_URL"
 
 # ---------------------------------------------------------------- 4. First run vs. already installed
 
@@ -170,6 +200,9 @@ if [ "$FIRST_RUN" = "1" ]; then
   step "First-time setup"
   echo
   echo "  AccessPilot is ready at:  $FRONTEND_URL"
+  if [ -n "$ACCESS_HOST" ]; then
+    info "(give Caddy a minute to finish obtaining/loading its certificate on the very first request)"
+  fi
 
   BOOTSTRAP_LINE=$(compose logs backend 2>/dev/null | grep "Bootstrap login" || true)
   if [ -n "$BOOTSTRAP_LINE" ]; then
@@ -199,3 +232,6 @@ info "  ./run.sh --host=NEW_ADDRESS  change the address this is reached at (rebu
 info "  ./run.sh --stop              stop it, keep all data"
 info "  ./run.sh --reset             wipe everything and start over"
 info "  $DOCKER compose logs -f backend   watch backend logs"
+if [ -n "$ACCESS_HOST" ]; then
+  info "  $DOCKER compose logs -f caddy     watch certificate/proxy logs"
+fi

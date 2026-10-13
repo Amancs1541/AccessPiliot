@@ -1,0 +1,28 @@
+# Applied on top of docker-compose.yml only when reachable at a real IP/domain (see run.sh) - adds Caddy as a
+# reverse proxy in front of both the frontend and the backend, on one hostname, handling HTTPS automatically:
+# a real, trusted Let's Encrypt certificate for a real domain name, or a self-signed one (via its own internal
+# CA) when given a bare IP, since Let's Encrypt cannot issue a public certificate for an IP address.
+#
+# Usage: docker compose -f docker-compose.yml -f docker-compose.https.yml up -d --build
+# (run.sh does this automatically once you give it an address instead of leaving it blank for localhost.)
+
+name: accesspilot
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - backend
+      - frontend
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

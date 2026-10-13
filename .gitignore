@@ -10,5 +10,7 @@ dist/
 __pycache__/
 *.py[cod]
 
-# run.ps1's own local marker — not repo content, just "has this machine already installed it"
+# run.ps1 / run.sh's own local state — not repo content, generated per-machine on first run
 docker/.accesspilot-installed
+docker/.accesspilot-host.env
+docker/Caddyfile
