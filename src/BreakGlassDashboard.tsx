@@ -152,8 +152,11 @@ export function BreakGlassDashboard() {
             {form.idp_type === 'ENTRA' ? (
               <>
                 <Field label="Tenant ID"><input className="select" style={{ width: '100%' }} value={form.tenant_id || ''} onChange={event => setForm({ ...form, tenant_id: event.target.value })} /></Field>
-                <Field label="Client (application) ID"><input className="select" style={{ width: '100%' }} value={form.client_id || ''} onChange={event => setForm({ ...form, client_id: event.target.value })} /></Field>
+                <Field label="Client (application) ID — the app users actually sign in through"><input className="select" style={{ width: '100%' }} value={form.client_id || ''} onChange={event => setForm({ ...form, client_id: event.target.value })} /></Field>
                 <Field label="Authority"><input className="select" style={{ width: '100%' }} value={form.authority || ''} onChange={event => setForm({ ...form, authority: event.target.value })} /></Field>
+                <Field label="Issuer (optional) — only if your tokens use the older v1.0 format (sts.windows.net); leave blank for the standard v2.0 issuer derived from Authority above">
+                  <input className="select" style={{ width: '100%' }} value={form.issuer || ''} onChange={event => setForm({ ...form, issuer: event.target.value })} placeholder="https://sts.windows.net/your-tenant-id/" />
+                </Field>
               </>
             ) : (
               <>
@@ -161,6 +164,9 @@ export function BreakGlassDashboard() {
                 <Field label="Client ID"><input className="select" style={{ width: '100%' }} value={form.client_id || ''} onChange={event => setForm({ ...form, client_id: event.target.value })} /></Field>
               </>
             )}
+            <Field label="Audience (optional) — only if your API is a DIFFERENT app registration than Client ID above; leave blank to use Client ID">
+              <input className="select" style={{ width: '100%' }} value={form.audience || ''} onChange={event => setForm({ ...form, audience: event.target.value })} placeholder="e.g. your-api-app's own Client ID" />
+            </Field>
             <Field label="Scope (optional)"><input className="select" style={{ width: '100%' }} value={form.scope || ''} onChange={event => setForm({ ...form, scope: event.target.value })} /></Field>
             <button className="btn btn-primary" disabled={saving} onClick={saveConfig} style={{ marginTop: 4 }}>{saving ? 'Saving...' : 'Save'}</button>
           </div>

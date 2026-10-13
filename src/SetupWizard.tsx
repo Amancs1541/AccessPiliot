@@ -132,6 +132,7 @@ function ConfigureStep({ setupToken, onSuccess, onSessionExpired }: { setupToken
   const [clientId, setClientId] = useState('');
   const [authority, setAuthority] = useState('');
   const [issuer, setIssuer] = useState('');
+  const [audience, setAudience] = useState('');
   const [scope, setScope] = useState('');
   const [breakglassUsername, setBreakglassUsername] = useState('');
   const [breakglassPassword, setBreakglassPassword] = useState('');
@@ -168,7 +169,8 @@ function ConfigureStep({ setupToken, onSuccess, onSessionExpired }: { setupToken
           tenant_id: idpType === 'ENTRA' ? tenantId : undefined,
           client_id: clientId,
           authority: idpType === 'ENTRA' ? authority : undefined,
-          issuer: idpType === 'OKTA' ? issuer : undefined,
+          issuer: idpType === 'OKTA' ? issuer : (issuer || undefined),
+          audience: audience || undefined,
           scope: scope || undefined,
           redirect_uri: window.location.origin,
           breakglass_username: breakglassUsername,
@@ -210,12 +212,24 @@ function ConfigureStep({ setupToken, onSuccess, onSessionExpired }: { setupToken
           <label className="key" style={{ display: 'block', marginBottom: 12 }}><span>Client ID</span><input className="select" style={{ width: '100%' }} value={clientId} onChange={event => setClientId(event.target.value)} /></label>
         </>
       )}
-      <button type="button" className="btn" style={{ marginBottom: 12 }} onClick={() => setShowAdvanced(v => !v)}>{showAdvanced ? 'Hide' : 'Show'} advanced (optional scope)</button>
+      <button type="button" className="btn" style={{ marginBottom: 12 }} onClick={() => setShowAdvanced(v => !v)}>{showAdvanced ? 'Hide' : 'Show'} advanced (optional scope / audience / issuer)</button>
       {showAdvanced && (
-        <label className="key" style={{ display: 'block', marginBottom: 12 }}>
-          <span>API scope — leave blank to verify with a basic sign-in token instead</span>
-          <input className="select" style={{ width: '100%' }} value={scope} onChange={event => setScope(event.target.value)} placeholder="api://your-app-id/access_as_user" />
-        </label>
+        <>
+          <label className="key" style={{ display: 'block', marginBottom: 12 }}>
+            <span>API scope — leave blank to verify with a basic sign-in token instead</span>
+            <input className="select" style={{ width: '100%' }} value={scope} onChange={event => setScope(event.target.value)} placeholder="api://your-app-id/access_as_user" />
+          </label>
+          <label className="key" style={{ display: 'block', marginBottom: 12 }}>
+            <span>Audience — only if your API is a DIFFERENT app registration than Client ID above (leave blank to use Client ID)</span>
+            <input className="select" style={{ width: '100%' }} value={audience} onChange={event => setAudience(event.target.value)} placeholder="e.g. your-api-app's own Client ID" />
+          </label>
+          {idpType === 'ENTRA' && (
+            <label className="key" style={{ display: 'block', marginBottom: 12 }}>
+              <span>Issuer — only if your tokens use the older v1.0 format (leave blank for the standard v2.0 issuer)</span>
+              <input className="select" style={{ width: '100%' }} value={issuer} onChange={event => setIssuer(event.target.value)} placeholder="https://sts.windows.net/your-tenant-id/" />
+            </label>
+          )}
+        </>
       )}
       <hr style={{ margin: '16px 0', border: 'none', borderTop: '1px solid #e2e6e7' }} />
       <p style={{ fontWeight: 600, marginBottom: 8 }}>Break-Glass emergency account</p>

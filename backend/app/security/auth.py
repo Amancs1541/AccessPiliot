@@ -235,18 +235,27 @@ async def decode_access_token(token: str, *, request_id: str = "-") -> Authentic
     return AuthenticatedUser(str(claims["sub"]), claims.get("name", claims["sub"]), claims.get("preferred_username") or claims.get("email"), str(claims["tid"]), roles, claims)
 
 
-async def _authenticate_via_portal_config_or_breakglass(db: AsyncSession, token: str) -> Optional[AuthenticatedUser]:
-    """Called only after the primary env-var Entra path has already failed. Returns None (never raises) if
-    neither fallback accepts the token, so the caller can re-raise the ORIGINAL primary-path error — keeping
-    error messages/codes unchanged for a deployment where this new setup flow was never used."""
+async def _authenticate_via_portal_config_or_breakglass(db: AsyncSession, token: str) -> tuple[Optional[AuthenticatedUser], Optional[AccessPilotError]]:
+    """Called only after the primary env-var Entra path has already failed. Returns (None, dynamic_error) if
+    neither fallback accepts the token — dynamic_error is the ACTUAL reason the active PortalAuthConfig rejected
+    this token (wrong audience/issuer, no roles claim, etc.), surfaced only when such a config actually exists.
+    The caller falls back to the original primary-path error when dynamic_error is None (no active config at
+    all) — keeping error messages/codes unchanged for a deployment where this new setup flow was never used.
+
+    Why this matters: before this, any rejection here collapsed into the SAME generic primary-path error (e.g.
+    "Token issuer is not configured" from the unused static env-var path) regardless of the real cause, which
+    made a genuine audience/issuer mismatch on an active dynamic config indistinguishable from "no dynamic setup
+    at all" — costing a long manual token-decoding session to diagnose live."""
     from app.services.portal_auth import decode_breakglass_token, get_active_portal_auth_config, validate_token_against_config
 
+    dynamic_error: Optional[AccessPilotError] = None
     active_config = await get_active_portal_auth_config(db)
     if active_config is not None:
+        claims = None
         try:
             claims = await validate_token_against_config(token, active_config)
-        except AccessPilotError:
-            claims = None
+        except AccessPilotError as exc:
+            dynamic_error = exc
         if claims is not None:
             # NOTE: this "roles" claim shape is what Entra provides today; an actual Okta login flow (not yet
             # built — see project memory's Phase 12 "next steps") may need its own role-extraction logic here
@@ -254,14 +263,15 @@ async def _authenticate_via_portal_config_or_breakglass(db: AsyncSession, token:
             roles = tuple(role for role in claims.get("roles", []) if role in VALID_ROLES)
             if roles:
                 tenant = str(claims.get("tid") or active_config.tenant_id or "")
-                return AuthenticatedUser(str(claims["sub"]), claims.get("name", claims["sub"]), claims.get("preferred_username") or claims.get("email"), tenant, roles, claims)
+                return AuthenticatedUser(str(claims["sub"]), claims.get("name", claims["sub"]), claims.get("preferred_username") or claims.get("email"), tenant, roles, claims), None
+            dynamic_error = _auth_error("INVALID_TOKEN", "The access token has no valid AccessPilot role.")
 
     result = await decode_breakglass_token(db, token)
     if result is not None:
         account, elevated = result
         role = "AccessPilot.Admin" if elevated else "AccessPilot.BreakGlassAdmin"
-        return AuthenticatedUser(f"breakglass:{account.id}", f"Break-Glass ({account.username})", None, "breakglass", (role,), {"elevated": elevated})
-    return None
+        return AuthenticatedUser(f"breakglass:{account.id}", f"Break-Glass ({account.username})", None, "breakglass", (role,), {"elevated": elevated}), None
+    return None, dynamic_error
 
 
 async def require_authenticated_user(request: Request, credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer), db: AsyncSession = Depends(get_db)) -> AuthenticatedUser:
@@ -284,9 +294,12 @@ async def require_authenticated_user(request: Request, credentials: Optional[HTT
         # PortalAuthConfig — a deployment that has completed the new setup wizard with its own IDP, which may or
         # may not be the same tenant as the env-var config; (2) a break-glass session — dormant until setup
         # activates it, meant purely for recovering portal access if the configured IDP itself is what's broken.
-        user = await _authenticate_via_portal_config_or_breakglass(db, credentials.credentials)
+        user, dynamic_error = await _authenticate_via_portal_config_or_breakglass(db, credentials.credentials)
         if user is None:
-            raise primary_error
+            # dynamic_error (the real reason an ACTIVE PortalAuthConfig rejected this token) is more useful than
+            # primary_error (the unused static env-var path's own, usually unrelated complaint) whenever it's
+            # available — only fall back to primary_error when there's no active dynamic config at all.
+            raise dynamic_error or primary_error
     # AccessPilot.SoDAdmin is a real Entra App Role like AccessPilot.Admin/User — recognized purely from
     # user.roles (the token's own roles claim), with no local/in-app grant fallback. A prior revision let a plain
     # Admin flag a directory record for it from an in-app roster with no real Entra role required at all; removed

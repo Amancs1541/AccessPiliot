@@ -90,6 +90,28 @@ docker compose exec db pg_dump -U accesspilot accesspilot > accesspilot.sql
 ```
 Also back up the `appdata` volume — it holds the key that decrypts saved provider credentials. Without it, credentials stored in a restored database cannot be read.
 
+## Checking on it
+
+```bash
+./health-check.sh           full report: containers, backend/frontend/HTTPS reachability, database, disk space
+./health-check.sh --quiet   prints nothing and exits 0 if healthy - only speaks up on a real problem (cron-friendly)
+```
+Entirely read-only — it only runs `docker compose ps` and a couple of HTTP/`pg_isready` probes, never starts, stops or changes anything.
+
+```bash
+./db-query.sh                              interactive read-only database shell
+./db-query.sh "SELECT ... ;"               run one read-only query
+./db-query.sh --list                       list built-in common queries (providers, users, recent-audit, ...)
+./db-query.sh --common providers           run one of those by name
+```
+Every connection this opens has Postgres's own `default_transaction_read_only` switched on first — an `INSERT`/`UPDATE`/`DELETE`, typed by hand or pasted from somewhere untrusted, is rejected by Postgres itself before it touches a row. Use this to look something up during troubleshooting; use the admin UI (or a real migration) to actually change anything.
+
+```bash
+./breakglass-url.sh                print the hidden Break-Glass emergency-access URL (generates one first if none exists)
+./breakglass-url.sh --regenerate   invalidate the old one and generate a fresh URL
+```
+This is the only way to get that URL — it's never shown or linked anywhere in the app itself, by design (see `backend/app/cli.py`). The URL is shown once in the terminal output; store it securely and don't share or link it anywhere.
+
 ## Things to know
 
 - **Localhost defaults.** The dashboard expects the API at `http://localhost:8000` and is served at `http://localhost:5173`. `run.sh` handles another address (and HTTPS) for you automatically — see above. Doing it by hand instead: set, before building,
