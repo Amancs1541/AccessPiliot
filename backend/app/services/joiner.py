@@ -355,6 +355,41 @@ async def sweep_joiners(session: AsyncSession) -> int:
     return activated
 
 
+async def sweep_failed_joiner_targets(session: AsyncSession) -> int:
+    """Worker entry point: the automatic counterpart to the manual Retry button. Gated behind an admin-configurable
+    interval (LifecycleSettings.joiner_retry_interval_minutes — NULL/unset means this sweep is a no-op, same
+    'blank = off' convention as every other optional interval in this app) so a directory that was unreachable
+    when a Joiner was first created (AD DS or Entra down) gets automatically retried once it's back, without an
+    admin having to notice a FAILED target and click Retry themselves. Reuses retry_joiner() unchanged for the
+    actual retry — this function's only job is finding what's due and gating how often it runs."""
+    from app.services.lifecycle import get_lifecycle_settings
+
+    settings = await get_lifecycle_settings(session)
+    if not settings.joiner_retry_interval_minutes:
+        return 0
+    now = datetime.now(timezone.utc)
+    if settings.last_joiner_retry_sweep_at is not None:
+        last = settings.last_joiner_retry_sweep_at if settings.last_joiner_retry_sweep_at.tzinfo else settings.last_joiner_retry_sweep_at.replace(tzinfo=timezone.utc)
+        if now < last + timedelta(minutes=settings.joiner_retry_interval_minutes):
+            return 0
+    settings.last_joiner_retry_sweep_at = now
+    await session.commit()
+
+    candidates = list((await session.scalars(select(JoinerRequest.id).where(JoinerRequest.status.in_(("SCHEDULED", "PARTIAL"))))).all())
+    retried = 0
+    for joiner_id in candidates:
+        joiner = await session.get(JoinerRequest, joiner_id)
+        if joiner is None or not any(t.get("status") == "FAILED" for t in (joiner.targets or [])):
+            continue
+        try:
+            await retry_joiner(session, joiner_id, f"joiner-retry-sweep-{joiner_id}")
+            retried += 1
+        except AccessPilotError as exc:
+            logger.warning("Automatic joiner retry failed for %s: %s", joiner_id, exc)
+            await session.rollback()
+    return retried
+
+
 # ---------------------------------------------------------------- retry / cancel / list
 
 async def retry_joiner(session: AsyncSession, joiner_id: UUID, request_id: str) -> tuple[JoinerResponse, dict]:

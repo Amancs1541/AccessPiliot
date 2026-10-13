@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import IdentityProvider, User
+from app.models import IdentityAccount, IdentityProvider, User
 from app.providers.base import NewUserRequest, NormalizedDomain, ProviderConflictError
 from app.providers.graph_client import GraphError
 from app.services.audit import record_audit
@@ -127,3 +128,76 @@ async def provision_real_account(session: AsyncSession, *, display_name: str, em
         return row
     except GraphError:
         return None
+
+
+async def provision_secondary_accounts(session: AsyncSession, person: User, *, department: Optional[str], job_title: Optional[str], request_id: str) -> list[IdentityAccount]:
+    """The CSV/HR-onboarding counterpart to Joiner's own account-mapping auto-detection
+    (app.services.joiner._resolve_wanted_targets, which calls the same required_providers_for_profile): a person
+    synced in from an HR app only ever got a REAL account in the single primary provider (see
+    provision_real_account above) — this additionally provisions a real account in every OTHER directory their
+    department/job-title birthright access would need, so an HR-synced person ends up with the same
+    multi-directory footprint a Joiner submission would have given them. Idempotent (skips a directory the person
+    already has an account in) and best-effort per directory — one provider failing or not supporting
+    provisioning yet never blocks another, never raises, mirrors provision_real_account's own graceful
+    degradation."""
+    from app.services.birthright import required_providers_for_profile
+
+    needed_provider_ids = await required_providers_for_profile(session, department=department, job_title=job_title, status=person.status, email=person.email)
+    if not needed_provider_ids:
+        return []
+    already_has = {person.provider_id} | {row.provider_id for row in (await session.scalars(select(IdentityAccount).where(IdentityAccount.user_id == person.id))).all()}
+    created: list[IdentityAccount] = []
+    for provider_id in needed_provider_ids:
+        if provider_id in already_has:
+            continue
+        provider = await session.get(IdentityProvider, provider_id)
+        if provider is None or provider.type == "CSV" or not provider.provision_joiners:
+            continue
+        username = username_for_provider(provider, person.given_name, person.surname, person.email)
+        try:
+            created_user = await _connector(provider).create_user(NewUserRequest(display_name=person.display_name, user_principal_name=username, mail_nickname=username.split("@")[0] or username, department=department, job_title=job_title, given_name=person.given_name, surname=person.surname, enabled=person.status == "ACTIVE"))
+        except (ProviderConflictError, GraphError, NotImplementedError):
+            continue
+        account = IdentityAccount(user_id=person.id, provider_id=provider.id, external_id=created_user.user.external_id, username=username, status="ACTIVE" if person.status == "ACTIVE" else "DISABLED", provisioned_by="ONBOARDING")
+        session.add(account)
+        await session.flush()
+        await record_audit(session, action="USER_PROVISIONED", target_type="USER", target_id=person.id, provider_id=provider.id, request_id=request_id, metadata={"source": "ONBOARDING_SECONDARY", "username": username})
+        created.append(account)
+    return created
+
+
+async def sweep_missing_secondary_accounts(session: AsyncSession) -> int:
+    """Worker entry point: the HR/CSV-onboarding counterpart to app.services.joiner.sweep_failed_joiner_targets.
+    provision_secondary_accounts() above only ever runs as part of a sync for that specific person — fine if
+    automatic HR sync is on, but a person synced once (a one-off CSV upload, or HR sync never scheduled) whose
+    needed directory was unreachable at the time stays missing an account forever otherwise. Gated behind
+    LifecycleSettings.secondary_account_retry_interval_minutes (NULL/unset = off, this sweep is a no-op) so, once
+    set, every real/active person is rechecked on that interval regardless of whether/when their next HR sync
+    happens — the same guarantee joiner_retry_interval_minutes already gives Joiner."""
+    from app.services.lifecycle import get_lifecycle_settings
+
+    settings = await get_lifecycle_settings(session)
+    if not settings.secondary_account_retry_interval_minutes:
+        return 0
+    now = datetime.now(timezone.utc)
+    if settings.last_secondary_account_retry_sweep_at is not None:
+        last = settings.last_secondary_account_retry_sweep_at if settings.last_secondary_account_retry_sweep_at.tzinfo else settings.last_secondary_account_retry_sweep_at.replace(tzinfo=timezone.utc)
+        if now < last + timedelta(minutes=settings.secondary_account_retry_interval_minutes):
+            return 0
+    settings.last_secondary_account_retry_sweep_at = now
+    await session.commit()
+
+    candidate_ids = list((await session.scalars(
+        select(User.id).join(IdentityProvider, User.provider_id == IdentityProvider.id)
+        .where(User.account_type == "NORMAL", User.status == "ACTIVE", IdentityProvider.type != "CSV")
+    )).all())
+    provisioned = 0
+    for user_id in candidate_ids:
+        person = await session.get(User, user_id)
+        if person is None:
+            continue
+        created = await provision_secondary_accounts(session, person, department=person.department, job_title=person.job_title, request_id=f"secondary-account-sweep-{user_id}")
+        if created:
+            await session.commit()
+        provisioned += len(created)
+    return provisioned

@@ -33,6 +33,8 @@ interface ApiUserAccessSegments { permanentActive: number; eligible: number; }
 interface ApiSegmentMember { id: string; display_name: string; email: string; }
 interface ApiOnboardingImport { id: string; filename: string; status: string; total_records: number; created_count: number; updated_count: number; disabled_count: number; no_change_count: number; failed_count: number; access_revoked_count: number; access_revoke_failed_count: number; real_accounts_provisioned_count: number; birthright_assignments_created_count: number; birthright_assignments_revoked_count: number; moves_scheduled_count: number; error_summary: Record<string, unknown> | null; created_at: string; completed_at: string | null; }
 interface ApiOnboardingImportRecord { row_number: number; employee_id: string; action: string; error_message: string | null; raw_data: Record<string, string> | null; }
+interface ApiHrIntegrationSettings { enabled: boolean; auth_method: string; base_url: string | null; username: string | null; credential_configured: boolean; api_key_configured: boolean; sync_interval_minutes: number | null; last_sync_at: string | null; last_sync_status: string | null; last_sync_error: string | null; }
+interface ApiHrSyncTriggerTokenSummary { configured: boolean; created_at: string | null; last_used_at: string | null; }
 interface ApiSecuritySettings { blur_enabled: boolean; blur_after_minutes: number; lock_enabled: boolean; lock_after_minutes: number; logout_enabled: boolean; logout_after_minutes: number; timezone: string; support_contact_email: string | null; }
 // A short, curated list rather than every IANA zone (~400) — covers the timezones this deployment's users are
 // actually likely to be in; "Other (type it below)" falls through to a free-text input validated server-side by
@@ -4967,7 +4969,7 @@ function LeaverPoliciesPanel() {
 }
 interface ApiLifecycleEvent { id: string; event_type: string; source: string; created_at: string; user_id: string; user_display_name: string | null; user_email: string | null; changes: Record<string, { from: string | null; to: string | null }>; revoked_count: number; granted_count: number; privileged_flagged_count: number; review_campaign_id: string | null; review_campaign_name: string | null; review_status: string | null; review_reviewer_name: string | null; review_item_count: number; review_decided_count: number; review_note: string | null; notified: string[]; }
 interface ApiPendingMove { id: string; user_id: string; user_display_name: string | null; user_email: string | null; current_department: string | null; current_job_title: string | null; new_department: string | null; new_job_title: string | null; effective_at: string; source: string; status: string; failure_reason: string | null; created_at: string; applied_at: string | null; }
-interface ApiLifecycleSettings { mover_review_enabled: boolean; revoke_on_directory_disable: boolean; review_due_days: number; lifecycle_owners: { user_id: string; display_name: string | null; email: string | null }[]; joiner_provisioning_delay_days: number | null; }
+interface ApiLifecycleSettings { mover_review_enabled: boolean; revoke_on_directory_disable: boolean; review_due_days: number; lifecycle_owners: { user_id: string; display_name: string | null; email: string | null }[]; joiner_provisioning_delay_days: number | null; joiner_retry_interval_minutes: number | null; last_joiner_retry_sweep_at: string | null; secondary_account_retry_interval_minutes: number | null; last_secondary_account_retry_sweep_at: string | null; }
 const MOVER_NOTES: Record<string, string> = {
   NO_LEFTOVER_ACCESS: 'Nothing else to review',
   AUTO_REVOKE_OFF: 'Automatic revocation is switched off — access was kept',
@@ -5117,12 +5119,16 @@ function MoversPage() {
   const [dueDays, setDueDays] = useState('14');
   const [ownerIds, setOwnerIds] = useState<string[]>([]);
   const [provisioningDelayDays, setProvisioningDelayDays] = useState('');
+  const [retryIntervalMinutes, setRetryIntervalMinutes] = useState('');
+  const [secondaryRetryIntervalMinutes, setSecondaryRetryIntervalMinutes] = useState('');
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   useEffect(() => {
     if (!settings) return;
     setEnabled(settings.mover_review_enabled); setRevokeOnDisable(settings.revoke_on_directory_disable); setDueDays(String(settings.review_due_days)); setOwnerIds(settings.lifecycle_owners.map(o => o.user_id));
     setProvisioningDelayDays(settings.joiner_provisioning_delay_days ? String(settings.joiner_provisioning_delay_days) : '');
+    setRetryIntervalMinutes(settings.joiner_retry_interval_minutes ? String(settings.joiner_retry_interval_minutes) : '');
+    setSecondaryRetryIntervalMinutes(settings.secondary_account_retry_interval_minutes ? String(settings.secondary_account_retry_interval_minutes) : '');
   }, [settings]);
   useEffect(() => {
     const timer = setInterval(() => { reload(); reloadMoves(); }, 30000);
@@ -5133,7 +5139,7 @@ function MoversPage() {
     if (!dueDays || Number(dueDays) < 1) { setMessage('Enter a due window of at least 1 day.'); return; }
     setSaving(true); setMessage('');
     try {
-      const response = await auth.apiRequest('/api/v1/lifecycle/settings', { method: 'PUT', body: JSON.stringify({ mover_review_enabled: enabled, revoke_on_directory_disable: revokeOnDisable, review_due_days: Number(dueDays), lifecycle_owner_ids: ownerIds, ...(provisioningDelayDays.trim() ? { joiner_provisioning_delay_days: Number(provisioningDelayDays) } : { clear_joiner_provisioning_delay_days: true }) }) });
+      const response = await auth.apiRequest('/api/v1/lifecycle/settings', { method: 'PUT', body: JSON.stringify({ mover_review_enabled: enabled, revoke_on_directory_disable: revokeOnDisable, review_due_days: Number(dueDays), lifecycle_owner_ids: ownerIds, ...(provisioningDelayDays.trim() ? { joiner_provisioning_delay_days: Number(provisioningDelayDays) } : { clear_joiner_provisioning_delay_days: true }), ...(retryIntervalMinutes.trim() ? { joiner_retry_interval_minutes: Number(retryIntervalMinutes) } : { clear_joiner_retry_interval_minutes: true }), ...(secondaryRetryIntervalMinutes.trim() ? { secondary_account_retry_interval_minutes: Number(secondaryRetryIntervalMinutes) } : { clear_secondary_account_retry_interval_minutes: true }) }) });
       if (response.ok) { setMessage('Saved.'); reloadSettings(); }
       else setMessage((await response.json().catch(() => null))?.error?.message || 'Unable to save these settings.');
     } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
@@ -5151,7 +5157,11 @@ function MoversPage() {
           <label className="key"><span>Lifecycle owners (notified about every move; review it when there is no manager)</span>
             <select className="select" value="" onChange={event => { const id = event.target.value; if (id && !ownerIds.includes(id)) setOwnerIds([...ownerIds, id]); }}><option value="">Add an owner…</option>{(users || []).filter(u => !ownerIds.includes(u.id)).map(u => <option key={u.id} value={u.id}>{u.display_name}</option>)}</select></label>
           <label className="key"><span>Create joiner accounts (days after submission, blank = immediately)</span><input className="select" type="number" min={1} max={365} value={provisioningDelayDays} onChange={event => setProvisioningDelayDays(event.target.value)} placeholder="e.g. 14"/></label>
+          <label className="key"><span>Retry failed joiner accounts every (minutes, blank = manual Retry only)</span><input className="select" type="number" min={5} max={1440} value={retryIntervalMinutes} onChange={event => setRetryIntervalMinutes(event.target.value)} placeholder="e.g. 15"/></label>
+          <label className="key"><span>Retry missing HR-synced accounts every (minutes, blank = only on next sync)</span><input className="select" type="number" min={5} max={1440} value={secondaryRetryIntervalMinutes} onChange={event => setSecondaryRetryIntervalMinutes(event.target.value)} placeholder="e.g. 15"/></label>
         </div>
+        <p className="subtitle" style={{marginTop:0,marginBottom:12}}>If AD DS or Entra was unreachable when a joiner's account was being created, that target is left failed until someone clicks Retry. Setting this re-checks every failed target on this interval automatically — once the directory is back, it's picked up without anyone noticing or clicking anything.{settings?.last_joiner_retry_sweep_at && <> Last automatic retry sweep: {formatDateTime(settings.last_joiner_retry_sweep_at, timezone)}.</>}</p>
+        <p className="subtitle" style={{marginTop:0,marginBottom:12}}>Someone synced in from an HR app or CSV also gets a real account in every other directory their department needs (not just the primary one) — but normally only when they're synced again. Setting this rechecks everyone on this interval too, so a missing account gets filled in even if that person is never re-synced.{settings?.last_secondary_account_retry_sweep_at && <> Last automatic retry sweep: {formatDateTime(settings.last_secondary_account_retry_sweep_at, timezone)}.</>}</p>
         <p className="subtitle" style={{marginTop:0,marginBottom:12}}>By default a Joiner's real accounts are created in Entra/AD the instant the form is submitted (disabled until the start date). Setting this delays that creation — unless the person's start date is sooner than the delay would allow, in which case accounts are still created right away, exactly as if this were blank. A joiner waiting on this shows as "Pending provisioning" below.</p>
         {ownerIds.length > 0 && <div style={{display:'flex',flexWrap:'wrap',gap:8,marginBottom:12}}>{ownerIds.map((id, index) => <span key={id} className="badge neutral" style={{display:'inline-flex',alignItems:'center',gap:6}}>{index === 0 ? '1st · ' : ''}{(users || []).find(u => u.id === id)?.display_name || id}<button type="button" className="btn" aria-label="Remove owner" onClick={() => setOwnerIds(ownerIds.filter(x => x !== id))} style={{padding:'0 6px',minWidth:0}}><X size={11}/></button></span>)}</div>}
         {message && <div className="notice" style={{marginBottom:12}}>{message}</div>}
@@ -5473,6 +5483,71 @@ function OnboardingPage() {
   const auth = useAuth();
   const timezone = useAppTimezone();
   const { data: imports, loading: importsLoading, error: importsError, reload: reloadImports } = useApiResource<ApiOnboardingImport[]>('/api/v1/onboarding/imports');
+  const { data: hrSettings, reload: reloadHrSettings } = useApiResource<ApiHrIntegrationSettings>('/api/v1/hr-integration/settings');
+  const [hrAuthMethod, setHrAuthMethod] = useState<'SESSION' | 'API_KEY'>('SESSION');
+  const [hrBaseUrl, setHrBaseUrl] = useState('');
+  const [hrUsername, setHrUsername] = useState('');
+  const [hrPassword, setHrPassword] = useState('');
+  const [hrApiKey, setHrApiKey] = useState('');
+  const [hrInterval, setHrInterval] = useState('');
+  const [hrEnabled, setHrEnabled] = useState(false);
+  const [hrSaving, setHrSaving] = useState(false);
+  const [hrSyncing, setHrSyncing] = useState(false);
+  const [hrMessage, setHrMessage] = useState('');
+  useEffect(() => {
+    if (!hrSettings) return;
+    setHrAuthMethod(hrSettings.auth_method === 'API_KEY' ? 'API_KEY' : 'SESSION');
+    setHrBaseUrl(hrSettings.base_url || ''); setHrUsername(hrSettings.username || '');
+    setHrInterval(hrSettings.sync_interval_minutes ? String(hrSettings.sync_interval_minutes) : ''); setHrEnabled(hrSettings.enabled);
+  }, [hrSettings]);
+  const saveHrSettings = async () => {
+    setHrSaving(true); setHrMessage('');
+    try {
+      const response = await auth.apiRequest('/api/v1/hr-integration/settings', { method: 'PUT', body: JSON.stringify({
+        base_url: hrBaseUrl.trim() || undefined, auth_method: hrAuthMethod,
+        username: hrAuthMethod === 'SESSION' ? (hrUsername.trim() || undefined) : undefined,
+        password: hrAuthMethod === 'SESSION' ? (hrPassword || undefined) : undefined,
+        api_key: hrAuthMethod === 'API_KEY' ? (hrApiKey || undefined) : undefined,
+        enabled: hrEnabled, ...(hrInterval.trim() ? { sync_interval_minutes: Number(hrInterval) } : { clear_sync_interval_minutes: true }),
+      }) });
+      if (response.ok) { setHrPassword(''); setHrApiKey(''); setHrMessage('Saved.'); reloadHrSettings(); }
+      else setHrMessage((await response.json().catch(() => null))?.error?.message || 'Unable to save the HR connection.');
+    } catch { setHrMessage('Unable to reach the backend.'); } finally { setHrSaving(false); }
+  };
+  const syncHrNow = async () => {
+    setHrSyncing(true); setHrMessage('');
+    try {
+      const response = await auth.apiRequest('/api/v1/hr-integration/sync-now', { method: 'POST' });
+      const body = await response.json().catch(() => null);
+      if (response.ok && body) { setHrMessage(body.status === 'SUCCESS' ? 'Sync completed successfully.' : `Sync failed: ${body.error || 'unknown error'}`); reloadHrSettings(); reloadImports(); }
+      else setHrMessage(body?.error?.message || 'Unable to run the sync.');
+    } catch { setHrMessage('Unable to reach the backend.'); } finally { setHrSyncing(false); }
+  };
+
+  const { data: triggerTokenSummary, reload: reloadTriggerToken } = useApiResource<ApiHrSyncTriggerTokenSummary>('/api/v1/hr-integration/sync-trigger-token');
+  const [triggerTokenRaw, setTriggerTokenRaw] = useState('');
+  const [triggerTokenBusy, setTriggerTokenBusy] = useState(false);
+  const [triggerTokenMessage, setTriggerTokenMessage] = useState('');
+  const generateTriggerToken = async () => {
+    if (triggerTokenSummary?.configured && !window.confirm('Generate a new token? The HR app will need to be updated with it — its current token stops working immediately.')) return;
+    setTriggerTokenBusy(true); setTriggerTokenMessage('');
+    try {
+      const response = await auth.apiRequest('/api/v1/hr-integration/sync-trigger-token', { method: 'POST' });
+      const body = await response.json().catch(() => null);
+      if (response.ok && body) { setTriggerTokenRaw(body.token); reloadTriggerToken(); }
+      else setTriggerTokenMessage(body?.error?.message || 'Unable to generate a token.');
+    } catch { setTriggerTokenMessage('Unable to reach the backend.'); } finally { setTriggerTokenBusy(false); }
+  };
+  const revokeTriggerToken = async () => {
+    if (!window.confirm('Revoke the active token? The HR app will no longer be able to trigger a sync until a new token is generated and pasted there.')) return;
+    setTriggerTokenBusy(true); setTriggerTokenMessage('');
+    try {
+      const response = await auth.apiRequest('/api/v1/hr-integration/sync-trigger-token', { method: 'DELETE' });
+      if (response.ok) { setTriggerTokenRaw(''); reloadTriggerToken(); }
+      else setTriggerTokenMessage('Unable to revoke the token.');
+    } catch { setTriggerTokenMessage('Unable to reach the backend.'); } finally { setTriggerTokenBusy(false); }
+  };
+
   const [fileName, setFileName] = useState('');
   const [csvContent, setCsvContent] = useState('');
   const [uploading, setUploading] = useState(false);
@@ -5526,6 +5601,49 @@ function OnboardingPage() {
   const reset = () => { setFileName(''); setCsvContent(''); setCurrentImport(null); setPreviewRows(null); setMessage(''); };
 
   return <Page eyebrow="SYSTEM" title="Onboarding" subtitle="Bring identities into AccessPilot from an HR export or a one-off CSV — separate from, and ahead of, any real Entra provisioning.">
+    <section className="panel" style={{marginBottom:18}}>
+      <div className="panel-head"><h2>HR connection</h2>{hrSettings?.last_sync_status && <StatusBadge status={hrSettings.last_sync_status}/>}</div>
+      <div className="detail-section">
+        <p className="subtitle" style={{marginTop:0,marginBottom:14}}>Automatically pull employee data from your HR app on a schedule, feeding the exact same validation and commit flow as a manual CSV upload below — including leaver handling, driven entirely by that app's own <code>leaverDate</code>/<code>status</code> columns. No changes are made to the HR app's own data from here.</p>
+        <div style={{display:'flex',gap:16,marginBottom:14}}>
+          <label style={{display:'flex',alignItems:'center',gap:6,fontSize:13,fontWeight:600}}><input type="radio" name="hr-auth-method" checked={hrAuthMethod === 'SESSION'} onChange={() => setHrAuthMethod('SESSION')}/> Username / password</label>
+          <label style={{display:'flex',alignItems:'center',gap:6,fontSize:13,fontWeight:600}}><input type="radio" name="hr-auth-method" checked={hrAuthMethod === 'API_KEY'} onChange={() => setHrAuthMethod('API_KEY')}/> API key (recommended)</label>
+        </div>
+        <div className="key-grid" style={{marginBottom:12}}>
+          <label className="key"><span>HR app base URL</span><input className="select" value={hrBaseUrl} onChange={event => setHrBaseUrl(event.target.value)} placeholder="http://localhost:3000"/></label>
+          {hrAuthMethod === 'SESSION' ? <>
+            <label className="key"><span>Admin username</span><input className="select" value={hrUsername} onChange={event => setHrUsername(event.target.value)} placeholder="admin"/></label>
+            <label className="key"><span>Admin password {hrSettings?.credential_configured && '(configured — leave blank to keep)'}</span><input className="select" type="password" value={hrPassword} onChange={event => setHrPassword(event.target.value)} placeholder={hrSettings?.credential_configured ? '••••••••' : ''}/></label>
+          </> : <>
+            <label className="key"><span>API key {hrSettings?.api_key_configured && '(configured — leave blank to keep)'}</span><input className="select" type="password" value={hrApiKey} onChange={event => setHrApiKey(event.target.value)} placeholder={hrSettings?.api_key_configured ? '••••••••' : 'paste the key from the HR app'}/></label>
+          </>}
+          <label className="key"><span>Sync every (minutes, blank = manual only)</span><input className="select" type="number" min={5} max={10080} value={hrInterval} onChange={event => setHrInterval(event.target.value)} placeholder="e.g. 60"/></label>
+        </div>
+        <label style={{display:'flex',alignItems:'center',gap:8,fontWeight:600,fontSize:13,marginBottom:12}}><input type="checkbox" checked={hrEnabled} onChange={event => setHrEnabled(event.target.checked)}/> Enable automatic sync</label>
+        {hrSettings?.last_sync_at && <p className="subtitle" style={{marginTop:0,marginBottom:12}}>Last sync: {formatDateTime(hrSettings.last_sync_at, timezone)} — {hrSettings.last_sync_status}{hrSettings.last_sync_error && ` (${hrSettings.last_sync_error})`}</p>}
+        {hrMessage && <div className="notice" style={{marginBottom:12}}>{hrMessage}</div>}
+        <div style={{display:'flex',gap:8}}>
+          <button className="btn btn-primary" disabled={hrSaving} onClick={() => void saveHrSettings()}>{hrSaving ? 'Saving...' : 'Save HR connection'}</button>
+          <button className="btn" disabled={hrSyncing || !hrSettings?.base_url} onClick={() => void syncHrNow()}>{hrSyncing ? 'Syncing...' : 'Sync now'}</button>
+        </div>
+      </div>
+    </section>
+    <section className="panel" style={{marginBottom:18}}>
+      <div className="panel-head"><h2>API access — let an external app trigger a sync</h2></div>
+      <div className="detail-section">
+        <p className="subtitle" style={{marginTop:0,marginBottom:14}}>Generate a token below, then paste it — together with this server's URL — into the external HR app's own "Sync" button settings. That token can only ever do one thing: call Sync now on this HR connection. It's a separate credential from your own admin login, fully revocable here at any time.</p>
+        <div className="key-grid" style={{marginBottom:12}}>
+          <label className="key"><span>AccessPilot API URL (paste into the HR app)</span><input className="select" readOnly value={`${apiBaseUrl}/api/v1/hr-integration/sync-now`} onFocus={event => event.target.select()}/></label>
+          <label className="key"><span>Trigger token status</span><strong style={{fontSize:13}}>{triggerTokenSummary?.configured ? `Active — generated ${formatDateTime(triggerTokenSummary.created_at!, timezone)}${triggerTokenSummary.last_used_at ? `, last used ${formatDateTime(triggerTokenSummary.last_used_at, timezone)}` : ', never used yet'}` : 'No token generated yet'}</strong></label>
+        </div>
+        {triggerTokenRaw && <div className="notice" style={{marginBottom:12}}><strong>Copy this token now — it will not be shown again:</strong><div style={{marginTop:6,fontFamily:'monospace',fontSize:13,wordBreak:'break-all',background:'#1a2026',color:'#e4f5ef',padding:'8px 10px',borderRadius:6}}>{triggerTokenRaw}</div></div>}
+        {triggerTokenMessage && <div className="notice" style={{marginBottom:12}}>{triggerTokenMessage}</div>}
+        <div style={{display:'flex',gap:8}}>
+          <button className="btn btn-primary" disabled={triggerTokenBusy} onClick={() => void generateTriggerToken()}>{triggerTokenBusy ? 'Working...' : triggerTokenSummary?.configured ? 'Generate new token' : 'Generate token'}</button>
+          {triggerTokenSummary?.configured && <button className="btn" disabled={triggerTokenBusy} onClick={() => void revokeTriggerToken()}>Revoke token</button>}
+        </div>
+      </div>
+    </section>
     <section className="panel" style={{marginBottom:18}}>
       <div className="panel-head"><h2>Upload a CSV</h2></div>
       <div className="detail-section">

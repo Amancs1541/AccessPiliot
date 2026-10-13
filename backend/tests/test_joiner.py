@@ -551,3 +551,81 @@ async def test_sweep_also_activates_immediately_if_the_start_date_has_passed_by_
     async with db_override.factory() as session:
         stored = (await session.scalars(select(JoinerRequest).where(JoinerRequest.id == UUID(joiner_id)))).one()
         assert stored.status == "ACTIVE"
+
+
+# ---------------------------------------------------------------- automatic retry of FAILED targets (heartbeat)
+
+async def _set_retry_interval(client, minutes):
+    response = await client.put("/api/v1/lifecycle/settings", json={"joiner_retry_interval_minutes": minutes})
+    assert response.status_code == 200
+    return response
+
+
+@pytest.mark.asyncio
+async def test_sweep_does_nothing_when_no_retry_interval_is_configured(db_override):
+    """NULL/unset (the default) means this feature is off — a FAILED target stays FAILED until a human clicks
+    Retry, exactly as before this feature existed."""
+    async with db_override.factory() as session:
+        ids = await _seed(session)
+    authenticate_as("AccessPilot.Admin")
+    FakeConnector.fail_create = {"Okta"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = (await client.post("/api/v1/lifecycle/joiners", json=body(ids, start=future()))).json()
+    FakeConnector.fail_create = set()
+
+    from app.services.joiner import sweep_failed_joiner_targets
+    async with db_override.factory() as session:
+        retried = await sweep_failed_joiner_targets(session)
+    assert retried == 0
+    async with db_override.factory() as session:
+        stored = (await session.scalars(select(JoinerRequest).where(JoinerRequest.id == UUID(created["id"])))).one()
+        assert next(t for t in stored.targets if t["provider_name"] == "Okta")["status"] == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_sweep_automatically_retries_a_failed_target_once_the_directory_is_back(db_override):
+    """The actual scenario this feature exists for: AD/Entra is down when a joiner is created (one target FAILED),
+    comes back later, and the next sweep — with no human clicking Retry — picks it up on its own."""
+    async with db_override.factory() as session:
+        ids = await _seed(session)
+    authenticate_as("AccessPilot.Admin")
+    FakeConnector.fail_create = {"Okta"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await _set_retry_interval(client, 15)
+        created = (await client.post("/api/v1/lifecycle/joiners", json=body(ids, start=future()))).json()
+        by_name = {t["provider_name"]: t for t in created["targets"]}
+        assert by_name["Okta"]["status"] == "FAILED"
+    FakeConnector.fail_create = set()  # the directory is back online
+
+    from app.services.joiner import sweep_failed_joiner_targets
+    async with db_override.factory() as session:
+        retried = await sweep_failed_joiner_targets(session)
+    assert retried == 1
+    async with db_override.factory() as session:
+        stored = (await session.scalars(select(JoinerRequest).where(JoinerRequest.id == UUID(created["id"])))).one()
+        assert {t["provider_name"]: t["status"] for t in stored.targets} == {"Entra": "CREATED", "Okta": "CREATED"}
+        assert stored.status == "SCHEDULED"
+
+
+@pytest.mark.asyncio
+async def test_sweep_respects_the_configured_interval_and_does_not_retry_early(db_override):
+    async with db_override.factory() as session:
+        ids = await _seed(session)
+    authenticate_as("AccessPilot.Admin")
+    FakeConnector.fail_create = {"Okta"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await _set_retry_interval(client, 15)
+        created = (await client.post("/api/v1/lifecycle/joiners", json=body(ids, start=future()))).json()
+    FakeConnector.fail_create = set()
+
+    from app.services.joiner import sweep_failed_joiner_targets
+    from app.models import LifecycleSettings
+    async with db_override.factory() as session:
+        settings = (await session.scalars(select(LifecycleSettings))).one()
+        settings.last_joiner_retry_sweep_at = datetime.now(timezone.utc) - timedelta(minutes=1)  # only 1 of 15 minutes elapsed
+        await session.commit()
+        retried = await sweep_failed_joiner_targets(session)
+    assert retried == 0
+    async with db_override.factory() as session:
+        stored = (await session.scalars(select(JoinerRequest).where(JoinerRequest.id == UUID(created["id"])))).one()
+        assert next(t for t in stored.targets if t["provider_name"] == "Okta")["status"] == "FAILED"

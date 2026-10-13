@@ -127,7 +127,7 @@ async def settings_response(session: AsyncSession) -> LifecycleSettingsResponse:
         user = await session.get(User, UUID(str(raw)))
         if user is not None:
             owners.append(LifecycleOwnerInfo(user_id=user.id, display_name=user.display_name, email=user.email))
-    return LifecycleSettingsResponse(mover_review_enabled=settings.mover_review_enabled, revoke_on_directory_disable=settings.revoke_on_directory_disable, review_due_days=settings.review_due_days, lifecycle_owners=owners, joiner_provisioning_delay_days=settings.joiner_provisioning_delay_days)
+    return LifecycleSettingsResponse(mover_review_enabled=settings.mover_review_enabled, revoke_on_directory_disable=settings.revoke_on_directory_disable, review_due_days=settings.review_due_days, lifecycle_owners=owners, joiner_provisioning_delay_days=settings.joiner_provisioning_delay_days, joiner_retry_interval_minutes=settings.joiner_retry_interval_minutes, last_joiner_retry_sweep_at=settings.last_joiner_retry_sweep_at, secondary_account_retry_interval_minutes=settings.secondary_account_retry_interval_minutes, last_secondary_account_retry_sweep_at=settings.last_secondary_account_retry_sweep_at)
 
 
 async def update_settings(session: AsyncSession, data: LifecycleSettingsUpdate, request_id: str) -> LifecycleSettingsResponse:
@@ -148,7 +148,15 @@ async def update_settings(session: AsyncSession, data: LifecycleSettingsUpdate, 
         settings.joiner_provisioning_delay_days = None
     elif data.joiner_provisioning_delay_days is not None:
         settings.joiner_provisioning_delay_days = data.joiner_provisioning_delay_days
-    await record_audit(session, action="LIFECYCLE_SETTINGS_UPDATED", target_type="LIFECYCLE_SETTINGS", target_id=settings.id, request_id=request_id, metadata={"mover_review_enabled": settings.mover_review_enabled, "review_due_days": settings.review_due_days, "owner_count": len(settings.lifecycle_owner_ids or []), "joiner_provisioning_delay_days": settings.joiner_provisioning_delay_days})
+    if data.clear_joiner_retry_interval_minutes:
+        settings.joiner_retry_interval_minutes = None
+    elif data.joiner_retry_interval_minutes is not None:
+        settings.joiner_retry_interval_minutes = data.joiner_retry_interval_minutes
+    if data.clear_secondary_account_retry_interval_minutes:
+        settings.secondary_account_retry_interval_minutes = None
+    elif data.secondary_account_retry_interval_minutes is not None:
+        settings.secondary_account_retry_interval_minutes = data.secondary_account_retry_interval_minutes
+    await record_audit(session, action="LIFECYCLE_SETTINGS_UPDATED", target_type="LIFECYCLE_SETTINGS", target_id=settings.id, request_id=request_id, metadata={"mover_review_enabled": settings.mover_review_enabled, "review_due_days": settings.review_due_days, "owner_count": len(settings.lifecycle_owner_ids or []), "joiner_provisioning_delay_days": settings.joiner_provisioning_delay_days, "joiner_retry_interval_minutes": settings.joiner_retry_interval_minutes, "secondary_account_retry_interval_minutes": settings.secondary_account_retry_interval_minutes})
     await session.commit()
     return await settings_response(session)
 

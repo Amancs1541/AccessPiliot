@@ -65,6 +65,10 @@ class LifecycleSettingsResponse(BaseModel):
     review_due_days: int
     lifecycle_owners: list[LifecycleOwnerInfo] = []
     joiner_provisioning_delay_days: Optional[int] = None
+    joiner_retry_interval_minutes: Optional[int] = None
+    last_joiner_retry_sweep_at: Optional[datetime] = None
+    secondary_account_retry_interval_minutes: Optional[int] = None
+    last_secondary_account_retry_sweep_at: Optional[datetime] = None
 
 
 class LifecycleSettingsUpdate(BaseModel):
@@ -74,6 +78,10 @@ class LifecycleSettingsUpdate(BaseModel):
     lifecycle_owner_ids: Optional[list[UUID]] = None
     joiner_provisioning_delay_days: Optional[int] = Field(default=None, ge=1, le=365)
     clear_joiner_provisioning_delay_days: bool = False
+    joiner_retry_interval_minutes: Optional[int] = Field(default=None, ge=5, le=1440)
+    clear_joiner_retry_interval_minutes: bool = False
+    secondary_account_retry_interval_minutes: Optional[int] = Field(default=None, ge=5, le=1440)
+    clear_secondary_account_retry_interval_minutes: bool = False
 
 
 EMPLOYMENT_TYPES = ("EMPLOYEE", "CONTRACTOR", "INTERN", "OTHER")

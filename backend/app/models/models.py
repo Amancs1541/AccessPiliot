@@ -316,7 +316,69 @@ class LifecycleSettings(Base):
     # date, in which case they're still created immediately (an account can never be enabled on a start date it
     # doesn't exist yet on) — see app.services.joiner.create_joiner for exactly where this is applied.
     joiner_provisioning_delay_days: Mapped[Optional[int]] = mapped_column(Integer)
+    # NULL (default) = off: a Joiner target that failed to provision (e.g. AD DS or Entra was unreachable at the
+    # time) stays FAILED until an admin manually clicks Retry — unchanged behavior. Set to N = a background sweep
+    # (app.services.joiner.sweep_failed_joiner_targets) automatically retries every still-FAILED target on every
+    # SCHEDULED/PARTIAL joiner every N minutes, exactly like the manual Retry button would — so once the directory
+    # comes back online, the next sweep picks it up on its own. last_joiner_retry_sweep_at is internal bookkeeping
+    # (when the interval gate last let a sweep actually run), surfaced read-only for transparency.
+    joiner_retry_interval_minutes: Mapped[Optional[int]] = mapped_column(Integer)
+    last_joiner_retry_sweep_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    # NULL (default) = off: an HR/CSV-synced person missing a real account in a directory their department/
+    # job-title birthright access needs (e.g. that directory was unreachable on their last sync, or got connected
+    # afterward) only gets retried the next time THEY happen to be synced again — fine if automatic HR sync is on,
+    # but nothing fixes it on its own otherwise. Set to N = a background sweep
+    # (app.services.provisioning.sweep_missing_secondary_accounts) rechecks every real, active person every N
+    # minutes regardless of whether/when their next HR sync happens — the same guarantee
+    # joiner_retry_interval_minutes already gives Joiner, extended to the HR/CSV path.
+    secondary_account_retry_interval_minutes: Mapped[Optional[int]] = mapped_column(Integer)
+    last_secondary_account_retry_sweep_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = updated_at()
+
+
+class HrIntegrationSettings(Base):
+    """Singleton row (get-or-create, same pattern as SecuritySettings/LifecycleSettings). Configures an automated
+    connection to an external HR 'source of truth' app for the Joiner/Mover side of the JML lifecycle — Leaver
+    stays entirely driven by the existing leaverDate-column + LeaverPolicy machinery already in this app, nothing
+    new there. A scheduled worker (app.services.hr_integration.sweep_hr_sync) authenticates to the HR app — either
+    by logging in with the stored username/password (POST {base_url}/api/login, auth_method='SESSION') or with a
+    stored API key (auth_method='API_KEY', Authorization: Bearer header, no login step) — fetches its CSV export,
+    and feeds it through the EXISTING onboarding engine (app.services.onboarding.parse_and_validate_csv/
+    commit_import) completely unchanged — this table only stores WHERE to connect and HOW, no employee data lives
+    here. With API_KEY auth, a best-effort provisioning-status push-back also runs after each sync (see
+    HR_APP_V2_API_INTEGRATION_PLAN.md) — SESSION-authenticated connections have no status endpoint to push to."""
+    __tablename__ = "hr_integration_settings"
+    id: Mapped[UUID] = uuid_pk()
+    enabled: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="false")
+    base_url: Mapped[Optional[str]] = mapped_column(String(500))
+    username: Mapped[Optional[str]] = mapped_column(String(255))
+    password_encrypted: Mapped[Optional[str]] = mapped_column(String(1000))
+    auth_method: Mapped[str] = mapped_column(String(20), nullable=False, default="SESSION", server_default="SESSION")
+    api_key_encrypted: Mapped[Optional[str]] = mapped_column(String(1000))
+    sync_interval_minutes: Mapped[Optional[int]] = mapped_column(Integer)
+    last_sync_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_sync_status: Mapped[Optional[str]] = mapped_column(String(20))
+    last_sync_error: Mapped[Optional[str]] = mapped_column(Text)
+    updated_at: Mapped[datetime] = updated_at()
+
+
+class HrSyncTriggerToken(Base):
+    """A narrowly-scoped Personal Access Token: its ONLY capability anywhere in AccessPilot is authenticating to
+    POST /hr-integration/sync-now as an alternate credential to a normal Entra-issued admin bearer token — nothing
+    else accepts it, and the existing ONBOARDING_MANAGE admin path through that same route is completely
+    unchanged and always tried first (see app.api.v1.hr_integration.sync_trigger_auth, which mirrors
+    require_authenticated_user's own additive-fallback shape for PortalAuthConfig/break-glass). Lets an external
+    HR app's own UI (which has no AccessPilot admin login) trigger a real sync with a credential an admin
+    explicitly generated for exactly that, fully audited and revocable — never a bypass of the permission system.
+    One active token at a time (generating a new one revokes the previous); only its SHA-256 hash is ever stored,
+    the raw token is shown once at generation time."""
+    __tablename__ = "hr_sync_trigger_tokens"
+    id: Mapped[UUID] = uuid_pk()
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    created_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = created_at()
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
 
 class JoinerRequest(Base):

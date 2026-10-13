@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
-from app.models import AccessAssignment, AuditLog, Group, IdentityProvider, User
+from app.models import AccessAssignment, AuditLog, BirthrightPolicy, Group, IdentityAccount, IdentityProvider, User
 from app.security.auth import AuthenticatedUser, require_authenticated_user
 
 VALID_CSV = (
@@ -462,3 +462,34 @@ async def test_csv_joiners_and_leavers_are_recorded_in_the_lifecycle_history(db_
     async with db_override.factory() as session:
         events = (await session.execute(select(LifecycleEvent).order_by(LifecycleEvent.created_at))).scalars().all()
     assert [(e.event_type, e.source) for e in events] == [("JOINER", "CSV"), ("LEAVER", "CSV")]
+
+
+@pytest.mark.asyncio
+async def test_an_hr_synced_person_also_gets_a_real_account_in_a_second_directory_their_department_needs(db_override):
+    """The account-mapping gap this covers end to end: before this, an HR-synced person only ever got a REAL
+    account in the single primary provider, even when their department's birthright access lives on a second
+    directory (e.g. an AD-sourced group) — unlike Joiner, which already auto-detects this. Now CSV/HR onboarding
+    does the same auto-detection, via commit_import -> provision_secondary_accounts."""
+    async with db_override.factory() as session:
+        primary = IdentityProvider(name="Primary", type="MOCK", status="CONNECTED", tenant_id="t1")
+        secondary = IdentityProvider(name="Secondary AD", type="MOCK", status="CONNECTED", tenant_id="t2")
+        session.add_all([primary, secondary])
+        await session.flush()
+        group = Group(provider_id=secondary.id, external_id="g-fin", name="Finance Group", status="ACTIVE", is_privileged=False)
+        session.add(group)
+        await session.flush()
+        session.add(BirthrightPolicy(name="Finance", match_field="department", match_value="Finance", resource_type="GROUP", resource_id=group.id))
+        await session.commit()
+        secondary_id = secondary.id
+
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        uploaded = await client.post("/api/v1/onboarding/csv", json={"filename": "finance.csv", "content": "employeeId,firstName,lastName,email,department,jobTitle,status\nEMP6001,Priya,Shah,priya.shah@company.com,Finance,Analyst,ACTIVE\n"})
+        committed = await client.post(f"/api/v1/onboarding/imports/{uploaded.json()['id']}/commit")
+    assert committed.status_code == 200
+
+    async with db_override.factory() as session:
+        user = (await session.execute(select(User).where(User.employee_id == "EMP6001"))).scalar_one()
+        accounts = (await session.execute(select(IdentityAccount).where(IdentityAccount.user_id == user.id))).scalars().all()
+    assert len(accounts) == 1
+    assert accounts[0].provider_id == secondary_id and accounts[0].provisioned_by == "ONBOARDING"

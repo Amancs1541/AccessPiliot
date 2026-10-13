@@ -14,7 +14,7 @@ from app.models import AccessAssignment, IdentityProvider, OnboardingImport, Onb
 from app.providers.base import NormalizedUser
 from app.services.assignments import _resolve_internal_user_id, revoke_assignment
 from app.services.birthright import evaluate_birthright_policies, reconcile_birthright_policies_for_user
-from app.services.provisioning import provision_real_account
+from app.services.provisioning import provision_real_account, provision_secondary_accounts
 from app.services.audit import record_audit
 from app.services.directory_sync import upsert_user
 
@@ -305,11 +305,17 @@ async def commit_import(session: AsyncSession, import_id: UUID, actor_subject: s
                 await schedule_move(session, previous.id, normalized.department, normalized.job_title, effective_at, "CSV", actor_subject, request_id, import_id=onboarding_import.id)
                 moves_scheduled += 1
                 continue
-        identity, _, newly_provisioned = await _find_or_create_identity(session, record.employee_id, normalized, request_id)
+        identity, is_real, newly_provisioned = await _find_or_create_identity(session, record.employee_id, normalized, request_id)
         csv_leaver_date = _parse_effective_date(row.get("leaverDate"))
         if csv_leaver_date is not None and identity.leaver_date != csv_leaver_date:
             identity.leaver_date, identity.leaver_processed_at, identity.leaver_reminders_sent = csv_leaver_date, None, []
             await session.flush()
+        # Account mapping: the same auto-detection Joiner already does (app.services.joiner._resolve_wanted_targets)
+        # — a department/job-title whose birthright access needs another directory (e.g. an AD-sourced group) gets
+        # a real account there too, not just in the primary provider. Only once the primary account is itself real;
+        # idempotent on every re-sync, so a directory added later (or a department change) is picked up naturally.
+        if is_real:
+            real_accounts_provisioned += len(await provision_secondary_accounts(session, identity, department=identity.department, job_title=identity.job_title, request_id=request_id))
         # Birthright grants always land ELIGIBLE, never bypassed straight to ACTIVE — even for a real, freshly
         # provisioned account. This matches the rest of AccessPilot's custom PIM model consistently: birthright
         # decides WHAT a joiner is entitled to, but the person (or an Admin on their behalf) still has to
