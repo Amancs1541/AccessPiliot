@@ -209,6 +209,16 @@ async def run_sync(session: AsyncSession, provider: IdentityProvider, request_id
                 errors_count += 1
                 session.add(SyncError(sync_run_id=sync_run.id, resource_type="BIRTHRIGHT_RECONCILIATION", external_id=str(user_id), error_code="BIRTHRIGHT_RECONCILIATION_FAILED", error_message="Could not reconcile birthright policies for this user after their attributes changed."))
 
+        # Same reconciliation, for Dynamic Groups (see app.services.dynamic_groups) — a separate, independent
+        # engine from birthright above, so one failing never affects the other's downstream mover/joiner handling.
+        from app.services.dynamic_groups import evaluate_dynamic_groups_for_user
+        for user_id in users_needing_birthright_reconciliation:
+            try:
+                await evaluate_dynamic_groups_for_user(session, user_id, SYSTEM_ACTOR_SUBJECT, request_id)
+            except AccessPilotError:
+                errors_count += 1
+                session.add(SyncError(sync_run_id=sync_run.id, resource_type="DYNAMIC_GROUP_RECONCILIATION", external_id=str(user_id), error_code="DYNAMIC_GROUP_RECONCILIATION_FAILED", error_message="Could not reconcile dynamic groups for this user after their attributes changed."))
+
         # Same idea, for group-triggered mappings (see app.services.group_role_mapping): someone who just
         # joined or left a group that has an active mapping needs their granted-by-mapping access re-evaluated.
         from app.services.group_role_mapping import reconcile_group_role_mappings_for_user

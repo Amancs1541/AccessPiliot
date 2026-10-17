@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Bot, Box, Check, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Clock3, Cloud, Copy, Database, ExternalLink, FileCheck2, FolderKanban, Gauge, GitBranch, IdCard, Image, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Lock, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldAlert, ShieldCheck, SlidersHorizontal, UploadCloud, UserRound, Users, UserX, Workflow, X } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowRight, BarChart3, Bell, BookOpen, Bot, Box, Check, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Clock3, Cloud, Copy, Database, ExternalLink, FileCheck2, FolderKanban, Gauge, GitBranch, IdCard, Image, KeyRound, LayoutDashboard, LifeBuoy, ListChecks, Lock, Menu, Network, Plus, RefreshCw, Search, Settings2, Shield, ShieldAlert, ShieldCheck, SlidersHorizontal, UploadCloud, UserRound, Users, UserX, Workflow, X, Zap } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { currentUser, policies, type RequestStatus, type Role } from './mock';
 import { mockService, useMockState } from './mockService';
@@ -15,7 +15,7 @@ interface ApiHierarchyNode { id: string; display_name: string; email: string; st
 interface ApiLinkedAccount { id: string; display_name: string; email: string; account_type: string; status: string; }
 interface ApiPrivilegedAccountPolicy { account_type: string; default_approver_id: string | null; default_approver_display_name: string | null; approval_required: boolean; }
 interface ApiPrivilegedAccountRequest { id: string; requester_id: string; requester_display_name: string | null; account_type: string; status: string; approver_id: string | null; approver_display_name: string | null; justification: string | null; provisioned_user_id: string | null; provisioned_user_display_name: string | null; failure_reason: string | null; created_at: string; decided_at: string | null; }
-interface ApiGroup { id: string; external_id: string; name: string; description: string | null; is_privileged: boolean; status: string; group_label?: string | null; last_synced_at: string | null; provider_type?: string | null; provider_name?: string | null; }
+interface ApiGroup { id: string; external_id: string; name: string; description: string | null; is_privileged: boolean; status: string; group_label?: string | null; last_synced_at: string | null; provider_type?: string | null; provider_name?: string | null; is_dynamic?: boolean; dynamic_group_id?: string | null; dynamic_group_name?: string | null; }
 interface ApiRole { id: string; external_id: string; name: string; description: string | null; role_type: string; is_privileged: boolean; status: string; provider_type?: string | null; provider_name?: string | null; }
 interface ApiApplicationRole { id: string; name: string; description: string | null; }
 interface ApiApplication { id: string; external_id: string; name: string; status: string; app_roles: ApiApplicationRole[] | null; last_synced_at: string | null; provider_type?: string | null; provider_name?: string | null; }
@@ -128,10 +128,15 @@ const nav = [
   { label: 'My Business Roles', icon: IdCard, to: '/my-business-roles', roles: ['user','admin'] },
   { label: 'My Groups', icon: Network, to: '/my-groups', roles: ['user','admin'] },
   { label: 'Workflow Requests', icon: Workflow, to: '/workflow-requests', roles: ['user','admin'] },
+  // Visible to EVERY signed-in user (no extra: gate) — this is the self-service counterpart to the NHIAdmin-only
+  // "Non-Human Identities" admin page below: shows only identities the viewer themselves owns, read-only plus
+  // responding to any pending ownership-review item, never full owner/risk/enable-disable management.
+  { label: 'My Owned Identities', icon: Bot, to: '/my-owned-identities', roles: ['user','admin'] },
   { label: 'Profile', icon: UserRound, to: '/profile', roles: ['user','admin'] },
   { label: 'Users', icon: Users, to: '/admin/users', roles: ['admin'], section: 'ADMINISTRATION' },
   { label: 'Org Chart', icon: GitBranch, to: '/admin/org-chart', roles: ['admin'] },
   { label: 'Groups', icon: Network, to: '/admin/groups', roles: ['admin'] },
+  { label: 'Dynamic Groups', icon: Zap, to: '/admin/dynamic-groups', roles: ['admin'] },
   { label: 'Roles', icon: Shield, to: '/admin/roles', roles: ['admin'] },
   { label: 'Access Requests', icon: FolderKanban, to: '/admin/access-requests', roles: ['admin'], section: 'ACCESS MANAGEMENT' },
   { label: 'Assignments', icon: KeyRound, to: '/admin/assignments', roles: ['admin'] },
@@ -163,6 +168,7 @@ const nav = [
   { label: 'System Health', icon: Activity, to: '/admin/server-health', roles: [] as Role[], extra: 'server', section: 'SYSTEM HEALTH' },
   // Same exclusive-to-its-own-role pattern again, for AccessPilot.NHIAdmin (non-human identity ownership/risk).
   { label: 'Non-Human Identities', icon: Bot, to: '/admin/nhi', roles: [] as Role[], extra: 'nhi', section: 'NON-HUMAN IDENTITIES' },
+  { label: 'Ownership Reviews', icon: FileCheck2, to: '/admin/nhi/reviews', roles: [] as Role[], extra: 'nhi' },
   { label: 'Providers', icon: Cloud, to: '/admin/providers', roles: ['admin'], section: 'SYSTEM' },
   { label: 'Sync', icon: RefreshCw, to: '/admin/sync', roles: ['admin'] },
   { label: 'Onboarding', icon: UploadCloud, to: '/admin/onboarding', roles: ['admin'] },
@@ -173,12 +179,19 @@ const nav = [
 function App() {
   const auth = useAuth();
   const [mockRole, setMockRole] = useState<Role>(() => (localStorage.getItem('accesspilot.mockRole') as Role) || 'admin');
+  // "My view"/"Admin view" toggle — purely a display choice for someone who really does hold Admin; never grants
+  // a view their real role doesn't back (see the effectiveRole guard below). No backend/permission involvement.
+  // Declared here, before any early return, so every render calls exactly the same hooks in the same order.
+  const [viewRole, setViewRole] = useState<Role>(() => (localStorage.getItem('accesspilot.viewRole') as Role) || 'admin');
   if (auth.authConfigured && auth.loading) return <div className="empty">Loading AccessPilot authentication...</div>;
   if (auth.authConfigured && !auth.account && !auth.breakglassActive) return <SignInScreen />;
   if (auth.breakglassActive && !auth.breakglassElevated) return <BreakGlassDashboard />;
-  const role = auth.authConfigured ? auth.role : mockRole;
+  const realRole = auth.authConfigured ? auth.role : mockRole;
   const changeRole = (nextRole: Role) => { localStorage.setItem('accesspilot.mockRole', nextRole); setMockRole(nextRole); };
-  return <IdleGuard><Shell role={role} setRole={changeRole}><Routes><Route path="/" element={<Navigate to="/dashboard" replace />} /><Route path="/dashboard" element={<Dashboard role={role} />} /><Route path="/my-access" element={<MyAccess />} /><Route path="/request-access" element={<RequestAccess />} /><Route path="/request-packages" element={<RequestPackagesPage />} /><Route path="/my-requests" element={<Requests mine />} /><Route path="/approvals" element={<MyApprovalsPage />} /><Route path="/profile" element={<Profile />} /><Route path="/admin/users" element={<AdminOnly role={role}><UsersPage /></AdminOnly>} /><Route path="/admin/users/:id" element={<AdminOnly role={role}><UserDetail /></AdminOnly>} /><Route path="/admin/org-chart" element={<AdminOnly role={role}><OrgChartPage /></AdminOnly>} /><Route path="/admin/groups" element={<AdminOnly role={role}><GroupsPage /></AdminOnly>} /><Route path="/admin/groups/:id" element={<AdminOnly role={role}><GroupDetail /></AdminOnly>} /><Route path="/admin/roles" element={<AdminOnly role={role}><RolesPage /></AdminOnly>} /><Route path="/admin/access-requests" element={<AdminOnly role={role}><Requests /></AdminOnly>} /><Route path="/admin/access-requests/:id" element={<AdminOnly role={role}><RequestDetailInteractive /></AdminOnly>} /><Route path="/admin/assignments" element={<AdminOnly role={role}><AssignmentsInteractive /></AdminOnly>} /><Route path="/admin/access-packages" element={<AdminOnly role={role}><AccessPackagesInteractive /></AdminOnly>} /><Route path="/admin/business-roles" element={<AdminOnly role={role}><BusinessRolesPage /></AdminOnly>} /><Route path="/admin/workflow-definitions" element={<AdminOnly role={role}><WorkflowDefinitionsPage /></AdminOnly>} /><Route path="/admin/policies" element={<AdminOnly role={role}><PoliciesPage /></AdminOnly>} /><Route path="/admin/entitlement-catalog" element={<AdminOnly role={role}><EntitlementCatalogPage /></AdminOnly>} /><Route path="/admin/privileged-accounts" element={<AdminOnly role={role}><PrivilegedAccountActivityPage /></AdminOnly>} /><Route path="/admin/joiners" element={<AdminOnly role={role}><JoinersPage /></AdminOnly>} /><Route path="/admin/movers" element={<AdminOnly role={role}><MoversPage /></AdminOnly>} /><Route path="/admin/leavers" element={<AdminOnly role={role}><LeaversPage /></AdminOnly>} /><Route path="/admin/access-reviews" element={<AdminOnly role={role}><AccessReviewsPage /></AdminOnly>} /><Route path="/admin/access-reviews/:id" element={<AdminOnly role={role}><AccessReviewDetailPage /></AdminOnly>} /><Route path="/my-packages" element={<MyPackagesPage />} /><Route path="/my-business-roles" element={<MyBusinessRolesPage />} /><Route path="/my-groups" element={<MyGroupsPage />} /><Route path="/workflow-requests" element={<WorkflowRequestsPage />} /><Route path="/my-access-reviews" element={<MyAccessReviewsPage />} /><Route path="/admin/audit" element={<AdminOnly role={role}><AuditPage /></AdminOnly>} /><Route path="/admin/providers" element={<AdminOnly role={role}><ProvidersPage /></AdminOnly>} /><Route path="/admin/sync" element={<AdminOnly role={role}><SyncPage /></AdminOnly>} /><Route path="/admin/onboarding" element={<AdminOnly role={role}><OnboardingPage /></AdminOnly>} /><Route path="/admin/security" element={<AdminOnly role={role}><SecurityPage /></AdminOnly>} /><Route path="/admin/branding" element={<AdminOnly role={role}><BrandingPage /></AdminOnly>} /><Route path="/admin/sod" element={auth.isSodAdmin ? <SodPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/sod/configuration" element={auth.isSodAdmin ? <SodConfigurationPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/soc" element={auth.isSocAdmin ? <SocDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health" element={auth.isServerAdmin ? <ServerHealthDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health/troubleshooting" element={auth.isServerAdmin ? <TroubleshootingDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi" element={auth.isNhiAdmin ? <NhiPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi/:id" element={auth.isNhiAdmin ? <NhiDetailPage /> : <Navigate to="/dashboard" replace />} /><Route path="*" element={<Navigate to="/dashboard" replace />} /></Routes></Shell></IdleGuard>;
+  const effectiveRole = auth.authConfigured && realRole === 'admin' ? viewRole : realRole;
+  const setView = (next: Role) => { localStorage.setItem('accesspilot.viewRole', next); setViewRole(next); };
+  const role = effectiveRole;
+  return <IdleGuard><Shell role={effectiveRole} setRole={changeRole} viewRole={viewRole} onChangeView={setView}><Routes><Route path="/" element={<Navigate to="/dashboard" replace />} /><Route path="/dashboard" element={<Dashboard role={role} />} /><Route path="/my-access" element={<MyAccess />} /><Route path="/request-access" element={<RequestAccess />} /><Route path="/request-packages" element={<RequestPackagesPage />} /><Route path="/my-requests" element={<Requests mine />} /><Route path="/approvals" element={<MyApprovalsPage />} /><Route path="/profile" element={<Profile />} /><Route path="/admin/users" element={<AdminOnly role={role}><UsersPage /></AdminOnly>} /><Route path="/admin/users/:id" element={<AdminOnly role={role}><UserDetail /></AdminOnly>} /><Route path="/admin/org-chart" element={<AdminOnly role={role}><OrgChartPage /></AdminOnly>} /><Route path="/admin/groups" element={<AdminOnly role={role}><GroupsPage /></AdminOnly>} /><Route path="/admin/groups/:id" element={<AdminOnly role={role}><GroupDetail /></AdminOnly>} /><Route path="/admin/dynamic-groups" element={<AdminOnly role={role}><DynamicGroupsPage /></AdminOnly>} /><Route path="/admin/dynamic-groups/:id" element={<AdminOnly role={role}><DynamicGroupDetail /></AdminOnly>} /><Route path="/admin/roles" element={<AdminOnly role={role}><RolesPage /></AdminOnly>} /><Route path="/admin/access-requests" element={<AdminOnly role={role}><Requests /></AdminOnly>} /><Route path="/admin/access-requests/:id" element={<AdminOnly role={role}><RequestDetailInteractive /></AdminOnly>} /><Route path="/admin/assignments" element={<AdminOnly role={role}><AssignmentsInteractive /></AdminOnly>} /><Route path="/admin/access-packages" element={<AdminOnly role={role}><AccessPackagesInteractive /></AdminOnly>} /><Route path="/admin/business-roles" element={<AdminOnly role={role}><BusinessRolesPage /></AdminOnly>} /><Route path="/admin/workflow-definitions" element={<AdminOnly role={role}><WorkflowDefinitionsPage /></AdminOnly>} /><Route path="/admin/policies" element={<AdminOnly role={role}><PoliciesPage /></AdminOnly>} /><Route path="/admin/entitlement-catalog" element={<AdminOnly role={role}><EntitlementCatalogPage /></AdminOnly>} /><Route path="/admin/privileged-accounts" element={<AdminOnly role={role}><PrivilegedAccountActivityPage /></AdminOnly>} /><Route path="/admin/joiners" element={<AdminOnly role={role}><JoinersPage /></AdminOnly>} /><Route path="/admin/movers" element={<AdminOnly role={role}><MoversPage /></AdminOnly>} /><Route path="/admin/leavers" element={<AdminOnly role={role}><LeaversPage /></AdminOnly>} /><Route path="/admin/access-reviews" element={<AdminOnly role={role}><AccessReviewsPage /></AdminOnly>} /><Route path="/admin/access-reviews/:id" element={<AdminOnly role={role}><AccessReviewDetailPage /></AdminOnly>} /><Route path="/my-packages" element={<MyPackagesPage />} /><Route path="/my-business-roles" element={<MyBusinessRolesPage />} /><Route path="/my-groups" element={<MyGroupsPage />} /><Route path="/workflow-requests" element={<WorkflowRequestsPage />} /><Route path="/my-access-reviews" element={<MyAccessReviewsPage />} /><Route path="/admin/audit" element={<AdminOnly role={role}><AuditPage /></AdminOnly>} /><Route path="/admin/providers" element={<AdminOnly role={role}><ProvidersPage /></AdminOnly>} /><Route path="/admin/sync" element={<AdminOnly role={role}><SyncPage /></AdminOnly>} /><Route path="/admin/onboarding" element={<AdminOnly role={role}><OnboardingPage /></AdminOnly>} /><Route path="/admin/security" element={<AdminOnly role={role}><SecurityPage /></AdminOnly>} /><Route path="/admin/branding" element={<AdminOnly role={role}><BrandingPage /></AdminOnly>} /><Route path="/admin/sod" element={auth.isSodAdmin ? <SodPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/sod/configuration" element={auth.isSodAdmin ? <SodConfigurationPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/soc" element={auth.isSocAdmin ? <SocDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health" element={auth.isServerAdmin ? <ServerHealthDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/server-health/troubleshooting" element={auth.isServerAdmin ? <TroubleshootingDashboard /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi" element={auth.isNhiAdmin ? <NhiPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi/:id" element={auth.isNhiAdmin ? <NhiDetailPage /> : <Navigate to="/dashboard" replace />} /><Route path="/admin/nhi/reviews" element={auth.isNhiAdmin ? <NhiReviewsPage /> : <Navigate to="/dashboard" replace />} /><Route path="/my-owned-identities" element={<MyOwnedIdentitiesPage />} /><Route path="*" element={<Navigate to="/dashboard" replace />} /></Routes></Shell></IdleGuard>;
 }
 function SignInScreen() {
   const auth = useAuth();
@@ -991,6 +1004,12 @@ interface ApiNhiCredential { credential_type: string; display_name: string | nul
 interface ApiNonHumanIdentity { id: string; provider_id: string; provider_name: string; provider_type: string; external_id: string; name: string; status: string; nhi_type: string; nhi_type_overridden: boolean; credential_expires_at: string | null; credentials: ApiNhiCredential[]; owners: ApiNhiOwner[]; risk_flags: string[]; last_synced_at: string | null; }
 interface ApiNhiSummary { total: number; no_owner: number; credential_expiring_soon: number; credential_expired: number; by_type: Record<string, number>; }
 interface ApiNhiPermission { resource_display_name: string; role_name: string; }
+interface ApiNhiDirectoryActivity { timestamp: string; activity: string; actor: string | null; result: string; detail: string | null; }
+interface ApiNhiRiskException { id: string; application_id: string; risk_type: string; justification: string; approved_by: string | null; expires_at: string; revoked_at: string | null; created_at: string; }
+interface ApiNhiNotification { id: string; notification_type: string; application_id: string; application_name: string | null; owner_user_id: string | null; owner_display_name: string | null; message: string; read_at: string | null; resolved_at: string | null; created_at: string; }
+interface ApiNhiNotificationSettings { notify_on_no_owner: boolean; notify_on_credential_expiring: boolean; credential_expiring_warning_days: number; notify_on_credential_expired: boolean; }
+interface ApiNhiReviewCampaign { id: string; name: string; reviewer_id: string | null; reviewer_display_name: string | null; fallback_reviewer_id: string | null; fallback_reviewer_display_name: string | null; fallback_unlock_hours: number | null; workflow_definition_id: string | null; workflow_definition_name: string | null; status: string; due_at: string; frequency_days: number | null; created_at: string; completed_at: string | null; item_count: number; pending_count: number; }
+interface ApiNhiReviewItem { id: string; campaign_id: string; campaign_name: string | null; application_id: string; application_name: string | null; owner_user_id: string; owner_display_name: string | null; owner_email: string | null; decision: string; decided_by: string | null; decided_at: string | null; workflow_instance_id: string | null; created_at: string; }
 const NHI_RISK_LABELS: Record<string, string> = { NO_OWNER: 'No owner', CREDENTIAL_EXPIRED: 'Credential expired', CREDENTIAL_EXPIRING_SOON: 'Credential expiring soon' };
 function nhiRiskBadge(flag: string) { return <span key={flag} className={`badge ${flag === 'CREDENTIAL_EXPIRED' ? 'danger' : 'warning'}`} style={{ marginRight: 6 }}>{NHI_RISK_LABELS[flag] || flag}</span>; }
 // SERVICE_PRINCIPAL/MANAGED_IDENTITY/OKTA_SERVICE_APP are auto-detected from what the connector actually reports
@@ -1002,10 +1021,49 @@ const NHI_TYPE_OPTIONS: FilterOption[] = Object.entries(NHI_TYPE_LABELS).map(([v
 function nhiTypeLabel(type: string) { return NHI_TYPE_LABELS[type] || type.replace(/_/g, ' '); }
 function nhiProviderLabel(identity: { provider_type: string; provider_name: string }) { return identity.provider_type === 'ENTRA' ? 'Microsoft Entra ID' : identity.provider_type === 'OKTA' ? 'Okta' : identity.provider_name; }
 
+function RegisterNhiDialog({ onClose, onRegistered }: { onClose: () => void; onRegistered: () => void }) {
+  const auth = useAuth();
+  const { data: providers } = useApiResource<ApiProvider[]>('/api/v1/providers');
+  const { data: users } = useApiResource<ApiUser[]>('/api/v1/users');
+  const [providerId, setProviderId] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [nhiType, setNhiType] = useState('SERVICE_PRINCIPAL');
+  const [ownerId, setOwnerId] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+
+  const submit = async () => {
+    if (!providerId || !displayName.trim() || !ownerId) { setMessage('Provider, name, and owner are all required.'); return; }
+    setSaving(true); setMessage('');
+    try {
+      const response = await auth.apiRequest('/api/v1/nhi', { method: 'POST', body: JSON.stringify({ provider_id: providerId, display_name: displayName.trim(), nhi_type: nhiType, owner_user_id: ownerId }) });
+      if (response.ok) { onRegistered(); onClose(); }
+      else { const body = await response.json().catch(() => null); setMessage(body?.error?.message || 'Unable to register this identity.'); }
+    } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
+  };
+
+  return <form role="dialog" aria-modal="true" className="panel" style={{ maxWidth: 560, marginTop: 18 }} onSubmit={event => { event.preventDefault(); void submit(); }}>
+    <div className="panel-head"><h2>Register a new non-human identity</h2><button type="button" className="btn" aria-label="Close" onClick={onClose}><X size={14} /></button></div>
+    <div className="detail-section">
+      <p className="subtitle" style={{ marginTop: 0 }}>Creates a real new service principal at the provider — not a local-only record. An owner is required: a brand-new identity should never start out unowned.</p>
+      <label className="key" style={{ display: 'block', marginBottom: 12 }}><span>Provider</span><select className="select" style={{ width: '100%' }} value={providerId} onChange={event => setProviderId(event.target.value)}><option value="">Select a provider</option>{(providers || []).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
+      <label className="key" style={{ display: 'block', marginBottom: 12 }}><span>Name</span><input className="select" style={{ width: '100%' }} value={displayName} onChange={event => setDisplayName(event.target.value)} placeholder="e.g. Billing Automation Bot" /></label>
+      <label className="key" style={{ display: 'block', marginBottom: 12 }}><span>Type</span><select className="select" style={{ width: '100%' }} value={nhiType} onChange={event => setNhiType(event.target.value)}>{NHI_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select></label>
+      <label className="key" style={{ display: 'block', marginBottom: 12 }}><span>Owner</span><select className="select" style={{ width: '100%' }} value={ownerId} onChange={event => setOwnerId(event.target.value)}><option value="">Select an owner</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name} ({u.email})</option>)}</select></label>
+      {message && <div className="notice" style={{ marginBottom: 12 }}>{message}</div>}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+        <button type="button" className="btn" onClick={onClose}>Cancel</button>
+        <button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Registering...' : 'Register'}</button>
+      </div>
+    </div>
+  </form>;
+}
+
 function NhiPage() {
   const timezone = useAppTimezone();
-  const { data: identities, error, loading } = useApiResource<ApiNonHumanIdentity[]>('/api/v1/nhi');
-  const { data: summary } = useApiResource<ApiNhiSummary>('/api/v1/nhi/summary');
+  const { data: identities, error, loading, reload } = useApiResource<ApiNonHumanIdentity[]>('/api/v1/nhi');
+  const { data: summary, reload: reloadSummary } = useApiResource<ApiNhiSummary>('/api/v1/nhi/summary');
+  const [registerOpen, setRegisterOpen] = useState(false);
   const [searchParams, setSearchParams] = useSearchParams();
   const search = searchParams.get('q') || '';
   const riskFilter = searchParams.get('risk') || '';
@@ -1022,7 +1080,8 @@ function NhiPage() {
   const riskOptions: FilterOption[] = [{ value: 'NO_OWNER', label: 'No owner' }, { value: 'CREDENTIAL_EXPIRING_SOON', label: 'Credential expiring soon' }, { value: 'CREDENTIAL_EXPIRED', label: 'Credential expired' }];
   const typesWithCounts = NHI_TYPE_OPTIONS.map(option => ({ ...option, count: summary?.by_type[option.value] ?? 0 }));
 
-  return <Page eyebrow="NON-HUMAN IDENTITIES" title="Non-Human Identities" subtitle="Entra service principals, Okta service apps, AI agents, bots, and APIs — who owns each one, and whether a credential-expiry or ownership risk is currently open.">
+  return <Page eyebrow="NON-HUMAN IDENTITIES" title="Non-Human Identities" subtitle="Entra service principals, Okta service apps, AI agents, bots, and APIs — who owns each one, and whether a credential-expiry or ownership risk is currently open." action={<div style={{ display: 'flex', gap: 8 }}><Link to="/admin/nhi/reviews" className="btn"><FileCheck2 size={14} /> Ownership reviews</Link><button className="btn btn-primary" onClick={() => setRegisterOpen(true)}><Plus size={14} /> Register new identity</button></div>}>
+    {registerOpen && <RegisterNhiDialog onClose={() => setRegisterOpen(false)} onRegistered={() => { reload(); reloadSummary(); }} />}
     <div className="stats" style={{ marginBottom: 18 }}>
       <div className="stat stat-link" onClick={() => { setRiskFilter(''); setTypeFilter(''); }}><div className="stat-top"><span>Total</span><span className="stat-icon"><Bot size={15} /></span></div><div className="stat-value">{summary ? summary.total : '—'}</div><div className="stat-foot">Synced across every connected provider</div></div>
       <div className="stat stat-link" onClick={() => setRiskFilter('NO_OWNER')}><div className="stat-top"><span>No owner</span><span className="stat-icon"><Users size={15} /></span></div><div className="stat-value">{summary ? summary.no_owner : '—'}</div><div className="stat-foot">Nobody accountable for these yet</div></div>
@@ -1061,8 +1120,19 @@ function NhiDetailPage() {
   const { id } = useParams();
   const { data: identity, error, loading, reload } = useApiResource<ApiNonHumanIdentity>(`/api/v1/nhi/${id}`);
   const { data: users } = useApiResource<ApiUser[]>('/api/v1/users');
-  const { data: activity } = useApiResource<ApiAuditLog[]>(`/api/v1/nhi/${id}/activity`);
+  // Deliberately NOT auto-fetched — the audit log can be expensive to pull for an identity with a long history,
+  // and most visits to this page don't need it. Loaded only once an admin explicitly asks for it (below), unlike
+  // Certificates & secrets, which is free (already bundled in the main identity fetch above) and always shown.
+  const [activityRequested, setActivityRequested] = useState(false);
+  const { data: activity, loading: activityLoading } = useApiResource<ApiAuditLog[]>(`/api/v1/nhi/${id}/activity`, activityRequested);
+  // Live directory-audit activity straight from the provider's own audit log (distinct from AccessPilot's own
+  // log above) — same lazy, click-to-load discipline, since it's a real live Graph call, not a cached read.
+  // Entra-only for now (needs AuditLog.Read.All); other providers answer with a clean "not supported" message
+  // rather than a silent empty list.
+  const [directoryActivityRequested, setDirectoryActivityRequested] = useState(false);
+  const { data: directoryActivity, loading: directoryActivityLoading, error: directoryActivityError } = useApiResource<ApiNhiDirectoryActivity[]>(`/api/v1/nhi/${id}/directory-activity`, directoryActivityRequested);
   const { data: permissions, loading: permissionsLoading, error: permissionsError } = useApiResource<ApiNhiPermission[]>(`/api/v1/nhi/${id}/permissions`);
+  const { data: riskExceptions, reload: reloadRiskExceptions } = useApiResource<ApiNhiRiskException[]>(`/api/v1/nhi/${id}/risk-exceptions`);
 
   const [addOwnerId, setAddOwnerId] = useState('');
   const [saving, setSaving] = useState(false);
@@ -1073,6 +1143,19 @@ function NhiDetailPage() {
   const [nhiType, setNhiType] = useState('');
   const [savingType, setSavingType] = useState(false);
   const [togglingStatus, setTogglingStatus] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  // The PDF report should always include real activity, not "Not loaded yet" — so a report request loads both
+  // activity sources first (if they haven't been already) and only fires the print dialog once both fetches
+  // actually land (directoryActivityError counts as "landed" too — e.g. a non-Entra provider cleanly reporting
+  // "not supported" shouldn't block the report forever).
+  const [pendingPrint, setPendingPrint] = useState(false);
+  useEffect(() => {
+    if (!pendingPrint) return;
+    if (!activityRequested || !directoryActivityRequested) return;
+    if (activityLoading || directoryActivityLoading) return;
+    setPendingPrint(false);
+    window.print();
+  }, [pendingPrint, activityRequested, activityLoading, directoryActivityRequested, directoryActivityLoading]);
 
   useEffect(() => { if (identity) setNhiType(identity.nhi_type); }, [identity]);
 
@@ -1125,16 +1208,42 @@ function NhiDetailPage() {
     setSaving(true); setMessage('');
     try {
       const response = await auth.apiRequest(`/api/v1/nhi/${identity.id}/risk-exceptions`, { method: 'POST', body: JSON.stringify({ risk_type: riskType, justification: justification.trim(), expires_at: new Date(expiresAt).toISOString() }) });
-      if (response.ok) { setAcceptingRisk(null); setJustification(''); setExpiresAt(''); reload(); }
+      if (response.ok) { setAcceptingRisk(null); setJustification(''); setExpiresAt(''); reload(); reloadRiskExceptions(); }
       else { const body = await response.json().catch(() => null); setMessage(body?.error?.message || 'Unable to accept this risk.'); }
+    } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
+  };
+
+  const revokeException = async (exceptionId: string) => {
+    if (!window.confirm('Revoke this accepted risk exception? The underlying risk flag will reappear immediately if it still applies.')) return;
+    setSaving(true); setMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/nhi/${identity.id}/risk-exceptions/${exceptionId}/revoke`, { method: 'POST' });
+      if (response.ok) { reload(); reloadRiskExceptions(); }
+      else { const body = await response.json().catch(() => null); setMessage(body?.error?.message || 'Unable to revoke this exception.'); }
     } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
   };
 
   const availableOwners = (users || []).filter(user => !identity.owners.some(owner => owner.user_id === user.id));
 
-  return <Page eyebrow="NON-HUMAN IDENTITIES" title={identity.name} subtitle={`${nhiProviderLabel(identity)} · ${nhiTypeLabel(identity.nhi_type)} · external ID ${identity.external_id}`} action={<Link to="/admin/nhi" className="btn">Back to list</Link>}>
+  const refreshFromProvider = async () => {
+    setRefreshing(true); setMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/nhi/${identity.id}/refresh`, { method: 'POST' });
+      if (response.ok) reload();
+      else { const body = await response.json().catch(() => null); setMessage(body?.error?.message || 'Unable to refresh this identity from the provider.'); }
+    } catch { setMessage('Unable to reach the backend.'); } finally { setRefreshing(false); }
+  };
+
+  const downloadPdfReport = () => {
+    const alreadyLoaded = activityRequested && directoryActivityRequested;
+    if (!activityRequested) setActivityRequested(true);
+    if (!directoryActivityRequested) setDirectoryActivityRequested(true);
+    if (alreadyLoaded) window.print(); else setPendingPrint(true);
+  };
+
+  return <Page eyebrow="NON-HUMAN IDENTITIES" title={identity.name} subtitle={`${nhiProviderLabel(identity)} · ${nhiTypeLabel(identity.nhi_type)} · external ID ${identity.external_id}`} action={<div className="no-print" style={{ display: 'flex', gap: 8 }}><button className="btn" disabled={pendingPrint} onClick={downloadPdfReport}>{pendingPrint ? 'Preparing report...' : 'Download PDF report'}</button><Link to="/admin/nhi" className="btn">Back to list</Link></div>}>
     <div className="panel" style={{ marginBottom: 18 }}>
-      <div className="panel-head"><h2>Overview</h2><div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><StatusBadge status={identity.status} /><button className="btn" disabled={togglingStatus} onClick={toggleStatus}>{togglingStatus ? 'Working...' : identity.status === 'ACTIVE' ? 'Disable' : 'Enable'}</button></div></div>
+      <div className="panel-head"><h2>Overview</h2><div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><StatusBadge status={identity.status} /><div className="no-print" style={{ display: 'flex', gap: 10 }}><button className="btn" disabled={refreshing} onClick={refreshFromProvider}>{refreshing ? 'Refreshing...' : 'Refresh from provider'}</button><button className="btn" disabled={togglingStatus} onClick={toggleStatus}>{togglingStatus ? 'Working...' : identity.status === 'ACTIVE' ? 'Disable' : 'Enable'}</button></div></div></div>
       <div className="detail-section">
         <div className="key-grid">
           <div className="key"><span>Provider</span><strong>{nhiProviderLabel(identity)}</strong></div>
@@ -1146,7 +1255,7 @@ function NhiDetailPage() {
         <p className="subtitle" style={{ marginTop: 0, marginBottom: 8 }}>{identity.nhi_type_overridden ? 'Manually classified — a directory sync will not change this.' : "Auto-detected from the provider — reclassify if it's actually an AI agent, bot, or API."}</p>
         <div style={{ display: 'flex', gap: 8 }}>
           <select className="select" style={{ flex: 1, maxWidth: 320 }} value={nhiType} onChange={event => setNhiType(event.target.value)}>{NHI_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
-          <button className="btn btn-primary" disabled={savingType || nhiType === identity.nhi_type} onClick={reclassify}>{savingType ? 'Saving...' : 'Save type'}</button>
+          <button className="btn btn-primary no-print" disabled={savingType || nhiType === identity.nhi_type} onClick={reclassify}>{savingType ? 'Saving...' : 'Save type'}</button>
         </div>
         {message && <div className="notice" style={{ marginTop: 14 }}>{message}</div>}
       </div>
@@ -1158,9 +1267,9 @@ function NhiDetailPage() {
         <div className="detail-section">
           {identity.owners.length === 0 ? <div className="empty" style={{ padding: '10px 0' }}>No owner assigned yet.</div> : identity.owners.map(owner => <div key={owner.user_id} className="user-cell" style={{ marginBottom: 8, justifyContent: 'space-between', display: 'flex' }}>
             <span><span className="user-name">{owner.display_name}</span><span className="user-email">{owner.email}</span></span>
-            <button className="btn" disabled={saving} onClick={() => removeOwner(owner.user_id)}>Remove</button>
+            <button className="btn no-print" disabled={saving} onClick={() => removeOwner(owner.user_id)}>Remove</button>
           </div>)}
-          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+          <div className="no-print" style={{ display: 'flex', gap: 8, marginTop: 10 }}>
             <select className="select" style={{ flex: 1 }} value={addOwnerId} onChange={event => setAddOwnerId(event.target.value)}><option value="">Select a user to add as owner</option>{availableOwners.map(user => <option key={user.id} value={user.id}>{user.display_name} ({user.email})</option>)}</select>
             <button className="btn btn-primary" disabled={saving || !addOwnerId} onClick={addOwner}>Add owner</button>
           </div>
@@ -1173,9 +1282,9 @@ function NhiDetailPage() {
           {identity.risk_flags.length === 0 ? <div className="empty" style={{ padding: '10px 0' }}>No open risk on this identity.</div> : identity.risk_flags.map(flag => <div key={flag} style={{ marginBottom: 10 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: acceptingRisk === flag ? 8 : 0 }}>
               {nhiRiskBadge(flag)}
-              {acceptingRisk !== flag && <button className="btn" onClick={() => { setAcceptingRisk(flag); setMessage(''); }}>Accept risk</button>}
+              {acceptingRisk !== flag && <button className="btn no-print" onClick={() => { setAcceptingRisk(flag); setMessage(''); }}>Accept risk</button>}
             </div>
-            {acceptingRisk === flag && <div className="panel" style={{ padding: 14 }}>
+            {acceptingRisk === flag && <div className="panel no-print" style={{ padding: 14 }}>
               <label className="key" style={{ display: 'block', marginBottom: 10 }}><span>Justification</span><input className="select" style={{ width: '100%' }} value={justification} onChange={event => setJustification(event.target.value)} /></label>
               <label className="key" style={{ display: 'block', marginBottom: 10 }}><span>Accepted until</span><input className="select" type="date" style={{ width: '100%' }} value={expiresAt} onChange={event => setExpiresAt(event.target.value)} /></label>
               <div style={{ display: 'flex', gap: 8 }}>
@@ -1184,6 +1293,16 @@ function NhiDetailPage() {
               </div>
             </div>}
           </div>)}
+          {(riskExceptions || []).filter(e => !e.revoked_at).length > 0 && <div style={{ marginTop: identity.risk_flags.length > 0 ? 16 : 0 }}>
+            <div className="key" style={{ marginBottom: 8 }}><span>Accepted exceptions</span></div>
+            {(riskExceptions || []).filter(e => !e.revoked_at).map(exception => <div key={exception.id} className="user-cell" style={{ marginBottom: 8, justifyContent: 'space-between', display: 'flex', alignItems: 'flex-start' }}>
+              <span>
+                {nhiRiskBadge(exception.risk_type)}
+                <span className="footer-note" style={{ display: 'block', marginTop: 4 }}>{exception.justification} — accepted until {formatDateTime(exception.expires_at, timezone)}</span>
+              </span>
+              <button className="btn no-print" disabled={saving} onClick={() => revokeException(exception.id)}>Revoke</button>
+            </div>)}
+          </div>}
         </div>
       </section>
     </div>
@@ -1207,10 +1326,169 @@ function NhiDetailPage() {
       </tbody></table></div>}
     </div>
 
-    <div className="panel">
-      <div className="panel-head"><h2>Recent activity</h2><span className="panel-link">AccessPilot actions on this identity</span></div>
-      {!activity || activity.length === 0 ? <div className="empty">No activity recorded for this identity yet.</div> : activity.map(entry => <div className="activity" key={entry.id}><div className="activity-row"><span className="activity-dot" /><div className="activity-copy"><strong>{entry.action.replace(/_/g, ' ')}</strong><small>{entry.actor_display_name || 'System'} · {formatDateTime(entry.timestamp, timezone)}</small></div><StatusBadge status={entry.result} /></div></div>)}
+    <div className="panel" style={{ marginBottom: 18 }}>
+      <div className="panel-head"><h2>Recent activity</h2>{activityRequested ? <span className="panel-link">AccessPilot actions on this identity</span> : <button className="btn no-print" onClick={() => setActivityRequested(true)}>Load activity</button>}</div>
+      {!activityRequested ? <div className="empty no-print">Not loaded yet — click "Load activity" above to fetch it.</div> : activityLoading ? <div className="empty">Loading activity...</div> : !activity || activity.length === 0 ? <div className="empty">No activity recorded for this identity yet.</div> : activity.map(entry => <div className="activity" key={entry.id}><div className="activity-row"><span className="activity-dot" /><div className="activity-copy"><strong>{entry.action.replace(/_/g, ' ')}</strong><small>{entry.actor_display_name || 'System'} · {formatDateTime(entry.timestamp, timezone)}</small></div><StatusBadge status={entry.result} /></div></div>)}
     </div>
+
+    <div className="panel">
+      <div className="panel-head"><h2>Directory activity</h2>{directoryActivityRequested ? <span className="panel-link">Live from {nhiProviderLabel(identity)}, not synced</span> : <button className="btn no-print" onClick={() => setDirectoryActivityRequested(true)}>Load IdP activity</button>}</div>
+      {!directoryActivityRequested ? <div className="empty no-print">Not loaded yet — click "Load IdP activity" above to fetch this identity's real audit trail directly from {nhiProviderLabel(identity)}.</div>
+        : directoryActivityLoading ? <div className="empty">Loading...</div>
+        : directoryActivityError ? <div className="empty">Live directory activity isn't available for this identity's provider yet.</div>
+        : !directoryActivity || directoryActivity.length === 0 ? <div className="empty">No directory audit activity found for this identity.</div>
+        : directoryActivity.map((entry, index) => <div className="activity" key={index}><div className="activity-row"><span className="activity-dot" /><div className="activity-copy"><strong>{entry.activity}</strong><small>{entry.actor || 'Unknown'} · {formatDateTime(entry.timestamp, timezone)}{entry.detail ? ` · ${entry.detail}` : ''}</small></div><StatusBadge status={entry.result.toUpperCase()} /></div></div>)}
+    </div>
+  </Page>;
+}
+
+// ---- NHI Ownership Reviews (periodic "does this NHI still need this owner" attestation) ----
+// A small, parallel model to the human Access Review engine (see AccessReviewsPage) — deliberately not the same
+// tables, since AccessReviewItem is hard-wired to "access to revoke," not "ownership to confirm." Exclusive to
+// AccessPilot.NHIAdmin, same as the rest of this section.
+function NhiReviewsPage() {
+  const auth = useAuth();
+  const timezone = useAppTimezone();
+  const { data: campaigns, reload: reloadCampaigns } = useApiResource<ApiNhiReviewCampaign[]>('/api/v1/nhi/reviews');
+  const { data: users } = useApiResource<ApiUser[]>('/api/v1/users');
+  const { data: activeWorkflows } = useApiResource<ApiWorkflowDefinition[]>('/api/v1/workflows/definitions/active');
+  const [createOpen, setCreateOpen] = useState(false);
+  const [name, setName] = useState('');
+  // Mirrors every other "Approval" select in this app (Assignments/Packages) — Single reviewer (+ optional
+  // fallback) XOR a full Workflow, enforced the same way server-side (NhiReviewCampaignCreate's own validator).
+  const [approvalMethod, setApprovalMethod] = useState<'REVIEWER' | 'WORKFLOW'>('REVIEWER');
+  const [reviewerId, setReviewerId] = useState('');
+  const [fallbackReviewerId, setFallbackReviewerId] = useState('');
+  const [fallbackUnlockHours, setFallbackUnlockHours] = useState('');
+  const [workflowDefinitionId, setWorkflowDefinitionId] = useState('');
+  const [dueAt, setDueAt] = useState('');
+  const [frequencyDays, setFrequencyDays] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  const [selectedCampaignId, setSelectedCampaignId] = useState<string | null>(null);
+  const { data: items, loading: itemsLoading, reload: reloadItems } = useApiResource<ApiNhiReviewItem[]>(selectedCampaignId ? `/api/v1/nhi/reviews/${selectedCampaignId}/items` : '', Boolean(selectedCampaignId));
+  const [deciding, setDeciding] = useState<string | null>(null);
+
+  const createCampaign = async () => {
+    if (!name.trim() || !dueAt) { setMessage('Name and a due date are required.'); return; }
+    if (approvalMethod === 'REVIEWER' && !reviewerId) { setMessage('Select a reviewer.'); return; }
+    if (approvalMethod === 'WORKFLOW' && !workflowDefinitionId) { setMessage('Select a workflow.'); return; }
+    setSaving(true); setMessage('');
+    try {
+      const payload: Record<string, unknown> = { name: name.trim(), due_at: new Date(dueAt).toISOString(), frequency_days: frequencyDays ? Number(frequencyDays) : undefined };
+      if (approvalMethod === 'WORKFLOW') payload.workflow_definition_id = workflowDefinitionId;
+      else { payload.reviewer_id = reviewerId; payload.fallback_reviewer_id = fallbackReviewerId || undefined; payload.fallback_unlock_hours = fallbackUnlockHours ? Number(fallbackUnlockHours) : undefined; }
+      const response = await auth.apiRequest('/api/v1/nhi/reviews', { method: 'POST', body: JSON.stringify(payload) });
+      if (response.ok) { setCreateOpen(false); setName(''); setApprovalMethod('REVIEWER'); setReviewerId(''); setFallbackReviewerId(''); setFallbackUnlockHours(''); setWorkflowDefinitionId(''); setDueAt(''); setFrequencyDays(''); reloadCampaigns(); }
+      else { const body = await response.json().catch(() => null); setMessage(body?.error?.message || 'Unable to create this campaign.'); }
+    } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
+  };
+
+  const decide = async (itemId: string, decision: 'CONFIRMED' | 'OWNER_REMOVED') => {
+    if (decision === 'OWNER_REMOVED' && !window.confirm('Remove this ownership? This is the same as removing the owner directly from the identity.')) return;
+    setDeciding(itemId);
+    try {
+      const response = await auth.apiRequest(`/api/v1/nhi/reviews/items/${itemId}/decide`, { method: 'POST', body: JSON.stringify({ decision }) });
+      if (response.ok) { reloadItems(); reloadCampaigns(); }
+    } finally { setDeciding(null); }
+  };
+
+  return <Page eyebrow="NON-HUMAN IDENTITIES" title="Ownership Reviews" subtitle="Periodic attestation — does each non-human identity's owner still need to be accountable for it?" action={<div style={{ display: 'flex', gap: 8 }}><Link to="/admin/nhi" className="btn">Back to identities</Link><button className="btn btn-primary" onClick={() => setCreateOpen(v => !v)}><Plus size={14} /> New campaign</button></div>}>
+    {createOpen && <div className="panel" style={{ marginBottom: 18 }}>
+      <div className="panel-head"><h2>New ownership review campaign</h2></div>
+      <div className="detail-section">
+        <p className="subtitle" style={{ marginTop: 0 }}>Snapshots every currently-owned non-human identity into one item per owner, for the reviewer to confirm or remove.</p>
+        <label className="key" style={{ display: 'block', marginBottom: 12 }}><span>Name</span><input className="select" style={{ width: '100%' }} value={name} onChange={event => setName(event.target.value)} placeholder="e.g. Q1 2026 NHI ownership review" /></label>
+        <label className="key" style={{ display: 'block', marginBottom: 12 }}><span>Approval</span><select className="select" style={{ width: '100%' }} value={approvalMethod} onChange={event => { setApprovalMethod(event.target.value as 'REVIEWER' | 'WORKFLOW'); setReviewerId(''); setFallbackReviewerId(''); setFallbackUnlockHours(''); setWorkflowDefinitionId(''); }}><option value="REVIEWER">Single reviewer</option><option value="WORKFLOW">Workflow</option></select></label>
+        {approvalMethod === 'WORKFLOW' ? <label className="key" style={{ display: 'block', marginBottom: 12 }}><span>Workflow</span><select className="select" style={{ width: '100%' }} value={workflowDefinitionId} onChange={event => setWorkflowDefinitionId(event.target.value)}><option value="">Select a workflow</option>{(activeWorkflows || []).map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select></label> : <>
+          <label className="key" style={{ display: 'block', marginBottom: 12 }}><span>Reviewer</span><select className="select" style={{ width: '100%' }} value={reviewerId} onChange={event => setReviewerId(event.target.value)}><option value="">Select a reviewer</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name} ({u.email})</option>)}</select></label>
+          <label className="key" style={{ display: 'block', marginBottom: 12 }}><span>Fallback reviewer (optional)</span><select className="select" style={{ width: '100%' }} value={fallbackReviewerId} onChange={event => setFallbackReviewerId(event.target.value)}><option value="">None</option>{(users || []).map(u => <option key={u.id} value={u.id}>{u.display_name} ({u.email})</option>)}</select></label>
+          {fallbackReviewerId && <label className="key" style={{ display: 'block', marginBottom: 12 }}><span>Fallback unlocks after (hours)</span><input className="select" type="number" min={1} style={{ width: '100%' }} value={fallbackUnlockHours} onChange={event => setFallbackUnlockHours(event.target.value)} /></label>}
+        </>}
+        <label className="key" style={{ display: 'block', marginBottom: 12 }}><span>Due date</span><input className="select" type="date" style={{ width: '100%' }} value={dueAt} onChange={event => setDueAt(event.target.value)} /></label>
+        <label className="key" style={{ display: 'block', marginBottom: 12 }}><span>Repeat every (days, optional)</span><input className="select" type="number" min={1} style={{ width: '100%' }} value={frequencyDays} onChange={event => setFrequencyDays(event.target.value)} placeholder="Leave blank for a one-time campaign" /></label>
+        {message && <div className="notice" style={{ marginBottom: 12 }}>{message}</div>}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <button className="btn" onClick={() => setCreateOpen(false)}>Cancel</button>
+          <button className="btn btn-primary" disabled={saving} onClick={createCampaign}>{saving ? 'Creating...' : 'Create campaign'}</button>
+        </div>
+      </div>
+    </div>}
+
+    <TablePanel toolbar={null}>
+      {!campaigns || campaigns.length === 0 ? <div className="empty">No ownership review campaigns yet.</div> : <table><thead><tr><th>Name</th><th>Reviewer</th><th>Status</th><th>Due</th><th>Progress</th><th></th></tr></thead><tbody>
+        {campaigns.map(campaign => <Fragment key={campaign.id}>
+          <tr>
+            <td>{campaign.name}{campaign.frequency_days && <span className="footer-note" style={{ marginLeft: 6 }}>(repeats every {campaign.frequency_days}d)</span>}</td>
+            <td>{campaign.workflow_definition_id ? `🔀 ${campaign.workflow_definition_name}` : (campaign.reviewer_display_name || '—')}</td>
+            <td><StatusBadge status={campaign.status} /></td>
+            <td>{formatDateTime(campaign.due_at, timezone)}</td>
+            <td>{campaign.item_count - campaign.pending_count} / {campaign.item_count} decided</td>
+            <td><button className="btn" onClick={() => setSelectedCampaignId(selectedCampaignId === campaign.id ? null : campaign.id)}>{selectedCampaignId === campaign.id ? 'Hide items' : 'View items'}</button></td>
+          </tr>
+          {selectedCampaignId === campaign.id && <tr><td colSpan={6} style={{ background: 'var(--surface-2, #f6f7f9)' }}>
+            {itemsLoading ? <div className="empty">Loading items...</div> : !items || items.length === 0 ? <div className="empty">No items in this campaign.</div> : <div style={{ padding: '8px 0' }}>
+              {items.map(item => <div key={item.id} className="user-cell" style={{ marginBottom: 8, justifyContent: 'space-between', display: 'flex', alignItems: 'center' }}>
+                <span><strong>{item.application_name || 'Unknown identity'}</strong> — owned by {item.owner_display_name || 'Unknown'} ({item.owner_email})</span>
+                {item.decision !== 'PENDING' ? <StatusBadge status={item.decision} /> : item.workflow_instance_id ? <Link to="/workflow-requests" className="footer-note">Routed via workflow — decide from Workflow Requests</Link> : <div style={{ display: 'flex', gap: 8 }}>
+                  <button className="btn" disabled={deciding === item.id} onClick={() => decide(item.id, 'CONFIRMED')}>Confirm</button>
+                  <button className="btn" disabled={deciding === item.id} onClick={() => decide(item.id, 'OWNER_REMOVED')}>Remove owner</button>
+                </div>}
+              </div>)}
+            </div>}
+          </td></tr>}
+        </Fragment>)}
+      </tbody></table>}
+    </TablePanel>
+  </Page>;
+}
+
+// ---- Self-service: My Owned Identities ----
+// Visible to every signed-in user (no NHIAdmin required) — shows only identities THEY own. Read-only beyond
+// responding to any pending ownership-review item; full owner/risk/enable-disable management stays NHIAdmin-only
+// (see NhiDetailPage), the same principle-of-least-privilege boundary this app draws everywhere else.
+function MyOwnedIdentitiesPage() {
+  const auth = useAuth();
+  const timezone = useAppTimezone();
+  const { data: identities, loading, error } = useApiResource<ApiNonHumanIdentity[]>('/api/v1/nhi/mine');
+  const { data: reviewItems, reload: reloadReviewItems } = useApiResource<ApiNhiReviewItem[]>('/api/v1/nhi/reviews/items/mine');
+  const [deciding, setDeciding] = useState<string | null>(null);
+
+  const decide = async (itemId: string, decision: 'CONFIRMED' | 'OWNER_REMOVED') => {
+    if (decision === 'OWNER_REMOVED' && !window.confirm('Confirm you no longer need to own this identity? It will be unassigned.')) return;
+    setDeciding(itemId);
+    try {
+      const response = await auth.apiRequest(`/api/v1/nhi/reviews/items/${itemId}/decide`, { method: 'POST', body: JSON.stringify({ decision }) });
+      if (response.ok) reloadReviewItems();
+    } finally { setDeciding(null); }
+  };
+
+  return <Page eyebrow="SELF-SERVICE" title="My Owned Identities" subtitle="Non-human identities (service principals, bots, APIs) you're accountable for.">
+    {reviewItems && reviewItems.length > 0 && <div className="panel" style={{ marginBottom: 18 }}>
+      <div className="panel-head"><h2>Pending ownership confirmations</h2></div>
+      <div className="detail-section">
+        {reviewItems.map(item => <div key={item.id} className="user-cell" style={{ marginBottom: 8, justifyContent: 'space-between', display: 'flex', alignItems: 'center' }}>
+          <span>Do you still need to own <strong>{item.application_name || 'this identity'}</strong>?</span>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn" disabled={deciding === item.id} onClick={() => decide(item.id, 'CONFIRMED')}>Yes, still mine</button>
+            <button className="btn" disabled={deciding === item.id} onClick={() => decide(item.id, 'OWNER_REMOVED')}>No, remove me</button>
+          </div>
+        </div>)}
+      </div>
+    </div>}
+
+    <TablePanel toolbar={null}>
+      {loading ? <div className="empty">Loading your identities...</div> : error ? <div className="empty">{error}</div> : !identities || identities.length === 0 ? <div className="empty">You don't own any non-human identities.</div> : <table><thead><tr><th>Name</th><th>Provider</th><th>Type</th><th>Status</th><th>Credential expiry</th><th>Risk</th></tr></thead><tbody>
+        {identities.map(identity => <tr key={identity.id}>
+          <td>{identity.name}</td>
+          <td><span className="badge neutral">{nhiProviderLabel(identity)}</span></td>
+          <td>{nhiTypeLabel(identity.nhi_type)}</td>
+          <td><StatusBadge status={identity.status} /></td>
+          <td>{identity.credential_expires_at ? formatDateTime(identity.credential_expires_at, timezone) : 'Not tracked'}</td>
+          <td>{identity.risk_flags.length === 0 ? <span className="badge success">None</span> : identity.risk_flags.map(nhiRiskBadge)}</td>
+        </tr>)}
+      </tbody></table>}
+    </TablePanel>
   </Page>;
 }
 
@@ -1320,7 +1598,7 @@ function TroubleshootTrendChart({ points }: { points: ApiErrorTrendPoint[] }) {
 }
 
 function AdminOnly({ role, children }: { role: Role; children: React.ReactNode }) { return role === 'admin' ? children : <Navigate to="/dashboard" replace />; }
-function Shell({ role, setRole, children }: { role: Role; setRole: (r: Role) => void; children: React.ReactNode }) {
+function Shell({ role, setRole, viewRole, onChangeView, children }: { role: Role; setRole: (r: Role) => void; viewRole: Role; onChangeView: (r: Role) => void; children: React.ReactNode }) {
   const location = useLocation(); const navigate = useNavigate();
   const auth = useAuth();
   const timezone = useAppTimezone();
@@ -1330,12 +1608,18 @@ function Shell({ role, setRole, children }: { role: Role; setRole: (r: Role) => 
   const signedIn = Boolean(auth.account) || auth.breakglassActive;
   const seesSodBell = auth.isSodAdmin;
   const { data: sodNotifications, reload: reloadSodNotifications } = useApiResource<ApiSodNotification[]>('/api/v1/sod/notifications', seesSodBell);
+  // Same shared-team-feed shape as SoD's own bell source, for AccessPilot.NHIAdmin — see
+  // backend/app/services/nhi_notifications.py. A plain owner's OWN credential-expiry pings ride the generic
+  // personal feed below instead (myNotifications), with zero extra plumbing needed here.
+  const seesNhiBell = auth.isNhiAdmin;
+  const { data: nhiNotifications, reload: reloadNhiNotifications } = useApiResource<ApiNhiNotification[]>('/api/v1/nhi/notifications', seesNhiBell);
   // Every signed-in user's own assignment/approval notifications (see backend/app/services/notifications.py) —
   // same dropdown, same style, as the org-wide notification experience, distinct from the SoD-only feed above.
   const { data: myNotifications, reload: reloadMyNotifications } = useApiResource<ApiNotification[]>('/api/v1/notifications', signedIn);
   const unreadSodCount = (sodNotifications || []).filter(n => !n.read_at && !n.resolved_at).length;
+  const unreadNhiCount = (nhiNotifications || []).filter(n => !n.read_at && !n.resolved_at).length;
   const unreadMyCount = (myNotifications || []).filter(n => !n.read_at).length;
-  const unreadTotal = unreadSodCount + unreadMyCount;
+  const unreadTotal = unreadSodCount + unreadNhiCount + unreadMyCount;
   // Live: the Bell badge auto-refreshes so new notifications are visible from anywhere in the app, not just
   // after opening a specific page. The personal feed is a plain per-user DB read (cheap), so it polls every 10s
   // — short enough to feel close to live without needing real push infrastructure (no WebSocket/SSE exists in
@@ -1354,6 +1638,12 @@ function Shell({ role, setRole, children }: { role: Role; setRole: (r: Role) => 
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seesSodBell]);
+  useEffect(() => {
+    if (!seesNhiBell) return;
+    const id = setInterval(() => reloadNhiNotifications(), 60000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seesNhiBell]);
   const [notifOpen, setNotifOpen] = useState(false);
   const notifRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -1362,14 +1652,16 @@ function Shell({ role, setRole, children }: { role: Role; setRole: (r: Role) => 
     document.addEventListener('mousedown', onClickOutside);
     return () => document.removeEventListener('mousedown', onClickOutside);
   }, [notifOpen]);
-  const toggleNotif = () => { setNotifOpen(open => !open); if (!notifOpen) { reloadMyNotifications(); if (seesSodBell) reloadSodNotifications(); } };
+  const toggleNotif = () => { setNotifOpen(open => !open); if (!notifOpen) { reloadMyNotifications(); if (seesSodBell) reloadSodNotifications(); if (seesNhiBell) reloadNhiNotifications(); } };
   const markMyNotifRead = async (id: string) => { await auth.apiRequest(`/api/v1/notifications/${id}/read`, { method: 'POST' }); reloadMyNotifications(); };
   const markSodNotifRead = async (id: string) => { await auth.apiRequest(`/api/v1/sod/notifications/${id}/read`, { method: 'POST' }); reloadSodNotifications(); };
-  const markAllNotifRead = async () => { await Promise.all([auth.apiRequest('/api/v1/notifications/read-all', { method: 'POST' }), ...(seesSodBell ? [auth.apiRequest('/api/v1/sod/notifications/read-all', { method: 'POST' })] : [])]); reloadMyNotifications(); if (seesSodBell) reloadSodNotifications(); };
+  const markNhiNotifRead = async (id: string) => { await auth.apiRequest(`/api/v1/nhi/notifications/${id}/read`, { method: 'POST' }); reloadNhiNotifications(); };
+  const markAllNotifRead = async () => { await Promise.all([auth.apiRequest('/api/v1/notifications/read-all', { method: 'POST' }), ...(seesSodBell ? [auth.apiRequest('/api/v1/sod/notifications/read-all', { method: 'POST' })] : []), ...(seesNhiBell ? [auth.apiRequest('/api/v1/nhi/notifications/read-all', { method: 'POST' })] : [])]); reloadMyNotifications(); if (seesSodBell) reloadSodNotifications(); if (seesNhiBell) reloadNhiNotifications(); };
   type MergedNotif = { key: string; message: string; created_at: string; unread: boolean; link: string | null; onMarkRead: (() => void) | null };
   const mergedNotifs: MergedNotif[] = [
     ...(myNotifications || []).map(n => ({ key: `my-${n.id}`, message: n.message, created_at: n.created_at, unread: !n.read_at, link: n.link, onMarkRead: n.read_at ? null : () => markMyNotifRead(n.id) })),
     ...(seesSodBell ? (sodNotifications || []).map(n => ({ key: `sod-${n.id}`, message: n.message, created_at: n.created_at, unread: !n.read_at && !n.resolved_at, link: '/admin/sod/configuration', onMarkRead: (!n.read_at && !n.resolved_at) ? () => markSodNotifRead(n.id) : null })) : []),
+    ...(seesNhiBell ? (nhiNotifications || []).map(n => ({ key: `nhi-${n.id}`, message: n.message, created_at: n.created_at, unread: !n.read_at && !n.resolved_at, link: `/admin/nhi/${n.application_id}`, onMarkRead: (!n.read_at && !n.resolved_at) ? () => markNhiNotifRead(n.id) : null })) : []),
   ].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()).slice(0, 10);
   const notifBell = signedIn ? <div className="notif-bell-wrap" ref={notifRef}>
     <button type="button" className="notif-bell-btn" aria-label="Notifications" onClick={toggleNotif}>
@@ -1393,7 +1685,7 @@ function Shell({ role, setRole, children }: { role: Role; setRole: (r: Role) => 
       </div>}
     </div>}
   </div> : <Bell size={17} color="#718088"/>;
-  return <div className="app"><aside className="sidebar"><Link to="/dashboard" className="brand"><span className="brand-mark"><img src={branding?.internal_logo || logo} alt="AccessPilot" /></span> AccessPilot</Link>{visible.map((item, index) => { const I = item.icon; const previous = visible[index - 1]; return <div key={item.to}>{item.section && item.section !== previous?.section && <div className="nav-label">{item.section}</div>}<Link className={`nav-item ${path === item.to || (item.to !== '/dashboard' && path.startsWith(item.to)) ? 'active' : ''}`} to={item.to}><I />{item.label}</Link></div> })}<div className="sidebar-foot"><div>ACCESSPILOT CONSOLE</div><div style={{marginTop:5}}>v0.1.0 · Mock environment</div><div className="sidebar-credit">by <span>{branding?.powered_by_text || 'Clover‑X'}</span></div></div></aside><main className="main"><header className="topbar"><button className="mobile-menu" aria-label="Open navigation"><Menu size={20}/></button><div className="crumb">Workspace / <strong>{role === 'admin' ? 'Administration' : 'Self-service'}</strong></div><div className="top-actions">{auth.authConfigured ? <button className="btn" onClick={() => (auth.account || auth.breakglassActive) ? auth.signOut() : auth.signIn()}>{(auth.account || auth.breakglassActive) ? 'Sign out' : 'Sign in'}</button> : <div className="role-switch" aria-label="Development role switcher"><button className={role === 'user' ? 'active' : ''} onClick={() => { setRole('user'); navigate('/dashboard'); }}>User</button><button className={role === 'admin' ? 'active' : ''} onClick={() => { setRole('admin'); navigate('/dashboard'); }}>Admin</button></div>}{notifBell}<div className="profile"><span>{auth.account?.name || (auth.breakglassActive ? `Break-Glass (${auth.breakglassUsername})` : currentUser.name)}</span><span className="avatar">{currentUser.initials}</span></div></div></header>{children}</main></div>;
+  return <div className="app"><aside className="sidebar"><Link to="/dashboard" className="brand"><span className="brand-mark"><img src={branding?.internal_logo || logo} alt="AccessPilot" /></span> AccessPilot</Link>{visible.map((item, index) => { const I = item.icon; const previous = visible[index - 1]; return <div key={item.to}>{item.section && item.section !== previous?.section && <div className="nav-label">{item.section}</div>}<Link className={`nav-item ${path === item.to || (item.to !== '/dashboard' && path.startsWith(item.to)) ? 'active' : ''}`} to={item.to}><I />{item.label}</Link></div> })}<div className="sidebar-foot"><div>ACCESSPILOT CONSOLE</div><div style={{marginTop:5}}>v0.1.0 · Mock environment</div><div className="sidebar-credit">by <span>{branding?.powered_by_text || 'Clover‑X'}</span></div></div></aside><main className="main"><header className="topbar"><button className="mobile-menu" aria-label="Open navigation"><Menu size={20}/></button><div className="crumb">Workspace / <strong>{role === 'admin' ? 'Administration' : 'Self-service'}</strong></div><div className="top-actions">{auth.authConfigured ? <button className="btn" onClick={() => (auth.account || auth.breakglassActive) ? auth.signOut() : auth.signIn()}>{(auth.account || auth.breakglassActive) ? 'Sign out' : 'Sign in'}</button> : <div className="role-switch" aria-label="Development role switcher"><button className={role === 'user' ? 'active' : ''} onClick={() => { setRole('user'); navigate('/dashboard'); }}>User</button><button className={role === 'admin' ? 'active' : ''} onClick={() => { setRole('admin'); navigate('/dashboard'); }}>Admin</button></div>}{auth.authConfigured && auth.role === 'admin' && <div className="role-switch" aria-label="Switch between My view and Admin view" title="This only changes what you see here — your real Admin access is unaffected either way."><button className={viewRole === 'user' ? 'active' : ''} onClick={() => { onChangeView('user'); navigate('/dashboard'); }}>My view</button><button className={viewRole === 'admin' ? 'active' : ''} onClick={() => { onChangeView('admin'); navigate('/dashboard'); }}>Admin view</button></div>}{notifBell}<div className="profile"><span>{auth.account?.name || (auth.breakglassActive ? `Break-Glass (${auth.breakglassUsername})` : currentUser.name)}</span><span className="avatar">{currentUser.initials}</span></div></div></header>{children}</main></div>;
 }
 function Page({ eyebrow, title, subtitle, action, children }: { eyebrow?: string; title: string; subtitle?: string; action?: React.ReactNode; children: React.ReactNode }) { return <div className="content"><div className="page-head"><div>{eyebrow && <div className="eyebrow">{eyebrow}</div>}<h1>{title}</h1>{subtitle && <p className="subtitle">{subtitle}</p>}</div>{action}</div>{children}</div>; }
 interface UserDashboardStats { active: number; eligible: number; pending: number; expiringSoon: number; }
@@ -3174,6 +3466,117 @@ function BusinessRolesPage() {
 }
 interface ApiNamedPolicyRef { id: string; name: string; }
 interface ApiGroupAccessSummary { member_count: number; active_assignment_count: number; birthright_policies: ApiNamedPolicyRef[]; sod_policies: ApiNamedPolicyRef[]; access_packages: ApiNamedPolicyRef[]; }
+// ---- Dynamic Groups rule builder — a native AccessPilot engine (Birthright Policies), NOT Entra's own dynamic-
+// membership-group feature. Entra's rule vocabulary (property/operator/value, AND/OR, contains/startsWith/in)
+// is used here only as design reference; this evaluates against AccessPilot's own synced User rows. ----
+interface RuleCondition { field: string; operator: string; value: string | string[]; }
+interface ApiBirthrightPolicyJson { id: string; policyId: string; policyType: string; name: string; status: string; rule: { operator: string; conditions: RuleCondition[] }; actions: { action: string; resourceType: string; resource: string; appRoleExternalId?: string | null; assignmentType: string }[]; reconciliation: { enabled: boolean; removeWhenConditionFails: boolean }; audit: { enabled: boolean }; }
+function ruleConditionText(condition: RuleCondition): string {
+  const operatorLabel = RULE_CONDITION_OPERATORS_TEXT[condition.operator] || condition.operator;
+  const value = Array.isArray(condition.value) ? condition.value.join(', ') : condition.value;
+  return `${condition.field} ${operatorLabel} ${value}`;
+}
+const RULE_CONDITION_OPERATORS_TEXT: Record<string, string> = { EQUALS: 'equals', NOT_EQUALS: 'does not equal', CONTAINS: 'contains', NOT_CONTAINS: 'does not contain', STARTS_WITH: 'starts with', NOT_STARTS_WITH: 'does not start with', ENDS_WITH: 'ends with', NOT_ENDS_WITH: 'does not end with', IN: 'is one of', NOT_IN: 'is none of' };
+const RULE_CONDITION_FIELDS = [
+  { value: 'department', label: 'Department' },
+  { value: 'job_title', label: 'Job title' },
+  { value: 'status', label: 'Status' },
+  { value: 'email', label: 'Email' },
+  { value: 'employee_id', label: 'Employee ID' },
+  { value: 'employment_type', label: 'Employment type' },
+  { value: 'employee_category', label: 'Employee category' },
+  { value: 'manager_id', label: 'Manager (user ID) — direct reports of this person' },
+];
+const RULE_CONDITION_OPERATORS = [
+  { value: 'EQUALS', label: 'equals' },
+  { value: 'NOT_EQUALS', label: 'does not equal' },
+  { value: 'CONTAINS', label: 'contains' },
+  { value: 'NOT_CONTAINS', label: 'does not contain' },
+  { value: 'STARTS_WITH', label: 'starts with' },
+  { value: 'NOT_STARTS_WITH', label: 'does not start with' },
+  { value: 'ENDS_WITH', label: 'ends with' },
+  { value: 'NOT_ENDS_WITH', label: 'does not end with' },
+  { value: 'IN', label: 'is one of' },
+  { value: 'NOT_IN', label: 'is none of' },
+];
+const isListRuleOperator = (operator: string) => operator === 'IN' || operator === 'NOT_IN';
+const emptyRuleCondition: RuleCondition = { field: 'department', operator: 'EQUALS', value: '' };
+// Fields with a genuinely closed/known value set get a real dropdown instead of free text, so a typo can't
+// create a condition that silently matches nobody. 'department' and 'manager_id' are sourced from real data
+// fetched inside the editor (the managed Departments list, and the Users list for a people-picker); the rest are
+// fixed, already-hardcoded-elsewhere enums. email/job_title stay free text — no sensible closed list for either.
+const EMPLOYEE_CATEGORY_OPTIONS = [{ value: 'EMPLOYEE', label: 'Employee' }, { value: 'MANAGER', label: 'Manager' }];
+const STATUS_OPTIONS = [{ value: 'ACTIVE', label: 'Active' }, { value: 'DISABLED', label: 'Disabled' }];
+
+function RuleConditionsEditor({ operator, conditions, onChange }: { operator: string; conditions: RuleCondition[]; onChange: (operator: string, conditions: RuleCondition[]) => void }) {
+  const { data: departments } = useApiResource<{ id: string; name: string }[]>('/api/v1/policies/departments');
+  const { data: users } = useApiResource<ApiUser[]>('/api/v1/users');
+  const updateCondition = (index: number, patch: Partial<RuleCondition>) => onChange(operator, conditions.map((c, i) => i === index ? { ...c, ...patch } : c));
+
+  const optionsFor = (field: string): { value: string; label: string }[] | null => {
+    if (field === 'department') return (departments || []).map(d => ({ value: d.name, label: d.name }));
+    if (field === 'employment_type') return EMPLOYMENT_TYPES;
+    if (field === 'employee_category') return EMPLOYEE_CATEGORY_OPTIONS;
+    if (field === 'status') return STATUS_OPTIONS;
+    if (field === 'manager_id') return (users || []).map(u => ({ value: u.id, label: u.display_name }));
+    return null; // email/job_title — free text
+  };
+
+  const renderValueInput = (condition: RuleCondition, index: number) => {
+    const options = optionsFor(condition.field);
+    if (isListRuleOperator(condition.operator)) {
+      const selected = Array.isArray(condition.value) ? condition.value : [];
+      if (options) return <select className="select" multiple style={{ flex: 1, minWidth: 160, minHeight: 72 }} value={selected} onChange={event => updateCondition(index, { value: Array.from(event.target.selectedOptions, o => o.value) })}>{options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select>;
+      return <input className="select" style={{ flex: 1, minWidth: 160 }} placeholder="comma-separated, e.g. Sales, Marketing" value={selected.join(', ')} onChange={event => updateCondition(index, { value: event.target.value.split(',').map(v => v.trim()).filter(Boolean) })} />;
+    }
+    if (options) {
+      const current = typeof condition.value === 'string' ? condition.value : '';
+      const known = options.some(o => o.value === current);
+      return <select className="select" style={{ flex: 1, minWidth: 160 }} value={current} onChange={event => updateCondition(index, { value: event.target.value })}>
+        <option value="">Select a value</option>
+        {!known && current && <option value={current}>{current} (not in the list)</option>}
+        {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+      </select>;
+    }
+    return <input className="select" style={{ flex: 1, minWidth: 160 }} value={typeof condition.value === 'string' ? condition.value : ''} onChange={event => updateCondition(index, { value: event.target.value })} />;
+  };
+
+  return <div>
+    {conditions.map((condition, index) => <div key={index} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
+      {index === 0 ? <span className="footer-note" style={{ width: 46 }}>Where</span> : <select className="select" style={{ width: 70 }} value={operator} onChange={event => onChange(event.target.value, conditions)}><option value="AND">AND</option><option value="OR">OR</option></select>}
+      <select className="select" value={condition.field} onChange={event => updateCondition(index, { field: event.target.value, value: isListRuleOperator(condition.operator) ? [] : '' })}>{RULE_CONDITION_FIELDS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}</select>
+      <select className="select" value={condition.operator} onChange={event => updateCondition(index, { operator: event.target.value, value: isListRuleOperator(event.target.value) ? [] : '' })}>{RULE_CONDITION_OPERATORS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
+      {renderValueInput(condition, index)}
+      {conditions.length > 1 && <button type="button" className="btn" aria-label="Remove condition" onClick={() => onChange(operator, conditions.filter((_, i) => i !== index))}><X size={13} /></button>}
+    </div>)}
+    <button type="button" className="btn" onClick={() => onChange(operator, [...conditions, { ...emptyRuleCondition }])}><Plus size={13} /> Add condition</button>
+  </div>;
+}
+
+// Debounced "N users currently match" live preview, read-only — mirrors how Entra's own rule builder validates
+// a rule before it's saved, but calls AccessPilot's own evaluate-only endpoint (POST .../birthright/preview).
+function useRuleMatchPreview(operator: string, conditions: RuleCondition[]) {
+  const auth = useAuth();
+  const [matchCount, setMatchCount] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
+  const conditionsKey = JSON.stringify(conditions);
+  useEffect(() => {
+    const complete = conditions.every(c => c.field && c.operator && (Array.isArray(c.value) ? c.value.length > 0 : c.value.trim().length > 0));
+    if (!complete) { setMatchCount(null); return; }
+    let cancelled = false;
+    setLoading(true);
+    const timer = setTimeout(async () => {
+      try {
+        const response = await auth.apiRequest('/api/v1/policies/birthright/preview', { method: 'POST', body: JSON.stringify({ rule: { operator, conditions } }) });
+        if (!cancelled && response.ok) setMatchCount((await response.json()).matching_users);
+      } catch { /* best-effort preview only */ } finally { if (!cancelled) setLoading(false); }
+    }, 500);
+    return () => { cancelled = true; clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [operator, conditionsKey]);
+  return { matchCount, loading };
+}
+
 function GroupsPage() {
   const auth = useAuth();
   const timezone = useAppTimezone();
@@ -3203,9 +3606,10 @@ function GroupsPage() {
       setFormMessage(err instanceof Error && err.message === 'AUTHENTICATION_REQUIRED' ? 'Please sign in to continue.' : 'Unable to create group. Please try again.');
     } finally { setSaving(false); }
   };
-  return <Page eyebrow="ADMINISTRATION" title="Groups" subtitle="Directory groups and membership governance." action={<button className="btn btn-primary" onClick={() => { setOpen(true); setFormMessage(''); }}><Plus size={14}/> Add group</button>}>
+
+  return <Page eyebrow="ADMINISTRATION" title="Groups" subtitle="Directory groups and membership governance." action={<div style={{ display: 'flex', gap: 8 }}><Link to="/admin/dynamic-groups" className="btn"><Zap size={14}/> Dynamic Groups</Link><button className="btn btn-primary" onClick={() => { setOpen(true); setFormMessage(''); }}><Plus size={14}/> Add group</button></div>}>
     {open && <form role="dialog" aria-modal="true" className="panel" style={{maxWidth:640,marginBottom:18}} onSubmit={submit}><div className="panel-head"><h2>Add group</h2><button type="button" className="btn" aria-label="Close" onClick={() => setOpen(false)}><X size={14}/></button></div><div className="detail-section"><label className="key" style={{display:'block'}}><span>Group name</span><input className="select" style={{width:'100%'}} value={form.display_name} onChange={event => setForm({...form, display_name: event.target.value})}/></label><label className="key" style={{display:'block',marginTop:14}}><span>Description</span><input className="select" style={{width:'100%'}} value={form.description} onChange={event => setForm({...form, description: event.target.value})}/></label><label className="key" style={{display:'block',marginTop:14}}><span>Label (optional) — AccessPilot governance classification, not written to Entra</span><select className="select" style={{width:'100%'}} value={form.group_label} onChange={event => setForm({...form, group_label: event.target.value})}><option value="">No label</option><option value="STANDARD">Standard</option><option value="PRIVILEGED">Privileged</option>{(groupLabels || []).map(l => <option key={l.id} value={l.name}>{l.name}</option>)}</select></label>{formMessage && <div className="notice" style={{marginTop:14}}>{formMessage}</div>}</div><div className="detail-section" style={{display:'flex',justifyContent:'flex-end',gap:8}}><button type="button" className="btn" onClick={() => setOpen(false)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Creating...' : 'Create group'}</button></div></form>}
-    <TablePanel toolbar={<Toolbar placeholder="Search groups" searchValue={search} onSearchChange={setSearch} filterLabel="All groups" filterValue={privilegedFilter} onFilterChange={setPrivilegedFilter} filterOptions={[{value:'true',label:'Privileged'},{value:'false',label:'Standard'}]}/>}>{loading ? <div className="empty">Loading groups...</div> : error ? <div className="empty">{error}</div> : !groups || groups.length === 0 ? <div className="empty">No groups found.</div> : filteredGroups.length === 0 ? <div className="empty">No groups match this filter.</div> : <table><thead><tr><th>Name</th><th>Description</th><th>Privileged</th><th>Label</th><th>Source</th><th>Status</th><th>Last synced</th><th></th></tr></thead><tbody>{filteredGroups.map(g => <tr key={g.id}><td><Link to={`/admin/groups/${g.id}`} className="user-name">{g.name}</Link></td><td>{g.description || '—'}</td><td><span className={`risk ${g.is_privileged ? 'risk-high' : 'risk-low'}`}>{g.is_privileged ? 'Privileged' : 'Standard'}</span></td><td>{g.group_label || '—'}</td><td><span className={`badge ${g.provider_type === 'ACTIVE_DIRECTORY' ? 'warning' : 'neutral'}`}>{resourceSourceLabel(g)}</span></td><td><StatusBadge status={g.status}/></td><td>{g.last_synced_at ? formatDateTime(g.last_synced_at, timezone) : 'Never'}</td><td><Link to={`/admin/groups/${g.id}`}><ChevronRight size={15} color="#829198"/></Link></td></tr>)}</tbody></table>}</TablePanel>
+    <TablePanel toolbar={<Toolbar placeholder="Search groups" searchValue={search} onSearchChange={setSearch} filterLabel="All groups" filterValue={privilegedFilter} onFilterChange={setPrivilegedFilter} filterOptions={[{value:'true',label:'Privileged'},{value:'false',label:'Standard'}]}/>}>{loading ? <div className="empty">Loading groups...</div> : error ? <div className="empty">{error}</div> : !groups || groups.length === 0 ? <div className="empty">No groups found.</div> : filteredGroups.length === 0 ? <div className="empty">No groups match this filter.</div> : <table><thead><tr><th>Name</th><th>Description</th><th>Privileged</th><th>Label</th><th>Source</th><th>Status</th><th>Last synced</th><th></th></tr></thead><tbody>{filteredGroups.map(g => <tr key={g.id}><td><Link to={`/admin/groups/${g.id}`} className="user-name">{g.name}</Link>{g.dynamic_group_id ? <Link to={`/admin/dynamic-groups/${g.dynamic_group_id}`} className="badge info" style={{marginLeft:6}} title={`Membership managed automatically by the dynamic group "${g.dynamic_group_name}"`}>Dynamic — {g.dynamic_group_name}</Link> : g.is_dynamic && <span className="badge info" style={{marginLeft:6}} title="Membership is computed automatically by a Birthright Policy rule">Dynamic</span>}</td><td>{g.description || '—'}</td><td><span className={`risk ${g.is_privileged ? 'risk-high' : 'risk-low'}`}>{g.is_privileged ? 'Privileged' : 'Standard'}</span></td><td>{g.group_label || '—'}</td><td><span className={`badge ${g.provider_type === 'ACTIVE_DIRECTORY' ? 'warning' : 'neutral'}`}>{resourceSourceLabel(g)}</span></td><td><StatusBadge status={g.status}/></td><td>{g.last_synced_at ? formatDateTime(g.last_synced_at, timezone) : 'Never'}</td><td><Link to={`/admin/groups/${g.id}`}><ChevronRight size={15} color="#829198"/></Link></td></tr>)}</tbody></table>}</TablePanel>
   </Page>;
 }
 
@@ -3240,6 +3644,7 @@ function GroupDetail() {
   const timezone = useAppTimezone();
   const { id } = useParams();
   const { data: group, error, loading } = useApiResource<ApiGroup>(`/api/v1/groups/${id}`);
+  const { data: dynamicRules } = useApiResource<ApiBirthrightPolicyJson[]>(`/api/v1/groups/${id}/dynamic-rules`);
   const { data: members, error: membersError, loading: membersLoading } = useApiResource<ApiUser[]>(`/api/v1/groups/${id}/members`);
   const { data: summary } = useApiResource<ApiGroupAccessSummary>(`/api/v1/groups/${id}/access-summary`);
   const { data: mappings, error: mappingsError, loading: mappingsLoading, reload: reloadMappings } = useApiResource<ApiGroupRoleMapping[]>(`/api/v1/policies/group-role-mappings?group_id=${id}`);
@@ -3280,7 +3685,7 @@ function GroupDetail() {
     <div className="detail-layout">
       <section className="panel">
         <div className="detail-section">
-          <div className="detail-title"><h2>Overview</h2><StatusBadge status={group.status}/></div>
+          <div className="detail-title"><h2>Overview</h2><div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>{group.dynamic_group_id ? <Link to={`/admin/dynamic-groups/${group.dynamic_group_id}`} className="badge info" title={`Membership managed automatically by the dynamic group "${group.dynamic_group_name}" — never requested by hand`}>Dynamic — {group.dynamic_group_name}</Link> : group.is_dynamic && <span className="badge info" title="Membership is computed automatically by a Birthright Policy rule below — never requested by hand">Dynamic</span>}<StatusBadge status={group.status}/></div></div>
           <div className="key-grid">
             <div className="key"><span>Privileged</span><strong>{group.is_privileged ? 'Yes — assignable to a directory role' : 'No'}</strong></div>
             <div className="key"><span>Label</span><strong>{group.group_label || '—'}</strong></div>
@@ -3291,6 +3696,14 @@ function GroupDetail() {
             <div className="key"><span>Last synced</span><strong>{group.last_synced_at ? formatDateTime(group.last_synced_at, timezone) : 'Never'}</strong></div>
           </div>
         </div>
+        {dynamicRules && dynamicRules.length > 0 && <div className="detail-section">
+          <div className="detail-title"><h2>Dynamic membership rule{dynamicRules.length > 1 ? 's' : ''}</h2></div>
+          <p className="subtitle" style={{ marginTop: 0, marginBottom: 10 }}>Membership here is computed automatically — edit the governing rule under Policies → Birthright Policies (View/Edit JSON) rather than adding or removing members by hand.</p>
+          {dynamicRules.map(rule => <div key={rule.id} style={{ marginBottom: 10, padding: '8px 0', borderBottom: '1px solid #edf1f2' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}><strong style={{ fontSize: 13 }}>{rule.name}</strong><StatusBadge status={rule.status} />{!rule.reconciliation.enabled && <span className="badge neutral" title="This rule's grants are never auto-revoked, even once someone stops matching.">Sticky</span>}</div>
+            <div className="footer-note">{rule.rule.conditions.map(ruleConditionText).join(` ${rule.rule.operator} `)}</div>
+          </div>)}
+        </div>}
         <div className="detail-section"><GroupOwnersSection groupId={id || ''}/></div>
         <div className="detail-section">
           <div className="detail-title"><h2>Members</h2></div>
@@ -3338,6 +3751,151 @@ function GroupDetail() {
     </section>
   </Page>;
 }
+// ---- Dynamic Groups: a first-class, native AccessPilot group whose membership AccessPilot itself computes and
+// (per connected IdP, independently) keeps in sync — not a lens over an existing group's Birthright Policy. ----
+interface ApiDynamicGroupTarget { id: string; provider_id: string; provider_name: string; provider_type: string; sync_mode: string; group_id: string | null; group_name: string | null; group_external_id: string | null; }
+interface ApiDynamicGroup { id: string; name: string; description: string | null; group_label: string | null; rule: { operator: string; conditions: RuleCondition[] }; status: string; created_at: string; updated_at: string; targets: ApiDynamicGroupTarget[]; }
+const SYNC_MODE_LABEL: Record<string, string> = { OFF: 'Off', ELIGIBLE: 'Eligible', ACTIVE: 'Direct Assignment' };
+
+function DynamicGroupsPage() {
+  const auth = useAuth();
+  const { data: dynamicGroups, error, loading, reload } = useApiResource<ApiDynamicGroup[]>('/api/v1/dynamic-groups');
+  const { data: groupLabels } = useApiResource<ApiGroupLabel[]>('/api/v1/policies/group-labels');
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [groupLabel, setGroupLabel] = useState('');
+  const [operator, setOperator] = useState('AND');
+  const [conditions, setConditions] = useState<RuleCondition[]>([{ ...emptyRuleCondition }]);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  const { matchCount, loading: previewLoading } = useRuleMatchPreview(operator, conditions);
+  const resetForm = () => { setName(''); setDescription(''); setGroupLabel(''); setOperator('AND'); setConditions([{ ...emptyRuleCondition }]); setMessage(''); };
+  const create = async () => {
+    if (!name.trim()) { setMessage('Name is required.'); return; }
+    setSaving(true); setMessage('');
+    try {
+      const response = await auth.apiRequest('/api/v1/dynamic-groups', { method: 'POST', body: JSON.stringify({ name: name.trim(), description: description || undefined, group_label: groupLabel || undefined, rule: { operator, conditions } }) });
+      const body = await response.json().catch(() => null);
+      if (response.ok) { setOpen(false); resetForm(); reload(); }
+      else setMessage(body?.error?.message || 'Unable to create this dynamic group.');
+    } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
+  };
+  return <Page eyebrow="ADMINISTRATION" title="Dynamic Groups" subtitle="Groups whose membership AccessPilot computes and syncs itself, directory by directory." action={<div style={{ display: 'flex', gap: 8 }}><Link to="/admin/groups" className="btn">All groups</Link><button className="btn btn-primary" onClick={() => { setOpen(true); resetForm(); }}><Plus size={14}/> Create dynamic group</button></div>}>
+    {open && <form role="dialog" aria-modal="true" className="panel" style={{ maxWidth: 720, marginBottom: 18 }} onSubmit={event => { event.preventDefault(); void create(); }}>
+      <div className="panel-head"><h2>Create dynamic group</h2><button type="button" className="btn" aria-label="Close" onClick={() => setOpen(false)}><X size={14}/></button></div>
+      <div className="detail-section">
+        <p className="subtitle" style={{ marginTop: 0, marginBottom: 14 }}>Creating this doesn't create a real group anywhere yet — once saved, turn Sync on per connected directory (Eligible or Direct Assignment) from its own page to actually create the real group there and start enrolling matching people.</p>
+        <label className="key" style={{ display: 'block', marginBottom: 12 }}><span>Name</span><input className="select" style={{ width: '100%' }} value={name} onChange={event => setName(event.target.value)} placeholder="e.g. Sales & Marketing"/></label>
+        <label className="key" style={{ display: 'block', marginBottom: 12 }}><span>Description</span><input className="select" style={{ width: '100%' }} value={description} onChange={event => setDescription(event.target.value)}/></label>
+        <label className="key" style={{ display: 'block', marginBottom: 14 }}><span>Label (optional)</span><select className="select" style={{ width: '100%' }} value={groupLabel} onChange={event => setGroupLabel(event.target.value)}><option value="">No label</option><option value="STANDARD">Standard</option><option value="PRIVILEGED">Privileged</option>{(groupLabels || []).map(l => <option key={l.id} value={l.name}>{l.name}</option>)}</select></label>
+        <div className="key" style={{ marginBottom: 8 }}><span>Rule</span></div>
+        <RuleConditionsEditor operator={operator} conditions={conditions} onChange={(op, next) => { setOperator(op); setConditions(next); }} />
+        <div className="footer-note" style={{ marginTop: 10 }}>{previewLoading ? 'Checking how many people currently match…' : matchCount === null ? 'Fill in every condition to preview matches.' : `${matchCount} ${matchCount === 1 ? 'person' : 'people'} would match this rule right now.`}</div>
+        {message && <div className="notice" style={{ marginTop: 14 }}>{message}</div>}
+      </div>
+      <div className="detail-section" style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}><button type="button" className="btn" onClick={() => setOpen(false)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Creating...' : 'Create'}</button></div>
+    </form>}
+    <TablePanel>{loading ? <div className="empty">Loading...</div> : error ? <div className="empty">{error}</div> : !dynamicGroups || dynamicGroups.length === 0 ? <div className="empty">No dynamic groups yet.</div> : <table><thead><tr><th>Name</th><th>Rule</th><th>Synced to</th><th>Status</th><th></th></tr></thead><tbody>
+      {dynamicGroups.map(dg => <tr key={dg.id}>
+        <td><Link to={`/admin/dynamic-groups/${dg.id}`} className="user-name">{dg.name}</Link>{dg.group_label && <span className="footer-note" style={{ display: 'block' }}>{dg.group_label}</span>}</td>
+        <td>{dg.rule.conditions.map(ruleConditionText).join(` ${dg.rule.operator} `)}</td>
+        <td>{dg.targets.filter(t => t.sync_mode !== 'OFF').length} of {dg.targets.length} directories</td>
+        <td><StatusBadge status={dg.status}/></td>
+        <td><Link to={`/admin/dynamic-groups/${dg.id}`}><ChevronRight size={15} color="#829198"/></Link></td>
+      </tr>)}
+    </tbody></table>}</TablePanel>
+  </Page>;
+}
+
+function DynamicGroupDetail() {
+  const auth = useAuth();
+  const { id } = useParams();
+  const { data: dynamicGroup, error, loading, reload } = useApiResource<ApiDynamicGroup>(`/api/v1/dynamic-groups/${id}`);
+  const [editOpen, setEditOpen] = useState(false);
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [operator, setOperator] = useState('AND');
+  const [conditions, setConditions] = useState<RuleCondition[]>([{ ...emptyRuleCondition }]);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  const [syncBusy, setSyncBusy] = useState<string | null>(null);
+
+  const openEdit = () => {
+    if (!dynamicGroup) return;
+    setName(dynamicGroup.name); setDescription(dynamicGroup.description || ''); setOperator(dynamicGroup.rule.operator); setConditions(dynamicGroup.rule.conditions.length ? dynamicGroup.rule.conditions : [{ ...emptyRuleCondition }]);
+    setEditOpen(true); setMessage('');
+  };
+  const saveEdit = async () => {
+    setSaving(true); setMessage('');
+    try {
+      const response = await auth.apiRequest(`/api/v1/dynamic-groups/${id}`, { method: 'PATCH', body: JSON.stringify({ name: name.trim(), description: description || undefined, rule: { operator, conditions } }) });
+      const body = await response.json().catch(() => null);
+      if (response.ok) { setEditOpen(false); reload(); }
+      else setMessage(body?.error?.message || 'Unable to save changes.');
+    } catch { setMessage('Unable to reach the backend.'); } finally { setSaving(false); }
+  };
+  const toggleStatus = async () => {
+    if (!dynamicGroup) return;
+    const next = dynamicGroup.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE';
+    if (next === 'DISABLED' && !window.confirm('Disable this dynamic group? Everyone it currently granted access to (in every synced directory) will have that access revoked.')) return;
+    await auth.apiRequest(`/api/v1/dynamic-groups/${id}`, { method: 'PATCH', body: JSON.stringify({ status: next }) });
+    reload();
+  };
+  const remove = async () => {
+    if (!dynamicGroup || !window.confirm(`Delete "${dynamicGroup.name}"? Any real group(s) already created in a directory are left exactly as they are — only this dynamic group's own rule/sync bookkeeping is removed.`)) return;
+    await auth.apiRequest(`/api/v1/dynamic-groups/${id}`, { method: 'DELETE' });
+    window.location.href = '/admin/dynamic-groups';
+  };
+  const setSync = async (providerId: string, mode: string, currentMode: string) => {
+    if (mode === currentMode) return;
+    if (mode === 'OFF' && !window.confirm('Turn sync off for this directory? The real group and whatever membership it already has are left exactly as they are — AccessPilot just stops adding or removing people automatically.')) return;
+    if (currentMode === 'OFF' && !window.confirm(mode === 'ACTIVE' ? 'Turn on Direct Assignment? A real group will be created in this directory now, and everyone who currently matches the rule becomes a real member immediately.' : 'Turn on Eligible sync? A real group will be created in this directory now, and everyone who currently matches the rule becomes eligible (request/activate later, same as any other resource).')) return;
+    setSyncBusy(providerId);
+    try {
+      const response = await auth.apiRequest(`/api/v1/dynamic-groups/${id}/targets/${providerId}/sync`, { method: 'POST', body: JSON.stringify({ mode }) });
+      if (!response.ok) { const body = await response.json().catch(() => null); setMessage(body?.error?.message || 'Unable to change sync for this directory.'); }
+      reload();
+    } catch { setMessage('Unable to reach the backend.'); } finally { setSyncBusy(null); }
+  };
+
+  if (loading) return <Page eyebrow="ADMINISTRATION" title="Loading..." subtitle=""><div className="empty">Loading dynamic group...</div></Page>;
+  if (error || !dynamicGroup) return <Page eyebrow="ADMINISTRATION" title="Dynamic Group" subtitle=""><div className="empty">{error || 'Dynamic group not found.'}</div></Page>;
+
+  return <Page eyebrow="ADMINISTRATION" title={dynamicGroup.name} subtitle={dynamicGroup.description || 'No description'} action={<Link to="/admin/dynamic-groups" className="btn">Back to Dynamic Groups</Link>}>
+    <div className="panel" style={{ marginBottom: 18 }}>
+      <div className="panel-head"><h2>Rule</h2><div style={{ display: 'flex', gap: 8, alignItems: 'center' }}><StatusBadge status={dynamicGroup.status}/><button className="btn" onClick={openEdit}>Edit</button><button className="btn" onClick={() => void toggleStatus()}>{dynamicGroup.status === 'ACTIVE' ? 'Disable' : 'Enable'}</button><button className="btn" style={{ borderColor: '#e0a3a3', color: '#ae4949' }} onClick={() => void remove()}>Delete</button></div></div>
+      <div className="detail-section">
+        {editOpen ? <>
+          <label className="key" style={{ display: 'block', marginBottom: 12 }}><span>Name</span><input className="select" style={{ width: '100%' }} value={name} onChange={event => setName(event.target.value)}/></label>
+          <label className="key" style={{ display: 'block', marginBottom: 14 }}><span>Description</span><input className="select" style={{ width: '100%' }} value={description} onChange={event => setDescription(event.target.value)}/></label>
+          <div className="key" style={{ marginBottom: 8 }}><span>Rule</span></div>
+          <RuleConditionsEditor operator={operator} conditions={conditions} onChange={(op, next) => { setOperator(op); setConditions(next); }} />
+          <div style={{ display: 'flex', gap: 8, marginTop: 14 }}><button className="btn btn-primary" disabled={saving} onClick={() => void saveEdit()}>{saving ? 'Saving...' : 'Save'}</button><button className="btn" onClick={() => setEditOpen(false)}>Cancel</button></div>
+        </> : <div className="footer-note">{dynamicGroup.rule.conditions.map(ruleConditionText).join(` ${dynamicGroup.rule.operator} `)}</div>}
+        {message && <div className="notice" style={{ marginTop: 14 }}>{message}</div>}
+      </div>
+    </div>
+    <div className="panel">
+      <div className="panel-head"><h2>Sync per directory</h2></div>
+      <div className="detail-section">
+        <p className="subtitle" style={{ marginTop: 0, marginBottom: 14 }}><strong>Off</strong> — no real group exists there yet. <strong>Eligible</strong> — a real group exists; matching people show up eligible, same request/activate model as everything else. <strong>Direct Assignment</strong> — matching people become real members immediately, no activation needed. Turning a directory off never deletes anything already created — it just stops auto-managing it.</p>
+        <table><thead><tr><th>Directory</th><th>Real group</th><th>Mode</th></tr></thead><tbody>
+          {dynamicGroup.targets.map(target => <tr key={target.id}>
+            <td className="user-name">{target.provider_name}</td>
+            <td>{target.group_id ? <Link to={`/admin/groups/${target.group_id}`}>{target.group_name}</Link> : <span className="footer-note">Not created yet</span>}</td>
+            <td>
+              <select className="select" disabled={syncBusy === target.provider_id} value={target.sync_mode} onChange={event => void setSync(target.provider_id, event.target.value, target.sync_mode)}>
+                {Object.entries(SYNC_MODE_LABEL).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+            </td>
+          </tr>)}
+        </tbody></table>
+      </div>
+    </div>
+  </Page>;
+}
+
 function RolesPage() {
   const { data: roles, error, loading } = useApiResource<ApiRole[]>('/api/v1/roles');
   const [searchParams, setSearchParams] = useSearchParams();
@@ -3464,7 +4022,7 @@ function BirthrightPoliciesPanel() {
   return <section className="panel" style={{marginBottom:18}}>
     <div className="panel-head"><h2>Birthright policies</h2><div style={{display:'flex',gap:8}}><button className="btn" onClick={openJsonCreate}><Plus size={14}/> New via JSON</button><button className="btn btn-primary" onClick={() => { setEditingPolicyId(null); setForm(emptyForm); setOpen(true); setMessage(''); }}><Plus size={14}/> Add rule</button></div></div>
     <div className="detail-section">
-      <p className="subtitle" style={{marginBottom:14}}>Attribute-driven auto-assignment: when a joiner or mover's <code>department</code> or <code>job title</code> matches a rule, they're automatically made <strong>eligible</strong> for that Group, Role, Application, or every item in an Access Package — same as any other assignment, still activated by hand. A Package rule grants each of its items individually (not as one grouped package request), so mover reconciliation can revoke exactly the items whose rule no longer applies. For a rule with several AND/OR conditions or several grants at once, use <strong>New via JSON</strong> — any existing policy can also be opened as JSON via its <strong>View/Edit JSON</strong> action. Evaluated automatically whenever an Onboarding CSV import is committed.</p>
+      <p className="subtitle" style={{marginBottom:14}}>Attribute-driven auto-assignment: when a joiner or mover's <code>department</code> or <code>job title</code> matches a rule, they're automatically made <strong>eligible</strong> for that Group, Role, Application, or every item in an Access Package — same as any other assignment, still activated by hand. A Package rule grants each of its items individually (not as one grouped package request), so mover reconciliation can revoke exactly the items whose rule no longer applies. For a rule with several AND/OR conditions or several grants at once, use <strong>New via JSON</strong> (supports <code>CONTAINS</code>/<code>STARTS_WITH</code>/<code>ENDS_WITH</code>/<code>IN</code> and their negations, not just <code>EQUALS</code>) — any existing policy can also be opened as JSON via its <strong>View/Edit JSON</strong> action, or built with the guided rule builder from the <Link to="/admin/groups">Groups</Link> page's "Add dynamic rule" when the only grant is a single Group. Evaluated automatically whenever an Onboarding CSV import is committed.</p>
       {jsonPolicyId && <form role="dialog" aria-modal="true" className="notice" style={{marginBottom:14}} onSubmit={event => { event.preventDefault(); void saveJson(); }}>
         <div className="key" style={{marginBottom:8}}><span>{jsonPolicyId === 'new' ? 'New policy — JSON' : 'Edit policy — JSON'}</span></div>
         <textarea className="select" style={{width:'100%',minHeight:320,fontFamily:'monospace',fontSize:12,whiteSpace:'pre'}} value={jsonText} onChange={event => { setJsonText(event.target.value); setCheckResults(null); }} spellCheck={false}/>

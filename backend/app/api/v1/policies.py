@@ -10,7 +10,7 @@ from app.db.session import get_db
 from app.models import User
 from app.schemas.departments import DepartmentCreate, DepartmentManagerUpdate, DepartmentResponse
 from app.schemas.group_labels import GroupLabelCreate, GroupLabelResponse
-from app.schemas.policies import BirthrightEvaluationResult, BirthrightPolicyCreate, BirthrightPolicyJson, BirthrightPolicyResponse, BirthrightPolicyUpdate, BirthrightResolveActionsRequest, BirthrightResolveActionsResponse, GroupRoleMappingCreate, GroupRoleMappingEvaluationResult, GroupRoleMappingResponse, GroupRoleMappingUpdate
+from app.schemas.policies import BirthrightEvaluationResult, BirthrightPolicyCreate, BirthrightPolicyJson, BirthrightPolicyResponse, BirthrightPolicyUpdate, BirthrightResolveActionsRequest, BirthrightResolveActionsResponse, BirthrightRulePreviewRequest, BirthrightRulePreviewResponse, GroupRoleMappingCreate, GroupRoleMappingEvaluationResult, GroupRoleMappingResponse, GroupRoleMappingUpdate
 from app.security.auth import AuthenticatedUser, require_permission
 from app.services import birthright as birthright_service
 from app.services import departments as departments_service
@@ -87,6 +87,20 @@ async def resolve_birthright_actions(data: BirthrightResolveActionsRequest, _: A
 async def evaluate_birthright_policies(user_id: UUID, request: Request, actor: AuthenticatedUser = Depends(policy_create), db: AsyncSession = Depends(get_db)):
     created = await birthright_service.evaluate_birthright_policies(db, user_id, actor.directory_object_id, get_request_id(request))
     return BirthrightEvaluationResult(user_id=user_id, matched_policies=len(created), assignments_created=created)
+
+
+@router.get("/birthright/dynamic-groups", response_model=list[BirthrightPolicyJson])
+async def list_dynamic_group_policies(_: AuthenticatedUser = Depends(policy_read), db: AsyncSession = Depends(get_db)):
+    """'Dynamic Groups' is a lens over the Birthright Policy engine, not a separate feature — every policy that
+    grants at least one GROUP, in the same JSON rule shape the general policy editor already uses."""
+    policies = await birthright_service.list_dynamic_group_policies(db)
+    return [await birthright_service.to_birthright_policy_json(db, policy) for policy in policies]
+
+
+@router.post("/birthright/preview", response_model=BirthrightRulePreviewResponse)
+async def preview_birthright_rule(data: BirthrightRulePreviewRequest, _: AuthenticatedUser = Depends(policy_read), db: AsyncSession = Depends(get_db)):
+    """The rule builder's live 'N users currently match' preview — read-only, nothing is granted or saved."""
+    return BirthrightRulePreviewResponse(matching_users=await birthright_service.count_users_matching_rule(db, data.rule))
 
 
 @router.get("/group-role-mappings", response_model=list[GroupRoleMappingResponse])

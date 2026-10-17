@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import re
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 
 from app.core.config import get_settings
-from app.providers.base import CreatedUser, IdentityProvider, NewGroupRequest, NewUserRequest, NormalizedApplication, NormalizedApplicationPermission, NormalizedApplicationRole, NormalizedCredential, NormalizedDomain, NormalizedGroup, NormalizedRole, NormalizedUser, ProviderConflictError
+from app.providers.base import CreatedUser, IdentityProvider, NewApplicationRequest, NewGroupRequest, NewUserRequest, NormalizedApplication, NormalizedApplicationPermission, NormalizedApplicationRole, NormalizedCredential, NormalizedDirectoryActivity, NormalizedDomain, NormalizedGroup, NormalizedRole, NormalizedUser, ProviderConflictError
 from app.providers.graph_client import GraphClient, GraphCredentials, GraphError
 from app.security.credential_encryption import CredentialEncryptionError, decrypt_credential
 from app.security.secrets import SecretReferenceStore
@@ -15,12 +16,30 @@ from app.security.secrets import SecretReferenceStore
 USER_SELECT = "id,userPrincipalName,mail,displayName,givenName,surname,department,jobTitle,accountEnabled"
 GROUP_SELECT = "id,displayName,description,securityEnabled,isAssignableToRole"
 ROLE_SELECT = "id,displayName,description"
-APPLICATION_SELECT = "id,displayName,accountEnabled,appRoles,passwordCredentials,keyCredentials,servicePrincipalType"
+APPLICATION_SELECT = "id,displayName,accountEnabled,appRoles,passwordCredentials,keyCredentials,servicePrincipalType,appId"
+APPLICATION_REGISTRATION_SELECT = "appId,passwordCredentials,keyCredentials"
+DIRECTORY_AUDIT_SELECT = "activityDisplayName,activityDateTime,initiatedBy,result,resultReason"
 DEFAULT_APP_ROLE_ID = "00000000-0000-0000-0000-000000000000"
 
 
 def _odata_escape(value: str) -> str:
     return value.replace("'", "''")
+
+
+_FRACTIONAL_SECONDS_RE = re.compile(r"\.(\d+)")
+
+
+def _parse_graph_timestamp(raw: str) -> datetime:
+    """Confirmed live against the real tenant: /auditLogs/directoryAudits returns activityDateTime with 7-digit
+    fractional seconds (e.g. "...30.3436009+00:00"), which datetime.fromisoformat (pre-3.11) rejects outright —
+    it only accepts exactly 3 or 6 digits. Pad/truncate to exactly 6 (microseconds) rather than assume Graph
+    always matches the credential-expiry endpoints' millisecond precision."""
+    normalized = raw.replace("Z", "+00:00")
+    match = _FRACTIONAL_SECONDS_RE.search(normalized)
+    if match:
+        digits = (match.group(1) + "000000")[:6]
+        normalized = normalized[: match.start()] + "." + digits + normalized[match.end():]
+    return datetime.fromisoformat(normalized)
 
 
 def _is_already_assigned_error(exc: GraphError) -> bool:
@@ -140,7 +159,7 @@ class EntraProvider(IdentityProvider):
         return min(expiries) if expiries else None
 
     @staticmethod
-    def _application_from_graph(item: dict[str, Any]) -> NormalizedApplication:
+    def _application_from_graph(item: dict[str, Any], app_registration_credentials: dict[str, list[NormalizedCredential]] | None = None) -> NormalizedApplication:
         app_roles = [NormalizedApplicationRole(external_id=role["id"], name=role.get("displayName") or "Unnamed role", description=role.get("description")) for role in item.get("appRoles", []) if role.get("isEnabled", True)]
         if not app_roles:
             app_roles = [NormalizedApplicationRole(external_id=DEFAULT_APP_ROLE_ID, name="Default Access", description="Basic access with no application-defined role.")]
@@ -150,6 +169,14 @@ class EntraProvider(IdentityProvider):
         # manual NHIAdmin classification (see app.services.nhi.set_nhi_type) rather than something invented here.
         nhi_type = "MANAGED_IDENTITY" if item.get("servicePrincipalType") == "ManagedIdentity" else "SERVICE_PRINCIPAL"
         credentials = EntraProvider._credentials_list(item)
+        # The real secrets/certificates an admin manages from Entra's "Certificates & secrets" blade live on the
+        # App Registration (/applications), not the Service Principal (/servicePrincipals) this method otherwise
+        # reads from — confirmed live against the real tenant: a service principal's own passwordCredentials/
+        # keyCredentials came back empty ([]) even though its matching Application object had two real,
+        # unexpired secrets. Merged in here when the caller was able to fetch them (see get_applications).
+        app_id = item.get("appId")
+        if app_registration_credentials and app_id in app_registration_credentials:
+            credentials = credentials + app_registration_credentials[app_id]
         return NormalizedApplication(external_id=item["id"], name=item.get("displayName") or "", status="ACTIVE" if item.get("accountEnabled", True) else "DISABLED", app_roles=tuple(app_roles), nhi_type=nhi_type, credential_expires_at=EntraProvider._earliest_credential_expiry(credentials), credentials=tuple(credentials))
 
     async def get_users(self, query: str | None = None) -> list[NormalizedUser]:
@@ -331,6 +358,22 @@ class EntraProvider(IdentityProvider):
 
     async def get_role_assignments(self, external_role_id: str) -> list[dict[str, Any]]: return await self._not_implemented()
 
+    async def _app_registration_credentials_by_app_id(self, client: GraphClient) -> dict[str, list[NormalizedCredential]]:
+        """One extra, best-effort read covering every App Registration's own passwordCredentials/keyCredentials,
+        keyed by appId — see _application_from_graph's docstring for why this exists at all. Fails open (empty
+        dict) on any Graph error, same "never block the sync over an extra, non-essential read" convention
+        every other best-effort call in this file already follows (e.g. get_group_owner_ids)."""
+        try:
+            items = await client.get_all("/applications", params={"$select": APPLICATION_REGISTRATION_SELECT, "$top": "999"})
+        except GraphError:
+            return {}
+        result: dict[str, list[NormalizedCredential]] = {}
+        for item in items:
+            app_id = item.get("appId")
+            if app_id:
+                result[app_id] = self._credentials_list(item)
+        return result
+
     async def get_applications(self, query: str | None = None) -> list[NormalizedApplication]:
         params: dict[str, Any] = {"$select": APPLICATION_SELECT, "$top": "999"}
         headers: dict[str, str] | None = None
@@ -341,7 +384,8 @@ class EntraProvider(IdentityProvider):
             params["$count"] = "true"
         async with self._client() as client:
             items = await client.get_all("/servicePrincipals", params=params, headers=headers)
-        return [self._application_from_graph(item) for item in items]
+            app_registration_credentials = await self._app_registration_credentials_by_app_id(client)
+        return [self._application_from_graph(item, app_registration_credentials) for item in items]
 
     async def set_application_enabled(self, external_id: str, enabled: bool) -> bool:
         """A real, consequential write against the tenant's Enterprise Application — needs Application.ReadWrite.All
@@ -360,6 +404,40 @@ class EntraProvider(IdentityProvider):
             NormalizedApplicationPermission(resource_external_id=item.get("resourceId", ""), resource_display_name=item.get("resourceDisplayName") or item.get("resourceId", ""), role_name=item.get("appRoleId") or "Default Access")
             for item in items if item.get("resourceId")
         ]
+
+    async def get_directory_activity(self, external_id: str) -> list[NormalizedDirectoryActivity]:
+        """Entra's own directory-audit log for this identity (its service principal object id), straight from
+        Microsoft Graph — needs AuditLog.Read.All. /auditLogs/signIns would additionally show real sign-in
+        activity, but that API only returns meaningful data on tenants with Azure AD Premium P1/P2; this tenant
+        doesn't have that, so only directoryAudits (no such licensing requirement) is wired up here.
+        Confirmed live: unlike /servicePrincipals and friends, /auditLogs/directoryAudits rejects $count/
+        ConsistencyLevel outright (400 "Query option 'Count' is not allowed") — $filter alone is enough here."""
+        escaped = _odata_escape(external_id)
+        params: dict[str, Any] = {
+            "$filter": f"targetResources/any(t:t/id eq '{escaped}')",
+            "$select": DIRECTORY_AUDIT_SELECT,
+            "$orderby": "activityDateTime desc",
+            "$top": "50",
+        }
+        async with self._client() as client:
+            items = await client.get_all("/auditLogs/directoryAudits", params=params)
+        return [self._directory_activity_from_graph(item) for item in items]
+
+    @staticmethod
+    def _directory_activity_from_graph(item: dict[str, Any]) -> NormalizedDirectoryActivity:
+        initiated_by = item.get("initiatedBy") or {}
+        user = initiated_by.get("user") or {}
+        app = initiated_by.get("app") or {}
+        actor = user.get("displayName") or user.get("userPrincipalName") or app.get("displayName")
+        raw_timestamp = item.get("activityDateTime")
+        timestamp = _parse_graph_timestamp(raw_timestamp) if raw_timestamp else datetime.now(timezone.utc)
+        return NormalizedDirectoryActivity(
+            timestamp=timestamp,
+            activity=item.get("activityDisplayName") or "Unknown activity",
+            actor=actor,
+            result=(item.get("result") or "unknown").lower(),
+            detail=item.get("resultReason") or None,
+        )
 
     async def _add_app_role_assignment(self, resource_external_id: str, app_role_external_id: str, user_external_id: str) -> bool:
         async with self._client() as client:
@@ -486,6 +564,22 @@ class EntraProvider(IdentityProvider):
                 body["description"] = request.description
             response = await client.request("POST", "/groups", json=body)
         return self._group_from_graph(response.json())
+
+    async def create_application(self, request: NewApplicationRequest) -> NormalizedApplication:
+        """Needs Application.ReadWrite.All — the same write scope set_application_enabled already documents as
+        not confirmed granted on this tenant; a missing grant surfaces as the normal, already-established
+        PROVIDER_PERMISSION_DENIED (403) via GraphError, never a silent no-op. Two real Graph calls, since an App
+        Registration (/applications) and its linked Service Principal (/servicePrincipals, what sync/get_applications
+        actually reads from) are separate objects — creating only the first would leave an NHI AccessPilot can
+        never see."""
+        async with self._client() as client:
+            existing = await client.get_all("/servicePrincipals", params={"$filter": f"displayName eq '{_odata_escape(request.display_name)}'", "$select": "id", "$count": "true"}, headers={"ConsistencyLevel": "eventual"})
+            if existing:
+                raise ProviderConflictError("A non-human identity with this name already exists in Microsoft Entra.")
+            app_response = await client.request("POST", "/applications", json={"displayName": request.display_name})
+            app_id = app_response.json()["appId"]
+            sp_response = await client.request("POST", "/servicePrincipals", json={"appId": app_id})
+        return self._application_from_graph(sp_response.json())
 
     async def get_domains(self) -> list[NormalizedDomain]:
         async with self._client() as client:

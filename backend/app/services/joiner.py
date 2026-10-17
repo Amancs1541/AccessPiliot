@@ -334,6 +334,8 @@ async def activate_joiner(session: AsyncSession, joiner_id: UUID, request_id: st
         return
     outcome = {"granted": await evaluate_birthright_policies(session, person_id, "system:lifecycle", request_id)}
     await record_joiner(session, person_id, "JOINER", outcome, request_id)
+    from app.services.dynamic_groups import evaluate_dynamic_groups_for_user
+    await evaluate_dynamic_groups_for_user(session, person_id, "system:lifecycle", request_id)
     person = await session.get(User, person_id)
     settings = await get_lifecycle_settings(session)
     await _notify_lifecycle(session, person, settings, "LIFECYCLE_JOINER", f"{name} has started ({person.department or 'no department'}): {len([t for t in targets if t['status'] == 'ENABLED'])} account(s) enabled, {len(outcome['granted'])} access item(s) made eligible.")

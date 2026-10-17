@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.providers.base import CreatedUser, IdentityProvider, NewGroupRequest, NewUserRequest, NormalizedApplication, NormalizedApplicationPermission, NormalizedApplicationRole, NormalizedDomain, NormalizedGroup, NormalizedRole, NormalizedUser, ProviderConflictError
+from app.providers.base import CreatedUser, IdentityProvider, NewApplicationRequest, NewGroupRequest, NewUserRequest, NormalizedApplication, NormalizedApplicationPermission, NormalizedApplicationRole, NormalizedDomain, NormalizedGroup, NormalizedRole, NormalizedUser, ProviderConflictError
 from app.providers.graph_client import GraphError
 
 
@@ -100,6 +100,13 @@ class MockProvider(IdentityProvider):
         self.groups.append(group)
         self.memberships.setdefault(group.external_id, set())
         return group
+
+    async def create_application(self, request: NewApplicationRequest) -> NormalizedApplication:
+        if any(application.name.lower() == request.display_name.lower() for application in self.applications):
+            raise ProviderConflictError("A non-human identity with this name already exists.")
+        application = NormalizedApplication(f"app-{len(self.applications) + 1:03d}", request.display_name)
+        self.applications.append(application)
+        return application
 
     async def get_domains(self) -> list[NormalizedDomain]:
         return list(self.domains)

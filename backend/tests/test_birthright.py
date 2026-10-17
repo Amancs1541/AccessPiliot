@@ -929,3 +929,170 @@ async def test_department_policy_returns_soft_warnings_but_still_saves(db_overri
     assert typo.status_code == 201 and len(typo.json()["warnings"]) == 2 and "Departments list" in typo.json()["warnings"][0] and "matches nobody" in typo.json()["warnings"][1]
     assert edited.status_code == 200 and len(edited.json()["warnings"]) == 2
     assert fixed.json()["warnings"] == []
+
+
+# ---------------------------------------------------------------- Dynamic Groups: richer operators + the lens
+
+def _user_for_condition(**kwargs) -> User:
+    return User(provider_id=None, external_id="u", email="u@x.com", display_name="U", status="ACTIVE", **kwargs)
+
+
+@pytest.mark.parametrize("operator,department,value,expected", [
+    ("EQUALS", "Sales", "Sales", True),
+    ("EQUALS", "Sales", "Marketing", False),
+    ("NOT_EQUALS", "Sales", "Marketing", True),
+    ("NOT_EQUALS", "Sales", "Sales", False),
+    ("CONTAINS", "North Sales", "Sales", True),
+    ("CONTAINS", "Marketing", "Sales", False),
+    ("NOT_CONTAINS", "Marketing", "Sales", True),
+    ("STARTS_WITH", "Sales-EU", "Sales", True),
+    ("STARTS_WITH", "EU-Sales", "Sales", False),
+    ("NOT_STARTS_WITH", "EU-Sales", "Sales", True),
+    ("ENDS_WITH", "EU-Sales", "Sales", True),
+    ("ENDS_WITH", "Sales-EU", "Sales", False),
+    ("NOT_ENDS_WITH", "Sales-EU", "Sales", True),
+])
+def test_condition_matches_each_string_operator(operator, department, value, expected):
+    from app.services.birthright import _condition_matches
+    user = _user_for_condition(department=department)
+    assert _condition_matches(user, {"field": "department", "operator": operator, "value": value}) is expected
+
+
+@pytest.mark.parametrize("operator,department,expected", [
+    ("IN", "Sales", True),
+    ("IN", "Engineering", False),
+    ("NOT_IN", "Engineering", True),
+    ("NOT_IN", "Sales", False),
+])
+def test_condition_matches_in_and_not_in(operator, department, expected):
+    from app.services.birthright import _condition_matches
+    user = _user_for_condition(department=department)
+    assert _condition_matches(user, {"field": "department", "operator": operator, "value": ["Sales", "Marketing"]}) is expected
+
+
+@pytest.mark.parametrize("operator", ["EQUALS", "NOT_EQUALS", "CONTAINS", "NOT_CONTAINS", "STARTS_WITH", "ENDS_WITH", "IN", "NOT_IN"])
+def test_condition_never_matches_a_missing_attribute_for_any_operator(operator):
+    """A blank/missing department must never match, including for every *_NOT_* operator — the same safe
+    default the original EQUALS/NOT_EQUALS-only engine already had."""
+    from app.services.birthright import _condition_matches
+    user = _user_for_condition(department=None)
+    value = ["Sales"] if operator in ("IN", "NOT_IN") else "Sales"
+    assert _condition_matches(user, {"field": "department", "operator": operator, "value": value}) is False
+
+
+def test_new_fields_are_matchable_on_a_condition():
+    from app.services.birthright import _condition_matches
+    user = _user_for_condition(department="Sales", employee_id="E-100", employment_type="CONTRACTOR", employee_category="VENDOR")
+    assert _condition_matches(user, {"field": "employee_id", "operator": "STARTS_WITH", "value": "E-"}) is True
+    assert _condition_matches(user, {"field": "employment_type", "operator": "EQUALS", "value": "CONTRACTOR"}) is True
+    assert _condition_matches(user, {"field": "employee_category", "operator": "EQUALS", "value": "VENDOR"}) is True
+
+
+def _dynamic_group_json_policy(group_resource: str, **rule_overrides) -> dict:
+    rule = {"operator": "OR", "conditions": [{"field": "department", "operator": "IN", "value": ["Sales", "Marketing"]}]}
+    rule.update(rule_overrides)
+    return {
+        "policyId": "BR-DG-001", "policyType": "BIRTHRIGHT", "name": "Dynamic: Sales or Marketing",
+        "rule": rule,
+        "actions": [{"action": "ASSIGN", "resourceType": "GROUP", "resource": group_resource}],
+        "reconciliation": {"enabled": True, "removeWhenConditionFails": True},
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_in_operator_group_policy_grants_and_later_revokes_on_mismatch(db_override):
+    """Regression guard + new-operator coverage in one: an IN-based GROUP policy must grant and later
+    auto-revoke exactly as a plain EQUALS-only policy already does — this is pure extension, not a behavior
+    change for the existing engine."""
+    group_id = await _seed_group(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/policies/birthright/json", json=_dynamic_group_json_policy(group_id))
+
+    async with db_override.factory() as session:
+        provider_id = (await session.scalars(select(IdentityProvider.id))).first()
+        user = User(provider_id=provider_id, external_id="u-dyn", email="dyn@x.com", display_name="Dyn User", status="ACTIVE", department="Sales")
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+
+        from app.services.birthright import evaluate_birthright_policies, reconcile_birthright_policies_for_user
+        granted = await evaluate_birthright_policies(session, user.id, "admin-oid", "req-dyn-1")
+        assert len(granted) == 1
+
+        user.department = "Engineering"  # no longer matches the IN list
+        await session.commit()
+        outcome = await reconcile_birthright_policies_for_user(session, user.id, "admin-oid", "req-dyn-2")
+        assert outcome["revoked"] == granted
+
+
+@pytest.mark.asyncio
+async def test_dynamic_groups_lens_lists_only_group_targeting_policies(db_override):
+    group_id = await _seed_group(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/policies/birthright/json", json=_dynamic_group_json_policy(group_id))
+        await client.post("/api/v1/policies/birthright", json={"name": "Non-group policy", "match_field": "department", "match_value": "IT", "resource_type": "ROLE", "resource_id": group_id})  # wrong type on purpose
+        listed = await client.get("/api/v1/policies/birthright/dynamic-groups")
+    assert listed.status_code == 200
+    assert [p["name"] for p in listed.json()] == ["Dynamic: Sales or Marketing"]
+
+
+@pytest.mark.asyncio
+async def test_group_dynamic_rules_endpoint_returns_the_governing_policy(db_override):
+    group_id = await _seed_group(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/policies/birthright/json", json=_dynamic_group_json_policy(group_id))
+        rules = await client.get(f"/api/v1/groups/{group_id}/dynamic-rules")
+        other_group_id = await _seed_group(db_override.factory)
+        no_rules = await client.get(f"/api/v1/groups/{other_group_id}/dynamic-rules")
+    assert rules.status_code == 200 and len(rules.json()) == 1 and rules.json()[0]["name"] == "Dynamic: Sales or Marketing"
+    assert no_rules.status_code == 200 and no_rules.json() == []
+
+
+@pytest.mark.asyncio
+async def test_groups_list_and_detail_flag_is_dynamic_correctly(db_override):
+    group_id = await _seed_group(db_override.factory)
+    plain_group_id = await _seed_group(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/policies/birthright/json", json=_dynamic_group_json_policy(group_id))
+        listed = await client.get("/api/v1/groups")
+        detail_dynamic = await client.get(f"/api/v1/groups/{group_id}")
+        detail_plain = await client.get(f"/api/v1/groups/{plain_group_id}")
+    by_id = {g["id"]: g["is_dynamic"] for g in listed.json()}
+    assert by_id[group_id] is True
+    assert by_id[plain_group_id] is False
+    assert detail_dynamic.json()["is_dynamic"] is True
+    assert detail_plain.json()["is_dynamic"] is False
+
+
+@pytest.mark.asyncio
+async def test_disabling_the_policy_un_flags_the_group_as_dynamic(db_override):
+    group_id = await _seed_group(db_override.factory)
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/policies/birthright/json", json=_dynamic_group_json_policy(group_id))
+        await client.put(f"/api/v1/policies/birthright/{created.json()['id']}/json", json={**_dynamic_group_json_policy(group_id), "status": "DISABLED"})
+        detail = await client.get(f"/api/v1/groups/{group_id}")
+    assert detail.json()["is_dynamic"] is False
+
+
+@pytest.mark.asyncio
+async def test_preview_counts_currently_matching_users_without_granting_anything(db_override):
+    group_id = await _seed_group(db_override.factory)
+    async with db_override.factory() as session:
+        provider_id = (await session.scalars(select(IdentityProvider.id))).first()
+        session.add_all([
+            User(provider_id=provider_id, external_id="u-p1", email="p1@x.com", display_name="P1", status="ACTIVE", department="Sales"),
+            User(provider_id=provider_id, external_id="u-p2", email="p2@x.com", display_name="P2", status="ACTIVE", department="Marketing"),
+            User(provider_id=provider_id, external_id="u-p3", email="p3@x.com", display_name="P3", status="ACTIVE", department="Engineering"),
+        ])
+        await session.commit()
+    authenticate_as("AccessPilot.Admin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        preview = await client.post("/api/v1/policies/birthright/preview", json={"rule": {"operator": "OR", "conditions": [{"field": "department", "operator": "IN", "value": ["Sales", "Marketing"]}]}})
+        assignments_before = await client.get("/api/v1/policies/birthright/dynamic-groups")
+    assert preview.status_code == 200 and preview.json()["matching_users"] == 2
+    assert assignments_before.json() == []  # confirms preview never actually saved/granted anything

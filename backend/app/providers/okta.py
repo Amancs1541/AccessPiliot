@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 
-from app.providers.base import CreatedUser, IdentityProvider, NewGroupRequest, NewUserRequest, NormalizedApplication, NormalizedApplicationPermission, NormalizedApplicationRole, NormalizedDomain, NormalizedGroup, NormalizedRole, NormalizedUser, ProviderConflictError
+from app.providers.base import CreatedUser, IdentityProvider, NewApplicationRequest, NewGroupRequest, NewUserRequest, NormalizedApplication, NormalizedApplicationPermission, NormalizedApplicationRole, NormalizedDomain, NormalizedGroup, NormalizedRole, NormalizedUser, ProviderConflictError
 from app.providers.graph_client import GraphError
 from app.providers.okta_client import OktaClient
 from app.security.credential_encryption import CredentialEncryptionError, decrypt_credential
@@ -343,6 +343,9 @@ class OktaProvider(IdentityProvider):
                 profile["description"] = request.description
             response = await client.request("POST", "/groups", json={"profile": profile})
         return self._group_from_okta(response.json())
+
+    async def create_application(self, request: NewApplicationRequest) -> NormalizedApplication:
+        return await self._not_implemented()
 
     async def get_domains(self) -> list[NormalizedDomain]:
         async with self._client() as client:

@@ -178,6 +178,89 @@ class NhiRiskException(Base):
     __table_args__ = (Index("ix_nhi_risk_exceptions_app_type", "application_id", "risk_type"),)
 
 
+class NhiNotificationSettings(Base):
+    """Singleton row (same get-or-create-on-first-read pattern as SodNotificationSettings/SecuritySettings)
+    controlling whether/when reconcile_nhi_notifications() (see app.services.nhi_notifications) creates an
+    NhiNotification row. All three toggles default True (this app's "the feature should visibly work once built"
+    convention); the expiry threshold mirrors SodNotificationSettings.exception_expiring_warning_days and
+    REPLACES nhi.py's previously-fixed CREDENTIAL_EXPIRING_SOON_WINDOW_DAYS constant — the default (30) preserves
+    today's exact behavior."""
+    __tablename__ = "nhi_notification_settings"
+    id: Mapped[UUID] = uuid_pk()
+    notify_on_no_owner: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
+    notify_on_credential_expiring: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
+    credential_expiring_warning_days: Mapped[int] = mapped_column(Integer, nullable=False, default=30, server_default="30")
+    notify_on_credential_expired: Mapped[bool] = mapped_column(nullable=False, default=True, server_default="true")
+    updated_at: Mapped[datetime] = updated_at()
+
+
+class NhiNotification(Base):
+    """The shared NHI risk notification log — same shape and same reasoning as SodNotification (genuinely stored
+    so "we already told the NHIAdmin team about this" survives across reconciliation passes). owner_user_id is
+    set only for CREDENTIAL_EXPIRING/CREDENTIAL_EXPIRED (where there's a specific person to also personally
+    notify via the generic app.services.notifications.create_notification() helper) and stays NULL for
+    NO_OWNER (nobody specific to tell — shared-log visibility only, same reasoning the SOC/SoD dashboards already
+    use for team-wide signals). resolved_at is set once the underlying risk flag stops being true."""
+    __tablename__ = "nhi_notifications"
+    id: Mapped[UUID] = uuid_pk()
+    notification_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    application_id: Mapped[UUID] = mapped_column(ForeignKey("applications.id"), nullable=False)
+    owner_user_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    read_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = created_at()
+    __table_args__ = (Index("ix_nhi_notifications_open", "notification_type", "application_id", "owner_user_id", "resolved_at"),)
+
+
+class NhiReviewCampaign(Base):
+    """A periodic "does this NHI still need this owner" attestation run — deliberately a SMALL, PARALLEL model to
+    AccessReviewCampaign, not a fork of it: AccessReviewItem.assignment_id is a required FK representing "access
+    to revoke," which doesn't fit "ownership to confirm." Reuses the same organizing shape (reviewer/fallback/
+    recurring) at a much smaller scale — v1 scope is always "every NHI with an owner at creation time," no rich
+    scope_type like the human Access Review engine has (a stated v2 cut, not built now). frequency_days NULL
+    means one-time; set means a fresh campaign is spawned (same scope/reviewer) frequency_days after this one
+    completes, linked via parent_campaign_id — see app.services.nhi_reviews."""
+    __tablename__ = "nhi_review_campaigns"
+    id: Mapped[UUID] = uuid_pk(); name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Exactly one of reviewer_id / workflow_definition_id is set (see NhiReviewCampaignCreate's validator) — a
+    # campaign always needs something deciding it. When workflow-routed, fallback_reviewer_id/fallback_unlock_hours
+    # stay NULL (the workflow has its own per-stage fallback/escalation instead) — same shape as
+    # AccessReviewCampaign's identical reviewer-xor-workflow split.
+    reviewer_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
+    fallback_reviewer_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); fallback_unlock_hours: Mapped[Optional[int]] = mapped_column(Integer)
+    workflow_definition_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("workflow_definitions.id"))
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVE", server_default="ACTIVE")
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    frequency_days: Mapped[Optional[int]] = mapped_column(Integer)
+    parent_campaign_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("nhi_review_campaigns.id"))
+    created_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = created_at(); completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (Index("ix_nhi_review_campaigns_status", "status"),)
+
+
+class NhiReviewItem(Base):
+    """One row per currently-owned NHI swept into a campaign at snapshot time. owner_user_id is a denormalized
+    copy of the ownership as of the snapshot (so the line item still displays correctly even if that ownership
+    is later removed — e.g. by the Leaver path, see app.services.lifecycle.run_leaver) — decision CONFIRMED never
+    touches ApplicationOwner at all (certifying existing ownership isn't the same as (re)granting it); decision
+    OWNER_REMOVED calls the same, unmodified app.services.nhi.remove_owner() every other owner-removal path
+    already uses. OWNER_REMOVED_LEAVER is set automatically (never by a reviewer) when the Leaver path removes
+    the same ownership this item was still PENDING a decision on."""
+    __tablename__ = "nhi_review_items"
+    id: Mapped[UUID] = uuid_pk(); campaign_id: Mapped[UUID] = mapped_column(ForeignKey("nhi_review_campaigns.id"), nullable=False)
+    application_id: Mapped[UUID] = mapped_column(ForeignKey("applications.id"), nullable=False)
+    owner_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    decision: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING", server_default="PENDING")
+    decided_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id")); decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    # Set only when the owning campaign is workflow-routed — one independent WorkflowInstance per item, same as
+    # AccessReviewItem.workflow_instance_id. Direct decide_item() calls are refused while this is set; the item is
+    # only ever decided via that instance's own stage decisions (see app.services.workflows._apply_nhi_review_item_outcome).
+    workflow_instance_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("workflow_instances.id"))
+    created_at: Mapped[datetime] = created_at()
+    __table_args__ = (Index("ix_nhi_review_items_campaign", "campaign_id"),)
+
+
 class UserGroup(Base):
     __tablename__ = "user_groups"
     id: Mapped[UUID] = uuid_pk(); user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False); group_id: Mapped[UUID] = mapped_column(ForeignKey("groups.id"), nullable=False); source: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -210,6 +293,11 @@ class AccessAssignment(Base):
     # Engine (see app.services.workflows) instead of a single approver/fallback — approved_by/fallback_approver_id
     # stay NULL in that case, since there is no single approver, the workflow's own stages are the approval.
     workflow_instance_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("workflow_instances.id"))
+    # Same provenance-tag idea again: set only when this assignment was created/is maintained by Dynamic Groups'
+    # own enrollment engine (see app.services.dynamic_groups) — never by a manual grant. Lets that engine find
+    # and revoke/promote/demote exactly the assignments it itself made, the same safety rail birthright_policy_id
+    # already gives reconcile_birthright_policies_for_user.
+    dynamic_group_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("dynamic_groups.id"))
     activated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True)); created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at(); __table_args__ = (Index("ix_access_assignments_user", "user_id"), Index("ix_access_assignments_status", "status"), Index("ix_access_assignments_expiration", "expiration_time"), Index("ix_access_assignments_role_assignment", "role_assignment_id"))
 
 
@@ -773,6 +861,45 @@ class BirthrightPolicy(Base):
     @property
     def actions_count(self) -> int:
         return len(self.actions_json) if self.actions_json else (1 if self.resource_type else 0)
+
+
+class DynamicGroup(Base):
+    """A native AccessPilot group whose membership is computed by AccessPilot's own rule engine (see
+    app.services.dynamic_groups) rather than being manually assigned — reuses the exact same condition
+    evaluator as BirthrightPolicy's advanced/JSON mode (app.services.birthright.matches_conditions), but is its
+    own first-class entity: creating one creates no real group anywhere by itself, only a DynamicGroupTarget row
+    per connected provider (see below), each independently toggled on."""
+    __tablename__ = "dynamic_groups"
+    id: Mapped[UUID] = uuid_pk(); name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True); description: Mapped[Optional[str]] = mapped_column(Text)
+    # Same STANDARD/PRIVILEGED/custom concept as Group.group_label — propagated to every real group this
+    # creates (see _ensure_real_group), same as the plain "Add group" form already does for a manually-created one.
+    group_label: Mapped[Optional[str]] = mapped_column(String(100))
+    conditions_json: Mapped[list] = mapped_column(JSON, nullable=False)
+    conditions_operator: Mapped[str] = mapped_column(String(10), nullable=False, default="AND", server_default="AND")
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="ACTIVE", server_default="ACTIVE")
+    created_by: Mapped[Optional[UUID]] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at()
+
+
+class DynamicGroupTarget(Base):
+    """One connected provider's sync state for one DynamicGroup — auto-created (sync_mode='OFF') for every
+    connected provider the moment the DynamicGroup itself is created, so the per-provider control is visible
+    right away without a separate provider-picker step."""
+    __tablename__ = "dynamic_group_targets"
+    id: Mapped[UUID] = uuid_pk(); dynamic_group_id: Mapped[UUID] = mapped_column(ForeignKey("dynamic_groups.id", ondelete="CASCADE"), nullable=False)
+    provider_id: Mapped[UUID] = mapped_column(ForeignKey("identity_providers.id"), nullable=False)
+    # Reuses AccessAssignment's own status vocabulary rather than inventing new terms:
+    #   OFF      — not synced to this provider; no real group exists yet (or sync was turned back off — the real
+    #              group and whatever membership it already has are left exactly as they are).
+    #   ELIGIBLE — a real group exists; a matching user gets a real ELIGIBLE AccessAssignment, activated later
+    #              exactly like any other resource (today's normal JIT model).
+    #   ACTIVE   — a real group exists; a matching user is pushed in as a real member immediately. The UI calls
+    #              this "Direct Assignment" (the user's own term); the stored value stays ACTIVE for consistency
+    #              with every other assignment status in this app.
+    sync_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="OFF", server_default="OFF")
+    group_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("groups.id"))
+    created_at: Mapped[datetime] = created_at(); updated_at: Mapped[datetime] = updated_at()
+    __table_args__ = (UniqueConstraint("dynamic_group_id", "provider_id", name="uq_dynamic_group_targets_group_provider"),)
 
 
 class Department(Base):

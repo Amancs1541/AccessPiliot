@@ -231,3 +231,14 @@
 .ts-log-level.ts-error { color:var(--crit); background:var(--ts-crit-dim); }
 .ts-log-time { color:var(--ts-faint); white-space:nowrap; }
 @media (max-width:1000px) { .ts-grid-2 { grid-template-columns:1fr; } }
+
+/* Printing an NHI identity as a PDF report (Download PDF report button, via window.print()) — hides the app
+   shell and any interactive controls (.no-print), keeps the panels as a plain, paginated document. */
+@media print {
+  .sidebar, .topbar, .no-print { display:none !important; }
+  .main { margin:0; }
+  .content { padding:0; max-width:none; }
+  .grid-2 { grid-template-columns:1fr; gap:14px; }
+  .panel { border:1px solid #ccc; box-shadow:none; break-inside:avoid; margin-bottom:14px; }
+  .table-wrap { overflow:visible; }
+}

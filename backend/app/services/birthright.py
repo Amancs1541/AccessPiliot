@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import AccessPilotError
 from app.models import AccessAssignment, AccessPackage, AccessPackageAssignment, AccessPackageItem, Application, BirthrightPolicy, BusinessRole, BusinessRoleItem, Group, Role, User
 from app.schemas.assignments import AssignmentCreate
-from app.schemas.policies import BirthrightActionJson, BirthrightPolicyCreate, BirthrightPolicyJson, BirthrightPolicyUpdate
+from app.schemas.policies import BirthrightActionJson, BirthrightPolicyCreate, BirthrightPolicyJson, BirthrightPolicyUpdate, BirthrightRuleJson
 from app.services.assignments import _resolve_target, create_assignment, revoke_assignment
 from app.services.audit import record_audit
 
@@ -18,8 +18,22 @@ NON_FINAL_ASSIGNMENT_STATUSES = ("REJECTED", "REVOKED", "EXPIRED")
 # The JSON rule engine's condition "field" values (the requested schema's own names, e.g. "employmentStatus")
 # mapped to the real User attribute they read — a small, explicit allowlist rather than a raw getattr(user,
 # field), so an unrecognized field name is a clear 400 at save time, not a rule that silently never matches.
-CONDITION_FIELD_MAP = {"department": "department", "job_title": "job_title", "employmentStatus": "status", "status": "status", "email": "email"}
-CONDITION_OPERATORS = ("EQUALS", "NOT_EQUALS")
+CONDITION_FIELD_MAP = {
+    "department": "department", "job_title": "job_title", "employmentStatus": "status", "status": "status", "email": "email",
+    # Added for Dynamic Groups (richer attribute set, modeled on Entra's own dynamic-membership-rule property
+    # list, but evaluated here against AccessPilot's own synced User columns — never against Entra itself).
+    "employee_id": "employee_id", "employment_type": "employment_type", "employee_category": "employee_category",
+    # manager_id is AccessPilot-internal org-hierarchy, not synced to/from Entra's own `manager` relationship —
+    # a plain `manager_id EQUALS <id>` condition is this app's equivalent of Entra's special-cased
+    # "Direct Reports for" rule, with no new syntax needed.
+    "manager_id": "manager_id",
+}
+# IN/NOT_IN compare against a list of values (BirthrightConditionJson.value is a list for these two, a plain
+# string for every other operator — see schemas/policies.py). The rest are single-value string comparisons,
+# modeled directly on Entra's own dynamic-membership-rule operator vocabulary (-contains/-startsWith/-endsWith),
+# just evaluated here against one already-loaded User row instead of by Entra's own rule engine.
+CONDITION_OPERATORS = ("EQUALS", "NOT_EQUALS", "CONTAINS", "NOT_CONTAINS", "STARTS_WITH", "NOT_STARTS_WITH", "ENDS_WITH", "NOT_ENDS_WITH", "IN", "NOT_IN")
+_LIST_VALUED_OPERATORS = ("IN", "NOT_IN")
 ACTION_RESOURCE_TYPES = ("GROUP", "ROLE", "APPLICATION", "PACKAGE", "BUSINESS_ROLE")
 
 
@@ -121,19 +135,45 @@ async def _grant_birthright_target(session: AsyncSession, user: User, policy: Bi
 
 def _condition_matches(user: User, condition: dict) -> bool:
     attr_name = CONDITION_FIELD_MAP.get(condition["field"])
-    user_value = getattr(user, attr_name, None) if attr_name else None
-    if not user_value:
+    raw_value = getattr(user, attr_name, None) if attr_name else None
+    if not raw_value:  # a missing/blank attribute never matches, for ANY operator (including a *_NOT_* one)
         return False
-    equal = user_value.strip().lower() == str(condition["value"]).strip().lower()
-    return equal if condition["operator"] == "EQUALS" else not equal
+    user_value = str(raw_value).strip().lower()
+    operator = condition["operator"]
+    value = condition["value"]
+    if operator in _LIST_VALUED_OPERATORS:
+        wanted = {str(item).strip().lower() for item in value}
+        is_in = user_value in wanted
+        return is_in if operator == "IN" else not is_in
+    target = str(value).strip().lower()
+    if operator in ("EQUALS", "NOT_EQUALS"):
+        equal = user_value == target
+        return equal if operator == "EQUALS" else not equal
+    if operator in ("CONTAINS", "NOT_CONTAINS"):
+        found = target in user_value
+        return found if operator == "CONTAINS" else not found
+    if operator in ("STARTS_WITH", "NOT_STARTS_WITH"):
+        found = user_value.startswith(target)
+        return found if operator == "STARTS_WITH" else not found
+    if operator in ("ENDS_WITH", "NOT_ENDS_WITH"):
+        found = user_value.endswith(target)
+        return found if operator == "ENDS_WITH" else not found
+    return False
+
+
+def matches_conditions(user: User, conditions: list[dict], operator: str) -> bool:
+    """Combines per-condition _condition_matches results via AND/OR — the one shared evaluator behind the
+    advanced-policy branch of _policy_matches_user below, the rule-builder's count_users_matching_rule preview,
+    and Dynamic Groups' own matching (app.services.dynamic_groups) — kept here, not duplicated a third time."""
+    results = [_condition_matches(user, condition) for condition in conditions]
+    return (all(results) if (operator or "AND") == "AND" else any(results)) if results else False
 
 
 def _policy_matches_user(user: User, policy: BirthrightPolicy) -> bool:
     """Advanced (JSON) policies evaluate their AND/OR condition list; a legacy policy keeps its original single
     department/job_title equality check, byte-for-byte unchanged."""
     if policy.conditions_json:
-        results = [_condition_matches(user, condition) for condition in policy.conditions_json]
-        return all(results) if (policy.conditions_operator or "AND") == "AND" else any(results)
+        return matches_conditions(user, policy.conditions_json, policy.conditions_operator)
     user_value = getattr(user, policy.match_field, None) if policy.match_field else None
     return bool(user_value) and bool(policy.match_value) and user_value.strip().lower() == policy.match_value.strip().lower()
 
@@ -425,18 +465,27 @@ async def resolve_action_resources(session: AsyncSession, actions: list[Birthrig
     return results
 
 
-def _validate_json_payload(payload: BirthrightPolicyJson) -> None:
-    if payload.policyType != "BIRTHRIGHT":
-        raise AccessPilotError("VALIDATION_ERROR", "policyType must be \"BIRTHRIGHT\" — this endpoint doesn't support any other policy type.", 400)
-    if payload.rule.operator not in ("AND", "OR"):
+def _validate_rule(rule: BirthrightRuleJson) -> None:
+    """Shared by the full policy validator below and the rule-builder's standalone preview endpoint (which has
+    no actions/name/scope to validate yet — just the rule itself)."""
+    if rule.operator not in ("AND", "OR"):
         raise AccessPilotError("VALIDATION_ERROR", "rule.operator must be \"AND\" or \"OR\".", 400)
-    for condition in payload.rule.conditions:
+    for condition in rule.conditions:
         if condition.field not in CONDITION_FIELD_MAP:
             raise AccessPilotError("VALIDATION_ERROR", f"Unsupported condition field '{condition.field}'. Supported: {sorted(CONDITION_FIELD_MAP)}.", 400)
         if condition.operator not in CONDITION_OPERATORS:
             raise AccessPilotError("VALIDATION_ERROR", f"Unsupported condition operator '{condition.operator}'. Supported: {', '.join(CONDITION_OPERATORS)}.", 400)
-        if not condition.value.strip():
+        if condition.operator in _LIST_VALUED_OPERATORS:
+            if not isinstance(condition.value, list) or not condition.value or any(not str(item).strip() for item in condition.value):
+                raise AccessPilotError("VALIDATION_ERROR", f"The '{condition.operator}' operator needs a non-empty list of non-empty values.", 400)
+        elif not isinstance(condition.value, str) or not condition.value.strip():
             raise AccessPilotError("VALIDATION_ERROR", "Every condition needs a non-empty value.", 400)
+
+
+def _validate_json_payload(payload: BirthrightPolicyJson) -> None:
+    if payload.policyType != "BIRTHRIGHT":
+        raise AccessPilotError("VALIDATION_ERROR", "policyType must be \"BIRTHRIGHT\" — this endpoint doesn't support any other policy type.", 400)
+    _validate_rule(payload.rule)
     for action in payload.actions:
         if action.action != "ASSIGN":
             raise AccessPilotError("VALIDATION_ERROR", "Only the \"ASSIGN\" action is supported — birthright policies only ever grant, never revoke directly (see reconciliation.enabled for automatic removal).", 400)
@@ -466,7 +515,7 @@ async def _build_fields_from_json(session: AsyncSession, payload: BirthrightPoli
         "status": payload.status,
         "external_policy_id": (payload.policyId or "").strip() or None,
         "scope_identity_type": payload.scope.identityType,
-        "conditions_json": [{"field": c.field, "operator": c.operator, "value": c.value.strip()} for c in payload.rule.conditions],
+        "conditions_json": [{"field": c.field, "operator": c.operator, "value": ([str(item).strip() for item in c.value] if isinstance(c.value, list) else c.value.strip())} for c in payload.rule.conditions],
         "conditions_operator": payload.rule.operator,
         "actions_json": actions_json,
         "reconciliation_enabled": bool(payload.reconciliation.enabled),
@@ -555,3 +604,55 @@ async def to_birthright_policy_json(session: AsyncSession, policy: BirthrightPol
         reconciliation={"enabled": policy.reconciliation_enabled, "removeWhenConditionFails": policy.reconciliation_enabled},
         audit={"enabled": True},
     )
+
+
+# ---------------------------------------------------------------- "Dynamic Groups": a lens over the same policies
+# A Dynamic Group is not a new table — it's simply a Birthright Policy with at least one GROUP action. These
+# helpers give the Groups page a group-centric read without duplicating any grant/revoke/reconcile logic above.
+
+def _policy_targets_group(policy: BirthrightPolicy, group_id: Optional[UUID] = None) -> bool:
+    for spec in _policy_action_specs(policy):
+        if spec["resource_type"] != "GROUP":
+            continue
+        if group_id is None:
+            return True
+        spec_id = spec["resource_id"] if isinstance(spec["resource_id"], UUID) else UUID(str(spec["resource_id"]))
+        if spec_id == group_id:
+            return True
+    return False
+
+
+async def list_dynamic_group_policies(session: AsyncSession) -> list[BirthrightPolicy]:
+    """Every policy that grants at least one GROUP — the 'Dynamic Groups' list view."""
+    return [policy for policy in await list_birthright_policies(session) if _policy_targets_group(policy)]
+
+
+async def list_dynamic_group_rules_for_group(session: AsyncSession, group_id: UUID) -> list[BirthrightPolicy]:
+    """Every policy that grants membership in this specific group. A group's membership can be governed by more
+    than one active policy at once (e.g. two separate department rules instead of one combined OR rule), so this
+    returns all of them rather than assuming there's only ever one."""
+    return [policy for policy in await list_birthright_policies(session) if _policy_targets_group(policy, group_id)]
+
+
+async def dynamic_group_ids(session: AsyncSession) -> set[UUID]:
+    """Every Group id currently governed by at least one ACTIVE, GROUP-targeting policy — one batch lookup for
+    the Groups catalog's 'membership managed automatically' badge, instead of an N+1 per-group policy fetch."""
+    ids: set[UUID] = set()
+    for policy in await list_birthright_policies(session):
+        if policy.status != "ACTIVE":
+            continue
+        for spec in _policy_action_specs(policy):
+            if spec["resource_type"] != "GROUP":
+                continue
+            ids.add(spec["resource_id"] if isinstance(spec["resource_id"], UUID) else UUID(str(spec["resource_id"])))
+    return ids
+
+
+async def count_users_matching_rule(session: AsyncSession, rule: BirthrightRuleJson) -> int:
+    """Read-only preview for the rule builder — how many currently-synced NORMAL users would match this rule
+    right now, without granting or touching anything. Mirrors _policy_matches_user's own condition evaluation
+    exactly, just against a not-yet-saved rule rather than a persisted policy."""
+    _validate_rule(rule)
+    conditions = [{"field": c.field, "operator": c.operator, "value": c.value} for c in rule.conditions]
+    users = (await session.execute(select(User).where(User.account_type == "NORMAL"))).scalars().all()
+    return sum(1 for user in users if matches_conditions(user, conditions, rule.operator))

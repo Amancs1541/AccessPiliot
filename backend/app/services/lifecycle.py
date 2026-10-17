@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy import func
 
-from app.models import AccessAssignment, AccessReviewCampaign, AccessReviewItem, Group, IdentityProvider, LeaverPolicy, LifecycleEvent, LifecycleSettings, PendingMove, User, UserGroup
+from app.models import AccessAssignment, AccessReviewCampaign, AccessReviewItem, ApplicationOwner, Group, IdentityProvider, LeaverPolicy, LifecycleEvent, LifecycleSettings, PendingMove, User, UserGroup
 from app.schemas.access_reviews import AccessReviewCampaignCreate
 from app.services.access_reviews import _matching_assignments, create_campaign
 from app.core.errors import AccessPilotError
@@ -265,6 +265,8 @@ async def apply_move(session: AsyncSession, move: PendingMove, request_id: str) 
     await session.commit()
     outcome = await reconcile_birthright_policies_for_user(session, user.id, "system:lifecycle", request_id)
     event = await record_mover(session, user.id, build_changes(before, {"department": new_department, "job_title": new_job_title}), move.source, outcome, request_id)
+    from app.services.dynamic_groups import evaluate_dynamic_groups_for_user
+    await evaluate_dynamic_groups_for_user(session, user.id, "system:lifecycle", request_id)
     move.status, move.applied_at = "APPLIED", datetime.now(timezone.utc)
     move.lifecycle_event_id = event.id if event else None
     await record_audit(session, action="LIFECYCLE_MOVE_APPLIED", target_type="USER", target_id=user.id, request_id=request_id, metadata={"effective_at": move.effective_at.isoformat(), "source": move.source})
@@ -451,6 +453,30 @@ async def _remove_group_memberships(session: AsyncSession, user: User, request_i
     return removed
 
 
+async def _remove_nhi_ownerships(session: AsyncSession, user: User, request_id: str) -> int:
+    """Removes the Leaver's accountability for every non-human identity they owned — NOT access-policy-gated
+    (unlike group-membership removal above), since a stale ownership record pointing at a disabled person is
+    never something worth keeping regardless of the leaver policy's other settings. Deliberately does NOT
+    reassign to anyone else (no sensible default exists, e.g. no NHI equivalent of an org-chart manager) —
+    removing it is the honest move: the identity correctly re-surfaces as NO_OWNER afterward (a real, visible
+    state), rather than silently pointing at a disabled account forever. Also auto-resolves any still-PENDING
+    NhiReviewItem naming this exact (application, owner) pair, so it doesn't sit forever awaiting a decision
+    from someone no longer an owner. One identity failing never blocks the rest."""
+    from app.services.nhi import remove_owner
+    from app.services.nhi_reviews import auto_resolve_items_for_removed_owner
+
+    application_ids = list((await session.scalars(select(ApplicationOwner.application_id).where(ApplicationOwner.user_id == user.id))).all())
+    removed = 0
+    for application_id in application_ids:
+        try:
+            await auto_resolve_items_for_removed_owner(session, application_id, user.id, request_id)
+            await remove_owner(session, application_id, user.id, None, request_id)
+            removed += 1
+        except AccessPilotError:
+            continue
+    return removed
+
+
 async def run_leaver(session: AsyncSession, user_id: UUID, source: str, actor_subject: str, request_id: str, *, skip_revoke: bool = False, skip_privileged: bool = False, already_revoked: int = 0, skip_provider_ids: Optional[set] = None) -> Optional[LifecycleEvent]:
     """THE leaver process — the only path. Applies the person's leaver policy: revoke all AccessPilot access, disable
     linked PU/TU accounts, disable their account in every connected IdP (forced, because AccessPilot's own status can
@@ -478,6 +504,7 @@ async def run_leaver(session: AsyncSession, user_id: UUID, source: str, actor_su
             except AccessPilotError:
                 continue
     groups_removed = await _remove_group_memberships(session, user, request_id) if policy_groups else 0
+    nhi_ownerships_removed = await _remove_nhi_ownerships(session, user, request_id)
     linked_disabled = await disable_linked_accounts_for_leaver(session, person_id, "system:lifecycle", request_id) if (policy_priv and not skip_privileged) else 0
     account_results: list[dict] = []
     if policy_disable:
@@ -491,7 +518,7 @@ async def run_leaver(session: AsyncSession, user_id: UUID, source: str, actor_su
     settings = await get_lifecycle_settings(session)
     event = LifecycleEvent(
         user_id=person_id, event_type="LEAVER", source=source, revoked_count=revoked, granted_count=0, review_note="ACCOUNT_DISABLE_FAILED" if failed else None,
-        changes={"status": {"from": "ACTIVE", "to": "DISABLED"}, "policy": policy_name, "linked_accounts_disabled": linked_disabled, "groups_removed": groups_removed, "accounts": account_results, "delete_after_days": policy_delete_days},
+        changes={"status": {"from": "ACTIVE", "to": "DISABLED"}, "policy": policy_name, "linked_accounts_disabled": linked_disabled, "groups_removed": groups_removed, "nhi_ownerships_removed": nhi_ownerships_removed, "accounts": account_results, "delete_after_days": policy_delete_days},
     )
     session.add(event)
     await session.flush()
@@ -501,8 +528,9 @@ async def run_leaver(session: AsyncSession, user_id: UUID, source: str, actor_su
     text += f"; FAILED in {', '.join(r['provider'] for r in failed)}" if failed else ""
     text += f"; {linked_disabled} linked privileged/test account(s) disabled" if linked_disabled else ""
     text += f"; removed from {groups_removed} group(s)" if groups_removed else ""
+    text += f"; {nhi_ownerships_removed} non-human identity ownership(s) removed" if nhi_ownerships_removed else ""
     event.notified_user_ids = await _notify_lifecycle(session, user, settings, "LIFECYCLE_LEAVER", text + f". Policy: {policy_name}.")
-    await record_audit(session, action="LIFECYCLE_LEAVER_RUN", target_type="USER", target_id=person_id, request_id=request_id, metadata={"source": source, "policy": policy_name, "revoked": revoked, "accounts": account_results, "linked_accounts_disabled": linked_disabled, "groups_removed": groups_removed})
+    await record_audit(session, action="LIFECYCLE_LEAVER_RUN", target_type="USER", target_id=person_id, request_id=request_id, metadata={"source": source, "policy": policy_name, "revoked": revoked, "accounts": account_results, "linked_accounts_disabled": linked_disabled, "groups_removed": groups_removed, "nhi_ownerships_removed": nhi_ownerships_removed})
     await session.commit()
     await session.refresh(event)
     return event

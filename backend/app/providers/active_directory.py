@@ -50,7 +50,7 @@ from ldap3.core.exceptions import LDAPBindError, LDAPException, LDAPResponseTime
 from ldap3.utils.conv import escape_filter_chars
 from ldap3.utils.dn import escape_rdn
 
-from app.providers.base import CreatedUser, IdentityProvider, NewGroupRequest, NewUserRequest, NormalizedApplication, NormalizedApplicationPermission, NormalizedDomain, NormalizedGroup, NormalizedRole, NormalizedUser, ProviderConflictError
+from app.providers.base import CreatedUser, IdentityProvider, NewApplicationRequest, NewGroupRequest, NewUserRequest, NormalizedApplication, NormalizedApplicationPermission, NormalizedDomain, NormalizedGroup, NormalizedRole, NormalizedUser, ProviderConflictError
 from app.providers.graph_client import GraphError
 from app.security.credential_encryption import CredentialEncryptionError, decrypt_credential
 
@@ -544,6 +544,9 @@ class ActiveDirectoryProvider(IdentityProvider):
             return _group_from_entry(connection.entries[0])
         finally:
             connection.unbind()
+
+    async def create_application(self, request: NewApplicationRequest) -> NormalizedApplication:
+        return await self._not_implemented()
 
     async def get_domains(self) -> list[NormalizedDomain]:
         return await self._not_implemented()

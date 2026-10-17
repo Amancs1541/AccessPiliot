@@ -10,10 +10,13 @@ from app.db.session import get_db
 from app.providers.base import NewGroupRequest, ProviderConflictError
 from app.providers.graph_client import GraphError
 from app.schemas.directory import ApplicationResponse, GroupAccessSummary, GroupCreate, GroupResponse, RoleResponse, UserAccessSummary, UserAttributeUpdate, UserResponse
+from app.schemas.policies import BirthrightPolicyJson
 from app.schemas.privileged_accounts import LinkedAccountResponse, SetEnabledRequest
 from app.schemas.user_hierarchy import UserHierarchyNode, UserHierarchyUpdate
 from app.security.auth import AuthenticatedUser, require_authenticated_user, require_permission
+from app.services import birthright as birthright_service
 from app.services import directory_read
+from app.services import dynamic_groups as dynamic_groups_service
 from app.services import privileged_accounts as privileged_accounts_service
 from app.services import user_hierarchy as user_hierarchy_service
 from app.services.audit import record_audit
@@ -131,9 +134,20 @@ async def update_user_hierarchy(user_id: UUID, data: UserHierarchyUpdate, reques
     return await user_hierarchy_service.update_user_hierarchy(db, user_id, data, actor_id, request.state.request_id)
 
 
+async def _mark_dynamic(db: AsyncSession, responses: list[GroupResponse]) -> list[GroupResponse]:
+    dynamic_ids = await birthright_service.dynamic_group_ids(db)
+    owners = await dynamic_groups_service.group_owner_map(db)
+    for response in responses:
+        response.is_dynamic = response.id in dynamic_ids
+        owner = owners.get(response.id)
+        if owner is not None:
+            response.dynamic_group_id, response.dynamic_group_name = owner.id, owner.name
+    return responses
+
+
 @router.get("/groups", response_model=list[GroupResponse])
 async def groups(q: str | None = Query(default=None), _: AuthenticatedUser = Depends(group_read), db: AsyncSession = Depends(get_db)):
-    return await directory_read.label_groups_with_provider(db, await directory_read.list_groups(db, q))
+    return await _mark_dynamic(db, await directory_read.label_groups_with_provider(db, await directory_read.list_groups(db, q)))
 
 
 @router.get("/groups/owned", response_model=list[GroupResponse])
@@ -154,7 +168,16 @@ async def owner_update_group(group_id: UUID, data: GroupOwnerSelfServiceUpdate, 
 @router.get("/groups/{group_id}", response_model=GroupResponse)
 async def group_detail(group_id: UUID, _: AuthenticatedUser = Depends(group_read), db: AsyncSession = Depends(get_db)):
     labeled = await directory_read.label_groups_with_provider(db, [await directory_read.get_group(db, group_id)])
-    return labeled[0]
+    return (await _mark_dynamic(db, labeled))[0]
+
+
+@router.get("/groups/{group_id}/dynamic-rules", response_model=list[BirthrightPolicyJson])
+async def group_dynamic_rules(group_id: UUID, _: AuthenticatedUser = Depends(group_read), db: AsyncSession = Depends(get_db)):
+    """Every Birthright Policy that grants membership in this group — a Dynamic Group's governing rule(s),
+    read-only, in the same JSON shape the rule-builder UI already uses for any birthright policy."""
+    await directory_read.get_group(db, group_id)  # 404s if the group itself doesn't exist
+    policies = await birthright_service.list_dynamic_group_rules_for_group(db, group_id)
+    return [await birthright_service.to_birthright_policy_json(db, policy) for policy in policies]
 
 
 @router.get("/groups/{group_id}/owners", response_model=list[GroupOwnerInfo])

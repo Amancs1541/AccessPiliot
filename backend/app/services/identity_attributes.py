@@ -64,4 +64,6 @@ async def apply_user_attribute_change(session: AsyncSession, user_id: UUID, depa
         outcome = await reconcile_birthright_policies_for_user(session, user.id, actor_subject, request_id)
         from app.services.lifecycle import build_changes, record_mover
         await record_mover(session, user.id, build_changes(previous_attributes, {"department": user.department, "job_title": user.job_title}), "ADMIN_EDIT", outcome, request_id)
+        from app.services.dynamic_groups import evaluate_dynamic_groups_for_user
+        await evaluate_dynamic_groups_for_user(session, user.id, actor_subject, request_id)
     return user

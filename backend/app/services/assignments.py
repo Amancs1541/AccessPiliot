@@ -224,7 +224,7 @@ async def _supersede_existing_assignment(session: AsyncSession, *, user_id: UUID
     await session.commit()
 
 
-async def create_assignment(session: AsyncSession, data, actor_subject: str, request_id: str, check_sod_at_creation: bool = False, birthright_policy_id: Optional[UUID] = None, group_role_mapping_id: Optional[UUID] = None, business_role_id: Optional[UUID] = None, role_assignment_id: Optional[UUID] = None) -> tuple[AccessAssignment, dict]:
+async def create_assignment(session: AsyncSession, data, actor_subject: str, request_id: str, check_sod_at_creation: bool = False, birthright_policy_id: Optional[UUID] = None, group_role_mapping_id: Optional[UUID] = None, business_role_id: Optional[UUID] = None, role_assignment_id: Optional[UUID] = None, dynamic_group_id: Optional[UUID] = None) -> tuple[AccessAssignment, dict]:
     target_user = await session.get(User, data.user_id)
     if not target_user:
         raise AccessPilotError("USER_NOT_FOUND", "The user was not found.", 404)
@@ -323,6 +323,7 @@ async def create_assignment(session: AsyncSession, data, actor_subject: str, req
         group_role_mapping_id=group_role_mapping_id,
         business_role_id=business_role_id,
         role_assignment_id=role_assignment_id,
+        dynamic_group_id=dynamic_group_id,
         activated_at=now if status == "ACTIVE" else None,
     )
     session.add(assignment)

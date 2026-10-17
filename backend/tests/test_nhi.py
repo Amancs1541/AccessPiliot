@@ -347,3 +347,48 @@ async def test_permissions_are_live_fetched_and_role_names_resolved_against_a_sy
         response = await client.get(f"/api/v1/nhi/{application_id}/permissions")
     assert response.status_code == 200
     assert response.json() == [{"resource_display_name": "Microsoft Graph", "role_name": "Mail.Read"}]
+
+
+@pytest.mark.asyncio
+async def test_directory_activity_is_live_fetched_from_the_providers_own_audit_log(db_override, monkeypatch):
+    from datetime import datetime, timezone as tz
+    from app.providers.base import NormalizedDirectoryActivity
+
+    seeded = await _seed(db_override.factory)
+    async with db_override.factory() as session:
+        application = Application(provider_id=seeded["provider_id"], external_id="sp-1", name="Internal Reporting Service", status="ACTIVE", app_roles=[], nhi_type="SERVICE_PRINCIPAL")
+        session.add(application)
+        await session.commit()
+        application_id = application.id
+
+    async def fake_get_directory_activity(self, external_id):
+        return [NormalizedDirectoryActivity(timestamp=datetime(2026, 10, 10, 8, 15, tzinfo=tz.utc), activity="Update application – Certificates and secrets management", actor="Alex Admin", result="success", detail=None)]
+
+    monkeypatch.setattr("app.providers.entra.EntraProvider.get_directory_activity", fake_get_directory_activity)
+
+    authenticate_as("AccessPilot.NHIAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/nhi/{application_id}/directory-activity")
+    assert response.status_code == 200
+    assert response.json() == [{"timestamp": "2026-10-10T08:15:00Z", "activity": "Update application – Certificates and secrets management", "actor": "Alex Admin", "result": "success", "detail": None}]
+
+
+@pytest.mark.asyncio
+async def test_directory_activity_fails_cleanly_when_the_provider_does_not_support_it(db_override):
+    """Active Directory/Okta/the mock connector don't implement get_directory_activity — this must surface as a
+    clean 422, never a 500 or a silently empty list, same PROVIDER_OPERATION_NOT_SUPPORTED contract
+    register_new_identity already uses for its own not-yet-built connector operations."""
+    seeded = await _seed(db_override.factory)
+    async with db_override.factory() as session:
+        provider = await session.get(IdentityProvider, seeded["provider_id"])
+        provider.type = "MOCK"
+        application = Application(provider_id=seeded["provider_id"], external_id="sp-1", name="Internal Reporting Service", status="ACTIVE", app_roles=[], nhi_type="SERVICE_PRINCIPAL")
+        session.add(application)
+        await session.commit()
+        application_id = application.id
+
+    authenticate_as("AccessPilot.NHIAdmin")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/v1/nhi/{application_id}/directory-activity")
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "PROVIDER_OPERATION_NOT_SUPPORTED"

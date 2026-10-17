@@ -456,3 +456,26 @@ async def test_mine_and_pending_my_decision_lists_are_scoped_correctly(db_overri
         approver_pending = (await client.get("/api/v1/workflows/requests/pending-my-decision")).json()
     assert len(approver_pending) == 1 and approver_pending[0]["id"] == submitted["id"]
     assert approver_pending[0]["can_decide"] is True
+
+
+@pytest.mark.parametrize("operator,actual,value,expected", [
+    ("EQUALS", "Sales", "Sales", True),
+    ("NOT_EQUALS", "Sales", "Marketing", True),
+    ("CONTAINS", "North Sales", "Sales", True),
+    ("NOT_CONTAINS", "Marketing", "Sales", True),
+    ("STARTS_WITH", "Sales-EU", "Sales", True),
+    ("NOT_STARTS_WITH", "EU-Sales", "Sales", True),
+    ("ENDS_WITH", "EU-Sales", "Sales", True),
+    ("NOT_ENDS_WITH", "Sales-EU", "Sales", True),
+])
+def test_workflow_condition_matches_mirrors_birthrights_operator_set(operator, actual, value, expected):
+    """Parity guard: workflows._condition_matches must support the same string-operator vocabulary as
+    birthright._condition_matches (IN/NOT_IN excepted — see that function's own docstring)."""
+    from app.services.workflows import _condition_matches
+    assert _condition_matches({"department": actual}, "department", operator, value) is expected
+
+
+@pytest.mark.parametrize("operator", ["EQUALS", "NOT_EQUALS", "CONTAINS", "NOT_CONTAINS", "STARTS_WITH", "ENDS_WITH"])
+def test_workflow_condition_never_matches_a_missing_payload_value(operator):
+    from app.services.workflows import _condition_matches
+    assert _condition_matches({}, "department", operator, "Sales") is False

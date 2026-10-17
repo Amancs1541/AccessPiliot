@@ -171,14 +171,30 @@ async def delete_workflow_definition(session: AsyncSession, definition_id: UUID,
 # ---------------------------------------------------------------- the engine itself: instances and stages
 
 def _condition_matches(payload: dict, field: str, operator: str, value: str) -> bool:
-    """Mirrors app.services.birthright._condition_matches exactly: a missing/falsy payload value can never match,
-    for EITHER operator — the safe default that stops a NOT_EQUALS condition from silently matching data that was
-    never actually provided."""
+    """Mirrors app.services.birthright._condition_matches's string-operator set (EQUALS/NOT_EQUALS/CONTAINS/
+    STARTS_WITH/ENDS_WITH and their negations) so the two engines' rule languages don't silently drift apart —
+    IN/NOT_IN are deliberately not mirrored here, since a workflow stage's condition_value is a single plain-
+    string DB column with no list-value support (unlike birthright's JSON conditions_json). A missing/falsy
+    payload value can never match, for ANY operator — the safe default that stops a *_NOT_* condition from
+    silently matching data that was never actually provided."""
     actual = (payload or {}).get(field)
     if not actual:
         return False
-    equal = str(actual).strip().lower() == str(value).strip().lower()
-    return equal if operator == "EQUALS" else not equal
+    actual_norm = str(actual).strip().lower()
+    target = str(value).strip().lower()
+    if operator in ("EQUALS", "NOT_EQUALS"):
+        equal = actual_norm == target
+        return equal if operator == "EQUALS" else not equal
+    if operator in ("CONTAINS", "NOT_CONTAINS"):
+        found = target in actual_norm
+        return found if operator == "CONTAINS" else not found
+    if operator in ("STARTS_WITH", "NOT_STARTS_WITH"):
+        found = actual_norm.startswith(target)
+        return found if operator == "STARTS_WITH" else not found
+    if operator in ("ENDS_WITH", "NOT_ENDS_WITH"):
+        found = actual_norm.endswith(target)
+        return found if operator == "ENDS_WITH" else not found
+    return False
 
 
 async def _advance(session: AsyncSession, instance: WorkflowInstance, stage_defs: list[WorkflowStageDefinition], from_stage_number: int, subject_label: str) -> None:
@@ -311,6 +327,49 @@ async def _apply_access_review_item_outcome(session: AsyncSession, instance: Wor
             await _maybe_spawn_recurrence(session, campaign, request_id)
 
 
+async def _apply_nhi_review_item_outcome(session: AsyncSession, instance: WorkflowInstance, actor_id: Optional[UUID], request_id: str) -> None:
+    """The NHI_REVIEW_ITEM branch: mirrors app.services.nhi_reviews.decide_item's own two outcomes exactly —
+    APPROVED confirms the ownership (no-op on ApplicationOwner); REJECTED calls the same, unmodified
+    app.services.nhi.remove_owner() every other owner-removal path already uses. CANCELLED (no owning-campaign
+    early-closure sweep exists for NHI reviews yet, unlike Access Review's complete_campaign — so this only
+    happens if someone cancels the instance directly) conservatively leaves ownership alone (CONFIRMED) rather
+    than risk silently removing an owner nobody actually decided to remove. A no-op if the item was already
+    decided some other way in the meantime. Local imports throughout, same circular-import convention used
+    everywhere else in this module."""
+    from app.models import Application, NhiReviewCampaign, NhiReviewItem
+    item = await session.get(NhiReviewItem, instance.subject_id)
+    if item is None or item.decision != "PENDING":
+        return
+    campaign = await session.get(NhiReviewCampaign, item.campaign_id)
+
+    if instance.status == "APPROVED":
+        item.decision = "CONFIRMED"
+    elif instance.status == "REJECTED":
+        item.decision = "OWNER_REMOVED"
+    else:  # CANCELLED
+        item.decision = "CONFIRMED"
+
+    if item.decision == "OWNER_REMOVED":
+        from app.services.nhi import remove_owner
+        await remove_owner(session, item.application_id, item.owner_user_id, actor_id, request_id)
+
+    item.decided_by = actor_id
+    item.decided_at = datetime.now(timezone.utc)
+    await record_audit(session, action="NHI_REVIEW_ITEM_DECIDED", target_type="NHI_REVIEW_ITEM", target_id=item.id, actor_user_id=actor_id, request_id=request_id, metadata={"decision": item.decision, "campaign_id": str(item.campaign_id), "via_workflow": True})
+    if campaign is not None:
+        if campaign.created_by is not None and campaign.created_by != actor_id:
+            application = await session.get(Application, item.application_id)
+            verb = "confirmed" if item.decision == "CONFIRMED" else "removed"
+            await create_notification(session, campaign.created_by, "NHI_REVIEW_ITEM_DECIDED", f"An item in \"{campaign.name}\" was {verb}: ownership of {application.name if application else 'an identity'}.", link=f"/admin/nhi/reviews")
+        from app.services.nhi_reviews import _maybe_spawn_recurrence, campaign_progress
+        total, decided = await campaign_progress(session, campaign.id)
+        if decided >= total and campaign.status == "ACTIVE":
+            campaign.status = "COMPLETED"
+            campaign.completed_at = datetime.now(timezone.utc)
+            await session.commit()
+            await _maybe_spawn_recurrence(session, campaign, request_id)
+
+
 async def _apply_subject_outcome(session: AsyncSession, instance: WorkflowInstance, actor_id: Optional[UUID], request_id: str) -> None:
     """Dispatches a finished instance's outcome (APPROVED/REJECTED/CANCELLED) to whatever it's actually governing.
     A no-op for any subject_type with no branch below (e.g. the standalone WORKFLOW_REQUEST self-service pilot,
@@ -323,6 +382,8 @@ async def _apply_subject_outcome(session: AsyncSession, instance: WorkflowInstan
         await _apply_user_attribute_outcome(session, instance, actor_id, request_id)
     elif instance.subject_type == "ACCESS_REVIEW_ITEM":
         await _apply_access_review_item_outcome(session, instance, actor_id, request_id)
+    elif instance.subject_type == "NHI_REVIEW_ITEM":
+        await _apply_nhi_review_item_outcome(session, instance, actor_id, request_id)
 
 
 async def start_workflow_instance(session: AsyncSession, definition: WorkflowDefinition, requester_id: UUID, payload: dict, subject_type: str, subject_label: str, subject_id: Optional[UUID] = None) -> WorkflowInstance:
@@ -399,6 +460,14 @@ async def _resolve_subject_details(session: AsyncSession, instance: WorkflowInst
             resource_name = await _resolve_display_name(session, item.resource_type, item.resource_id, item.app_role_external_id)
             return f"Review: {resource_name or item.resource_type} for {target.display_name if target else 'Unknown user'}", None, None, item.campaign_id, "📋 Access Review"
         return "Access review item", None, None, None, None
+    if instance.subject_type == "NHI_REVIEW_ITEM" and instance.subject_id is not None:
+        from app.models import Application, NhiReviewItem
+        item = await session.get(NhiReviewItem, instance.subject_id)
+        if item is not None:
+            application = await session.get(Application, item.application_id)
+            owner = await session.get(User, item.owner_user_id)
+            return f"NHI ownership: {application.name if application else 'Unknown identity'} ({owner.display_name if owner else 'Unknown user'})", None, None, item.campaign_id, "🤖 NHI Review"
+        return "NHI ownership review item", None, None, None, None
     workflow_request = (await session.scalars(select(WorkflowRequest).where(WorkflowRequest.workflow_instance_id == instance.id))).first()
     if workflow_request is not None:
         return workflow_request.title, workflow_request.description, workflow_request.justification, None, None
@@ -534,14 +603,14 @@ async def decide_stage(session: AsyncSession, instance_id: UUID, stage_instance_
     if finalize_as == "REJECTED":
         instance.status = "REJECTED"
         instance.completed_at = datetime.now(timezone.utc)
-        if instance.subject_type not in ("ASSIGNMENT", "USER_ATTRIBUTES", "ACCESS_REVIEW_ITEM") and instance.requested_by != actor_id:
+        if instance.subject_type not in ("ASSIGNMENT", "USER_ATTRIBUTES", "ACCESS_REVIEW_ITEM", "NHI_REVIEW_ITEM") and instance.requested_by != actor_id:
             title = await _resolve_subject_label(session, instance)
             await create_notification(session, instance.requested_by, "WORKFLOW_REQUEST_REJECTED", f'Your request "{title}" was rejected.', link="/workflow-requests")
     else:
         stage_defs = list((await session.scalars(select(WorkflowStageDefinition).where(WorkflowStageDefinition.workflow_definition_id == instance.workflow_definition_id).order_by(WorkflowStageDefinition.stage_number))).all())
         subject_label = await _resolve_subject_label(session, instance)
         await _advance(session, instance, stage_defs, from_stage_number=stage_instance.stage_number + 1, subject_label=subject_label)
-        if instance.status == "APPROVED" and instance.subject_type not in ("ASSIGNMENT", "USER_ATTRIBUTES", "ACCESS_REVIEW_ITEM") and instance.requested_by != actor_id:
+        if instance.status == "APPROVED" and instance.subject_type not in ("ASSIGNMENT", "USER_ATTRIBUTES", "ACCESS_REVIEW_ITEM", "NHI_REVIEW_ITEM") and instance.requested_by != actor_id:
             await create_notification(session, instance.requested_by, "WORKFLOW_REQUEST_APPROVED", f'Your request "{subject_label}" was approved.', link="/workflow-requests")
 
     if instance.status in ("APPROVED", "REJECTED"):

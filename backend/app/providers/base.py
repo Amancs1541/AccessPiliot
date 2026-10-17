@@ -80,6 +80,19 @@ class NormalizedApplication:
 
 
 @dataclass(frozen=True)
+class NormalizedDirectoryActivity:
+    """One real, provider-recorded audit event for an identity — straight from the provider's own directory
+    audit log, distinct from AccessPilot's own activity log (app.services.nhi.get_activity). Not synced/stored,
+    fetched live on demand for the NHI detail page, same "live from IdP, on-demand" pattern as
+    NormalizedApplicationPermission."""
+    timestamp: datetime
+    activity: str
+    actor: str | None
+    result: str
+    detail: str | None = None
+
+
+@dataclass(frozen=True)
 class NormalizedDomain:
     name: str
     is_verified: bool = False
@@ -125,6 +138,15 @@ class NewGroupRequest:
 
 
 @dataclass(frozen=True)
+class NewApplicationRequest:
+    """Registering a brand-new NHI directly in AccessPilot (see app.services.nhi.register_new_identity), instead
+    of only ever sync-discovering one. Deliberately minimal — nhi_type and ownership are AccessPilot-internal
+    concerns the service layer applies to the local row after a real connector-side create succeeds, not
+    something the connector itself needs to know about."""
+    display_name: str
+
+
+@dataclass(frozen=True)
 class CreatedUser:
     user: NormalizedUser
     temporary_password: str | None = None
@@ -163,6 +185,13 @@ class IdentityProvider(ABC):
         """Optional and irreversible (Entra keeps a deleted user recoverable for 30 days). Same default contract as
         set_user_manager."""
         raise NotImplementedError("This directory does not support deleting users.")
+
+    async def get_directory_activity(self, external_id: str) -> list[NormalizedDirectoryActivity]:
+        """Optional: live directory-audit activity for this identity straight from the provider's own audit log
+        (e.g. secret additions, role grants, enablement changes it recorded itself) — distinct from AccessPilot's
+        own activity log. Connectors that cannot do this keep this default, treated as 'not supported here',
+        never as a failure, same contract as set_user_manager/delete_user above."""
+        raise NotImplementedError("This directory does not support live directory activity.")
 
     @abstractmethod
     async def get_groups(self, query: str | None = None) -> list[NormalizedGroup]: ...
@@ -221,6 +250,15 @@ class IdentityProvider(ABC):
 
     @abstractmethod
     async def create_group(self, request: NewGroupRequest) -> NormalizedGroup: ...
+
+    @abstractmethod
+    async def create_application(self, request: NewApplicationRequest) -> NormalizedApplication:
+        """Registers a brand-new NHI directly at the provider (see app.services.nhi.register_new_identity) — the
+        Entra implementation needs Application.ReadWrite.All, the same write scope set_application_enabled
+        already documents as not confirmed granted; not every connector supports this (see each implementation's
+        own docstring for what it actually does, vs. raising NotImplementedError the same way every other
+        not-yet-built IAM operation on this interface already does)."""
+        ...
 
     @abstractmethod
     async def get_domains(self) -> list[NormalizedDomain]:

@@ -57,6 +57,64 @@ def test_the_earliest_of_several_credentials_is_used_for_expiry():
     assert mapped.credential_expires_at.year == 2026
 
 
+def test_app_registration_credentials_are_merged_in_when_the_service_principal_has_none():
+    """Confirmed live against a real tenant: a service principal's own passwordCredentials/keyCredentials can
+    come back completely empty ([]) even though its matching Application (App Registration) object has real,
+    unexpired secrets — Entra's "Certificates & secrets" blade manages the App Registration, not the Service
+    Principal. Without this merge, a real identity with real secrets would wrongly show "not tracked"."""
+    mapped = EntraProvider._application_from_graph(
+        {"id": "sp4", "displayName": "App", "accountEnabled": True, "appId": "app-4", "passwordCredentials": [], "keyCredentials": []},
+        app_registration_credentials={"app-4": EntraProvider._credentials_list({"passwordCredentials": [{"displayName": "Real Secret", "endDateTime": "2027-04-11T21:40:41.467Z"}], "keyCredentials": []})},
+    )
+    assert mapped.credential_expires_at is not None and mapped.credential_expires_at.year == 2027
+    assert [c.display_name for c in mapped.credentials] == ["Real Secret"]
+
+
+@pytest.mark.asyncio
+async def test_get_applications_fetches_and_merges_app_registration_credentials(monkeypatch):
+    """End-to-end: get_applications() must call BOTH /servicePrincipals and /applications and merge by appId —
+    not just the service-principal-only read it used before this fix."""
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/oauth2/v2.0/token"):
+            return token_response()
+        calls.append(request.url.path)
+        if request.url.path.endswith("/servicePrincipals"):
+            return httpx.Response(200, json={"value": [{"id": "sp5", "displayName": "Real App", "accountEnabled": True, "appId": "app-5", "passwordCredentials": [], "keyCredentials": [], "servicePrincipalType": "Application"}]})
+        if request.url.path.endswith("/applications"):
+            return httpx.Response(200, json={"value": [{"appId": "app-5", "passwordCredentials": [{"displayName": "Portal Secret", "endDateTime": "2027-02-19T16:10:19.978Z"}], "keyCredentials": []}]})
+        raise AssertionError(f"Unexpected request: {request.url.path}")
+
+    install_transport(monkeypatch, handler)
+    results = await EntraProvider(provider_row()).get_applications()
+    assert any(path.endswith("/servicePrincipals") for path in calls)
+    assert any(path.endswith("/applications") for path in calls)
+    assert len(results) == 1
+    assert results[0].credential_expires_at is not None and results[0].credential_expires_at.year == 2027
+    assert [c.display_name for c in results[0].credentials] == ["Portal Secret"]
+
+
+@pytest.mark.asyncio
+async def test_get_applications_still_works_if_the_app_registration_read_fails(monkeypatch):
+    """Fail-open: a denied/erroring /applications read must never break the sync — just fall back to whatever
+    the service principal itself reports, same as before this fix."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/oauth2/v2.0/token"):
+            return token_response()
+        if request.url.path.endswith("/servicePrincipals"):
+            return httpx.Response(200, json={"value": [{"id": "sp6", "displayName": "App", "accountEnabled": True, "appId": "app-6", "passwordCredentials": [], "keyCredentials": [], "servicePrincipalType": "Application"}]})
+        if request.url.path.endswith("/applications"):
+            return httpx.Response(403, json={"error": {"code": "Authorization_RequestDenied", "message": "Insufficient privileges."}})
+        raise AssertionError(f"Unexpected request: {request.url.path}")
+
+    install_transport(monkeypatch, handler)
+    results = await EntraProvider(provider_row()).get_applications()
+    assert len(results) == 1
+    assert results[0].credential_expires_at is None
+    assert results[0].credentials == ()
+
+
 @pytest.mark.asyncio
 async def test_set_application_enabled_sends_a_patch_with_the_requested_state(monkeypatch):
     seen = {}
@@ -89,6 +147,46 @@ async def test_get_application_permissions_maps_app_role_assignments(monkeypatch
     assert len(permissions) == 1
     assert permissions[0].resource_display_name == "Microsoft Graph"
     assert permissions[0].role_name == "role-guid-1"
+
+
+def test_parse_graph_timestamp_handles_more_than_six_fractional_digits():
+    """Confirmed live against the real tenant: /auditLogs/directoryAudits returns activityDateTime with 7-digit
+    fractional seconds, which Python's datetime.fromisoformat (pre-3.11) rejects outright — only exactly 3 or 6
+    digits are accepted. This real value crashed get_directory_activity before the fix."""
+    from app.providers.entra import _parse_graph_timestamp
+    parsed = _parse_graph_timestamp("2026-10-14T14:06:30.3436009+00:00")
+    assert parsed.year == 2026 and parsed.month == 10 and parsed.day == 14
+    assert parsed.microsecond == 343600
+
+
+@pytest.mark.asyncio
+async def test_get_directory_activity_filters_by_target_resource_and_maps_fields(monkeypatch):
+    """Confirms get_directory_activity queries /auditLogs/directoryAudits filtered by the identity's own object
+    id (not sign-ins, which need Azure AD Premium P1/P2 this tenant doesn't have) and maps initiatedBy/result
+    fields correctly. Confirmed live against the real tenant: this endpoint rejects $count/ConsistencyLevel
+    outright (400 "Query option 'Count' is not allowed"), unlike /servicePrincipals and friends — so, unlike
+    every other $filter call in this connector, no $count param and no ConsistencyLevel header here."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/oauth2/v2.0/token"):
+            return token_response()
+        seen["path"] = request.url.path
+        seen["filter"] = request.url.params.get("$filter")
+        seen["count"] = request.url.params.get("$count")
+        return httpx.Response(200, json={"value": [
+            {"activityDisplayName": "Update application – Certificates and secrets management", "activityDateTime": "2026-10-10T08:15:00Z", "initiatedBy": {"user": {"displayName": "Alex Admin"}}, "result": "success", "resultReason": None},
+            {"activityDisplayName": "Update application", "activityDateTime": "2026-10-09T08:15:00Z", "initiatedBy": {"app": {"displayName": "Some Automation"}}, "result": "failure", "resultReason": "Insufficient privileges"},
+        ]})
+
+    install_transport(monkeypatch, handler)
+    events = await EntraProvider(provider_row()).get_directory_activity("sp-123")
+    assert seen["path"].endswith("/auditLogs/directoryAudits")
+    assert "sp-123" in seen["filter"]
+    assert seen["count"] is None
+    assert len(events) == 2
+    assert events[0].actor == "Alex Admin" and events[0].result == "success" and events[0].detail is None
+    assert events[1].actor == "Some Automation" and events[1].result == "failure" and events[1].detail == "Insufficient privileges"
 
 
 @pytest.mark.asyncio

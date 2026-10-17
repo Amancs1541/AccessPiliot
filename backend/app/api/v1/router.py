@@ -34,6 +34,7 @@ from app.api.v1.business_roles import router as business_roles_router
 from app.api.v1.workflows import router as workflows_router
 from app.api.v1.entitlement_catalog import router as entitlement_catalog_router
 from app.api.v1.hr_integration import router as hr_integration_router
+from app.api.v1.dynamic_groups import router as dynamic_groups_router
 
 logger = logging.getLogger("accesspilot.api.v1")
 router = APIRouter(prefix="/api/v1")
@@ -43,6 +44,7 @@ router.include_router(audit_router)
 router.include_router(packages_router)
 router.include_router(onboarding_router)
 router.include_router(policies_router)
+router.include_router(dynamic_groups_router)
 router.include_router(setup_router)
 router.include_router(auth_router)
 router.include_router(breakglass_console_router)

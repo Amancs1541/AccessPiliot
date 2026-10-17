@@ -320,18 +320,21 @@ async def commit_import(session: AsyncSession, import_id: UUID, actor_subject: s
         # provisioned account. This matches the rest of AccessPilot's custom PIM model consistently: birthright
         # decides WHAT a joiner is entitled to, but the person (or an Admin on their behalf) still has to
         # self-activate it via My Access, exactly like every other eligible grant in the app.
+        from app.services.dynamic_groups import evaluate_dynamic_groups_for_user
         if previous_attributes is not None and previous_attributes != (identity.department, identity.job_title, identity.status, (identity.email or "").lower()):
             outcome = await reconcile_birthright_policies_for_user(session, identity.id, actor_subject, request_id)
             birthright_assignments_created += len(outcome["granted"])
             birthright_assignments_revoked += len(outcome["revoked"])
             from app.services.lifecycle import build_changes, record_mover
             await record_mover(session, identity.id, build_changes(previous_values, {"department": identity.department, "job_title": identity.job_title}), "CSV", outcome, request_id)
+            await evaluate_dynamic_groups_for_user(session, identity.id, actor_subject, request_id)
         else:
             joiner_grants = await evaluate_birthright_policies(session, identity.id, actor_subject, request_id)
             birthright_assignments_created += len(joiner_grants)
             if previous is None:
                 from app.services.lifecycle import record_joiner
                 await record_joiner(session, identity.id, "CSV", {"granted": joiner_grants}, request_id)
+            await evaluate_dynamic_groups_for_user(session, identity.id, actor_subject, request_id)
         if newly_provisioned:
             real_accounts_provisioned += 1
 

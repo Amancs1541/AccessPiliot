@@ -62,6 +62,14 @@ class GroupResponse(BaseModel):
     # classification (Standard/Privileged/custom), not the sync source.
     provider_type: Optional[str] = None
     provider_name: Optional[str] = None
+    # True when at least one ACTIVE Birthright Policy grants this group (see
+    # app.services.birthright.dynamic_group_ids) — membership is computed by that rule, not by manual request.
+    is_dynamic: bool = False
+    # Set when this specific group was created BY a Dynamic Group's own sync (see
+    # app.services.dynamic_groups.group_owner_map) — the first-class "native Dynamic Group" concept, distinct
+    # from is_dynamic above (a plain Birthright Policy that just happens to grant an existing group).
+    dynamic_group_id: Optional[UUID] = None
+    dynamic_group_name: Optional[str] = None
 
 
 class GroupCreate(BaseModel):

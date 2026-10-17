@@ -10,7 +10,9 @@ from app.schemas.assignments import require_justification
 
 WORKFLOW_DEFINITION_STATUSES = ("DRAFT", "ACTIVE", "DISABLED")
 APPROVAL_MODES = ("ANY_OF", "ALL_OF")
-CONDITION_OPERATORS = ("EQUALS", "NOT_EQUALS")
+# Mirrors app.services.birthright.CONDITION_OPERATORS's string-operator set (IN/NOT_IN excluded — see that
+# module's own _condition_matches docstring for why: condition_value here is a single plain-string column).
+CONDITION_OPERATORS = ("EQUALS", "NOT_EQUALS", "CONTAINS", "NOT_CONTAINS", "STARTS_WITH", "NOT_STARTS_WITH", "ENDS_WITH", "NOT_ENDS_WITH")
 INSTANCE_STATUSES = ("PENDING", "APPROVED", "REJECTED", "CANCELLED")
 STAGE_STATUSES = ("PENDING", "SKIPPED", "APPROVED", "REJECTED", "CANCELLED")
 
@@ -22,7 +24,7 @@ class WorkflowStageCreate(BaseModel):
     fallback_approver_ids: Optional[list[UUID]] = None
     escalate_after_hours: Optional[int] = Field(default=None, gt=0)
     condition_field: Optional[str] = Field(default=None, max_length=50)
-    condition_operator: Optional[str] = Field(default=None, pattern="^(EQUALS|NOT_EQUALS)$")
+    condition_operator: Optional[str] = Field(default=None, pattern="^(EQUALS|NOT_EQUALS|CONTAINS|NOT_CONTAINS|STARTS_WITH|NOT_STARTS_WITH|ENDS_WITH|NOT_ENDS_WITH)$")
     condition_value: Optional[str] = Field(default=None, max_length=255)
 
     @model_validator(mode="after")

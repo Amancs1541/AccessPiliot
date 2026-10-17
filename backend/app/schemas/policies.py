@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Union
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -67,7 +67,9 @@ class BirthrightEvaluationResult(BaseModel):
 class BirthrightConditionJson(BaseModel):
     field: str
     operator: str
-    value: str
+    # A plain string for every operator except IN/NOT_IN, which compare against a list of values — see
+    # birthright.py's CONDITION_OPERATORS/_LIST_VALUED_OPERATORS for which is which.
+    value: Union[str, list[str]]
 
 
 class BirthrightActionJson(BaseModel):
@@ -134,6 +136,16 @@ class BirthrightPolicyJson(BaseModel):
     actions: list[BirthrightActionJson] = Field(min_length=1)
     reconciliation: BirthrightReconciliationJson = Field(default_factory=BirthrightReconciliationJson)
     audit: BirthrightAuditJson = Field(default_factory=BirthrightAuditJson)
+
+
+class BirthrightRulePreviewRequest(BaseModel):
+    """The rule-builder's live 'N users would match' preview — just the rule, nothing about actions/scope/name
+    needs to be valid yet, since nothing is saved."""
+    rule: BirthrightRuleJson
+
+
+class BirthrightRulePreviewResponse(BaseModel):
+    matching_users: int
 
 
 class GroupRoleMappingCreate(BaseModel):
